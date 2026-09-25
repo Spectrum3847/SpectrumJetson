@@ -109,13 +109,12 @@
     </div>
     <div class="callout spectrum" style="margin-top:0"><h5>What we found</h5><p>Our starting point was exposure <strong>295</strong>: <strong>33 fps</strong> and 44 ms latency, while the GPU sat idle. We only found the cause by reading the camera's controls directly with <code>v4l2-ctl</code>. Dropping to 83 (8.3 ms) let the camera deliver 120 fps; after that, PhotonVision itself was the limit (chapter 10). Our build now shows milliseconds on the slider, e.g. "Exposure (5.0 ms)" (<code>photonvision-10</code>).</p></div>
   </div>
-  </div><!-- /full: the exposure-in-the-frame lab is in both versions -->
-  <div class="lab">
+  <div class="lab full">
     <div class="lab-head"><span class="tag">Lab</span><h4>Exposure inside the frame</h4></div>
       <p class="how">Drag the exposure setting or press a preset, and watch the frames spread out.</p>
     <div class="timeline"><canvas id="s-tl" aria-label="Timeline of frames: each frame's exposure window inside the 8.3 ms frame period"></canvas></div>
     <div class="ctl" style="margin-top:12px"><label>Exposure setting (UVC units) <output></output></label><input type="range" id="s-tlexp" min="10" max="400" step="1" value="50"></div>
-    <div class="snap" id="s-tlsnap"><button class="btn-sm" data-v="50">50 (ours)</button><button class="btn-sm" data-v="83">83</button><button class="btn-sm" data-v="150">150 (calibration)</button><button class="btn-sm" data-v="295">295<span class="full"> (where we started)</span><span class="short"> (29.5 ms)</span></button></div>
+    <div class="snap" id="s-tlsnap"><button class="btn-sm" data-v="50">50 (ours)</button><button class="btn-sm" data-v="83">83</button><button class="btn-sm" data-v="150">150 (calibration)</button><button class="btn-sm" data-v="295">295 (where we started)</button></div>
     <div class="readout">
       <div><small>Exposure</small><b id="s-tlms"></b></div>
       <div><small>Max frame rate</small><b id="s-tlfps"></b></div>
@@ -123,7 +122,6 @@
     </div>
     <p class="hint">Purple: the shutter is open. The frame can't finish before its exposure does, so long exposures push the next frame back. Simplified: readout overlaps the next exposure, as on global shutter sensors like ours.</p>
   </div>
-  <div class="full">
 
   <h3>Flickering lights</h3>
   <div class="split top full">
