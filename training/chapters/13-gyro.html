@@ -14,8 +14,8 @@
   #gyro .code .k { color: #c4b5fd; }
   #gyro .dials { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   #gyro .lab-grid > *, #gyro .split > * { min-width: 0; }
-  #gyro .todo { display: flex; gap: 8px; align-items: baseline; margin: -4px 0 14px; font: 600 .92rem/1.45 var(--font); color: #efe6ff; }
-  #gyro .todo::before { content: "\1F449"; flex: none; }
+  #gyro .todo {    margin: -4px 0 14px; font: 600 .92rem/1.45 var(--font); color: #efe6ff;  padding-left: 1.6em; text-indent: -1.6em; }
+  #gyro .todo::before { content: "\1F449"; display: inline-block; width: 1.6em; text-indent: 0; flex: none; }
   #gyro canvas.drag { cursor: grab; touch-action: none; }
   #gyro canvas.drag:active, #gyro canvas.dragging { cursor: grabbing; }
   #gyro canvas.tap { cursor: pointer; touch-action: manipulation; }

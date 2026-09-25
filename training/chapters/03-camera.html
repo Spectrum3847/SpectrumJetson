@@ -1,6 +1,6 @@
 <style>
-  #camera .how { margin: -4px 0 14px; font: 600 .9rem var(--font); color: #e9e2ff; display: flex; gap: 8px; align-items: baseline; }
-  #camera .how::before { content: "👆"; }
+  #camera .how { margin: -4px 0 14px; font: 600 .9rem var(--font); color: #e9e2ff;     padding-left: 1.6em; text-indent: -1.6em; }
+  #camera .how::before { content: "👆"; display: inline-block; width: 1.6em; text-indent: 0; }
   @media (max-width: 600px) { #camera .lab .btn-sm, #camera .seg button { min-height: 40px; } #camera .lab input[type=range] { height: 32px; } }
   #camera .cam3d canvas { cursor: grab; } #camera .cam3d canvas:active { cursor: grabbing; }
   #camera .cam3d { position: relative; aspect-ratio: 4 / 3; border-radius: 12px; overflow: hidden; background: radial-gradient(ellipse at 50% 40%, #2a1542, #0e0518 75%); touch-action: none; }
@@ -20,6 +20,8 @@
   #camera .tri { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
   #camera .tri figure { margin: 0; }
   #camera .tri canvas { width: 100%; aspect-ratio: 1; }
+  #camera .rs-ctl { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 22px; margin-top: 14px; }
+  @media (max-width: 600px) { #camera .rs-ctl { grid-template-columns: 1fr; } }
   #camera .tri figcaption { font-size: .8rem; color: var(--lab-muted); margin-top: 6px; text-align: center; }
   @media (max-width: 600px) { #camera .tri { gap: 6px; } #camera .tri figcaption { font-size: .7rem; } }
   #camera .jpeg-views { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 14px; }
@@ -106,20 +108,30 @@
     <div class="callout idea full" style="margin-top:0"><h5>Try it</h5><p>The lab below runs in slow motion. Watch the rolling shutter's scan line crawl down the frame while the scene keeps moving. With the propeller, the blades bend into strange shapes. With the tag, the square leans over.</p></div>
   </div>
 
-  <div class="lab full">
+  </div><!-- /full: the shutter lab is in both versions -->
+  <div class="lab">
     <div class="lab-head"><span class="tag">Lab</span><h4>Two ways to take a picture</h4></div>
-      <p class="how">Pick a scene, then watch the amber scan line build the rolling-shutter photo. Change the speed to see the bending grow.</p>
+      <p class="how">Pick a scene and watch the amber line build the rolling-shutter photo. Then turn up the speed, or turn down the frame rate, and watch the tag lean.</p>
     <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:14px">
-      <div class="seg" id="c-rsmode"><button data-v="prop" class="on">Propeller</button><button data-v="tag">Tag on a spinning robot</button></div>
+      <div class="seg" id="c-rsmode"><button data-v="tag" class="on">Tag on a spinning robot</button><button data-v="prop">Propeller</button></div>
     </div>
     <div class="tri">
       <figure><canvas id="c-rs0" width="200" height="200"></canvas><figcaption>What's really there</figcaption></figure>
       <figure><canvas id="c-rs1" width="200" height="200"></canvas><figcaption>Global shutter photo</figcaption></figure>
       <figure><canvas id="c-rs2" width="200" height="200"></canvas><figcaption>Rolling shutter photo</figcaption></figure>
     </div>
-    <div class="ctl" style="margin-top:14px"><label>Speed <output></output></label><input type="range" id="c-rsspeed" min="0" max="2" step="0.05" value="1"></div>
-    <p class="hint">Slow-motion illustration: the rolling shutter's scan (the amber line) is slowed down along with the motion. Only the ratio between them matters.</p>
+    <div class="rs-ctl">
+      <div class="ctl"><label>How fast it moves <output></output></label><input type="range" id="c-rsspeed" min="0" max="2" step="0.05" value="1"></div>
+      <div class="ctl"><label>Frame rate <output></output></label><input type="range" id="c-rsfps" min="10" max="120" step="1" value="30"><div class="note">Ours: 120 fps. A typical webcam: 30.</div></div>
+    </div>
+    <div class="readout">
+      <div><small>New photo every</small><b id="c-rsper"></b></div>
+      <div><small>Tag moves between photos</small><b id="c-rsmove"></b></div>
+      <div><small>Tag leans in the rolling photo</small><b id="c-rslean"></b></div>
+    </div>
+    <p class="hint">Slow-motion illustration. A rolling-shutter sensor reads its rows one after another over about one frame time, so the faster the frame rate, the faster the scan and the smaller the lean. A global shutter catches every row at the same instant, at any frame rate; a higher frame rate just gives more (and fresher) photos.</p>
   </div>
+  <div class="full">
 
   <figure class="fig yt reveal full">
     <button class="yt-play" type="button" data-yt="dNVtMmLlnoE" aria-label="Play video: Rolling shutter explained, SmarterEveryDay"><img src="https://i.ytimg.com/vi/dNVtMmLlnoE/hqdefault.jpg" alt="" loading="lazy"></button>

@@ -362,3 +362,11 @@ body.mode-full .short { display: none !important; }
   .sc-prog button { width: 14px; height: 14px; }
   .sc-prog { gap: 11px; }
 }
+
+/* Touch screens: every control at least ~40 px tall so it's easy to hit with a finger. */
+@media (pointer: coarse), (max-width: 640px) {
+  input[type=range] { height: 36px; }
+  .seg button, .btn-sm { min-height: 40px; }
+  .topnav .modesw button { min-height: 36px; padding: 6px 12px; }
+  .topnav .menu { min-height: 40px; }
+}

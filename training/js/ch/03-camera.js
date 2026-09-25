@@ -290,12 +290,19 @@ Site.chapter('camera', (root) => {
   })();
 
   /* ── Global vs rolling shutter ─────────────────────────── */
+  // Slow motion. One frame period at 30 fps takes FRAME30 seconds on screen; a rolling-shutter
+  // sensor spends ~90% of each frame reading its rows out, so its scan (and the lean it causes)
+  // shrinks as the frame rate goes up. The global-shutter photo is one instant per frame.
   {
     const N = 100, cvs = [0, 1, 2].map((i) => $('#c-rs' + i)), ctxs = cvs.map((c) => c.getContext('2d'));
     const bufs = [0, 1, 2].map(() => new ImageData(N, N)), small = document.createElement('canvas'); small.width = small.height = N;
     const sctx = small.getContext('2d');
-    let mode = 'prop', speed = 1, tau = 0, scanT = 0;
+    let mode = 'tag', speed = 1, fps = 30, tau = 0, frameT = 0, lastRow = 0;
+    const FRAME30 = 2.0, READ = 0.9, TAG_V = 26, S = 44; // tag speed in image px per unit of scene time; tag size
+    const period = () => (FRAME30 * 30) / fps; // on-screen seconds per frame
     const tagG = Site.tagGrid(3);
+    // the tag sweeps back and forth across the view (the robot turning one way, then back), always fully in view
+    const tagX = (tm) => { const span = N - S - 8, u = ((tm * TAG_V) % (2 * span) + 2 * span) % (2 * span); return 4 + (u < span ? u : 2 * span - u); };
     const scene = (x, y, tm) => {
       if (mode === 'prop') {
         const dx = x - 50, dy = y - 50, rr = Math.hypot(dx, dy), a = Math.atan2(dy, dx) - tm * 2.2;
@@ -303,28 +310,40 @@ Site.chapter('camera', (root) => {
         if (rr < 44 && Math.cos(3 * a) > 0.8 - rr * 0.004) return [244, 239, 255];
         return [26, 10, 43];
       }
-      const X = x - (((tm * 26) % 150) - 25), Y = y - 30, s = 44; // tag slides across as the robot turns
-      if (X >= 0 && X < s && Y >= 0 && Y < s) { const c = tagG[Math.floor((Y / s) * 10)][Math.floor((X / s) * 10)]; return c ? [240, 240, 240] : [10, 10, 10]; }
+      const X = x - tagX(tm), Y = y - 28;
+      if (X >= 0 && X < S && Y >= 0 && Y < S) { const c = tagG[Math.floor((Y / S) * 10)][Math.floor((X / S) * 10)]; return c ? [240, 240, 240] : [10, 10, 10]; }
       return [40, 30, 55];
     };
     const paint = (img, y0, y1, tm, dim) => { for (let y = y0; y < y1; y++) for (let x = 0; x < N; x++) { const [r, g, b] = scene(x + 0.5, y + 0.5, tm), i = (y * N + x) * 4; img.data[i] = r * dim; img.data[i + 1] = g * dim; img.data[i + 2] = b * dim; img.data[i + 3] = 255; } };
     const show = (k, img, line) => {
-      sctx.putImageData(img, 0, 0); const c = ctxs[k], S = cvs[k].width;
-      c.imageSmoothingEnabled = true; c.drawImage(small, 0, 0, S, S);
-      if (line != null) { c.fillStyle = '#f59e0b'; c.fillRect(0, (line / N) * S - 1.5, S, 3); }
+      sctx.putImageData(img, 0, 0); const c = ctxs[k], W = cvs[k].width;
+      c.imageSmoothingEnabled = true; c.drawImage(small, 0, 0, W, W);
+      if (line != null) { c.fillStyle = '#f59e0b'; c.fillRect(0, (line / N) * W - 1.5, W, 3); }
     };
-    Site.seg($('#c-rsmode'), (v) => { mode = v; scanT = 0; paint(bufs[1], 0, N, tau, 1); paint(bufs[2], 0, N, tau, 0.35); });
-    Site.range($('#c-rsspeed'), (v) => (speed = v), (v) => v.toFixed(2) + '×');
-    const SCAN = 1.8, HOLD = 0.9;
-    let lastRow = 0;
+    const readouts = () => {
+      $('#c-rsper').textContent = (1000 / fps).toFixed(1) + ' ms';
+      if (mode === 'tag') {
+        $('#c-rsmove').textContent = (TAG_V * speed * period()).toFixed(0) + ' px';
+        $('#c-rslean').textContent = speed ? (TAG_V * speed * period() * READ * (S / N)).toFixed(1) + ' px' : 'none';
+      } else { $('#c-rsmove').textContent = '–'; $('#c-rslean').textContent = speed ? 'blades bend' : 'none'; }
+    };
+    const restart = () => { frameT = 0; lastRow = 0; paint(bufs[1], 0, N, tau, 1); paint(bufs[2], 0, N, tau, 0.35); readouts(); };
+    Site.seg($('#c-rsmode'), (v) => { mode = v; restart(); });
+    Site.range($('#c-rsspeed'), (v) => { speed = v; readouts(); }, (v) => v.toFixed(2) + '×');
+    Site.range($('#c-rsfps'), (v) => { fps = v; readouts(); }, (v) => v + ' fps');
     Site.loop(cvs[0], (t, dt) => {
       tau += dt * speed;
       paint(bufs[0], 0, N, tau, 1); show(0, bufs[0]);
-      scanT += dt;
-      if (scanT > SCAN + HOLD) { scanT = 0; lastRow = 0; }
-      if (scanT < dt * 1.5 && lastRow === 0) { paint(bufs[1], 0, N, tau, 1); for (let i = 0; i < bufs[2].data.length; i += 4) { bufs[2].data[i] *= 0.35; bufs[2].data[i + 1] *= 0.35; bufs[2].data[i + 2] *= 0.35; } }
-      const row = Math.min(N, Math.floor((scanT / SCAN) * N));
-      if (row > lastRow) { paint(bufs[2], lastRow, row, tau, 1); lastRow = row; }
+      frameT += dt;
+      const P = period(), scan = P * READ;
+      if (frameT >= P) { frameT %= P; lastRow = 0; }
+      if (lastRow === 0) { // a new frame: the global shutter catches everything now; the rolling photo starts over
+        paint(bufs[1], 0, N, tau, 1);
+        for (let i = 0; i < bufs[2].data.length; i += 4) { bufs[2].data[i] *= 0.35; bufs[2].data[i + 1] *= 0.35; bufs[2].data[i + 2] *= 0.35; }
+        lastRow = 1e-9;
+      }
+      const row = Math.min(N, Math.floor((frameT / scan) * N));
+      if (row > lastRow) { paint(bufs[2], Math.floor(lastRow), row, tau, 1); lastRow = row; }
       show(1, bufs[1]); show(2, bufs[2], row < N ? row : null);
     });
   }

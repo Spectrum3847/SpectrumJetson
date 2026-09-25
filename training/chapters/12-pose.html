@@ -31,8 +31,8 @@
   #pose .lab-grid > *, #pose .split > * { min-width: 0; }
   #pose table.data code { overflow-wrap: anywhere; }
   @media (max-width: 600px) { #pose table.data { font-size: .85rem; } #pose table.data code { font-size: .78em; } }
-  #pose .todo { display: flex; gap: 8px; align-items: baseline; margin: -4px 0 14px; font: 600 .92rem/1.45 var(--font); color: #efe6ff; }
-  #pose .todo::before { content: "\1F449"; flex: none; }
+  #pose .todo {    margin: -4px 0 14px; font: 600 .92rem/1.45 var(--font); color: #efe6ff;  padding-left: 1.6em; text-indent: -1.6em; }
+  #pose .todo::before { content: "\1F449"; display: inline-block; width: 1.6em; text-indent: 0; flex: none; }
   #pose canvas.drag { cursor: grab; touch-action: none; }
   #pose canvas.drag:active, #pose canvas.dragging { cursor: grabbing; }
   #pose canvas.tap { cursor: pointer; touch-action: manipulation; }

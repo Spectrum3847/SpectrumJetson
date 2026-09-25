@@ -37,8 +37,8 @@
   #calibration .yt-play::after { content: "▶"; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 72px; height: 50px; border-radius: 14px; background: var(--accent); color: #fff; font-size: 22px; display: grid; place-items: center; box-shadow: 0 6px 20px rgba(0,0,0,.35); }
   #calibration .yt-play:hover::after, #calibration .yt-play:focus-visible::after { background: var(--p800); }
   #calibration .yt .video-embed { display: block; border-radius: 0; box-shadow: none; }
-  #calibration .todo { display: flex; gap: 8px; align-items: baseline; margin: -4px 0 14px; font: 600 .92rem/1.45 var(--font); color: #efe6ff; }
-  #calibration .todo::before { content: "\1F449"; flex: none; }
+  #calibration .todo {    margin: -4px 0 14px; font: 600 .92rem/1.45 var(--font); color: #efe6ff;  padding-left: 1.6em; text-indent: -1.6em; }
+  #calibration .todo::before { content: "\1F449"; display: inline-block; width: 1.6em; text-indent: 0; flex: none; }
   #calibration canvas.drag { cursor: grab; touch-action: none; }
   #calibration canvas.drag:active, #calibration canvas.dragging { cursor: grabbing; }
   #calibration canvas.tap { cursor: pointer; touch-action: manipulation; }
