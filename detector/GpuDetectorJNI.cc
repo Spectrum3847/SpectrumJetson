@@ -23,7 +23,6 @@
 //   - no per-detection std::cout; a once-per-second stats line instead
 
 #include <jni.h>
-#include <wpi/jni_util.h>
 
 #include <algorithm>
 #include <atomic>
@@ -49,7 +48,8 @@
 #include <cuda_runtime.h>
 #include <jpeglib.h>
 #include "nvjpg_decoder.h"
-#include <wpi/RawFrame.h>
+#include <wpi/util/PixelFormat.h>
+#include <wpi/util/RawFrame.h>
 #include "absl/status/status.h"
 #include <opencv2/core/mat.hpp>
 
@@ -61,10 +61,39 @@ void SpectrumInjectStickyCudaFault();  // fault_kernel.cu (test only)
 
 namespace {
 
-wpi::java::JClass detectionCls;
+class GlobalJClass {
+ public:
+  GlobalJClass() = default;
+  GlobalJClass(JNIEnv *env, const char *name) : m_name(name) {
+    jclass local = env->FindClass(name);
+    if (!local) return;
+    m_class = static_cast<jclass>(env->NewGlobalRef(local));
+    env->DeleteLocalRef(local);
+  }
 
-const wpi::java::JClassInit classes[] = {
-    {"edu/wpi/first/apriltag/AprilTagDetection", &detectionCls}};
+  void Free(JNIEnv *env) {
+    if (m_class) env->DeleteGlobalRef(m_class);
+    m_class = nullptr;
+  }
+
+  explicit operator bool() const { return m_class != nullptr; }
+  operator jclass() const { return m_class; }
+  const char *name() const { return m_name; }
+
+ private:
+  const char *m_name = "";
+  jclass m_class = nullptr;
+};
+
+struct ClassInit {
+  const char *name;
+  GlobalJClass *cls;
+};
+
+GlobalJClass detectionCls;
+
+constexpr char kDetectionClass[] = "org/wpilib/vision/apriltag/AprilTagDetection";
+const ClassInit classes[] = {{kDetectionClass, &detectionCls}};
 
 // Contrast threshold for the GPU thresholding step. 4143 used 5, frc971/bos uses 4,
 // and RealtimeRoboticsGroup/aos 76d8f216 moved to 20 for speed. Override at launch
@@ -263,21 +292,37 @@ jobject MakeJObject(JNIEnv *env, const apriltag_detection_t *detect) {
       env->GetMethodID(detectionCls, "<init>", "(Ljava/lang/String;IIF[DDD[D)V");
   if (!constructor) return nullptr;
 
-  wpi::java::JLocal<jstring> fam{env, wpi::java::MakeJString(env, detect->family->name)};
-  auto homography = detect->H;
-  wpi::java::JLocal<jdoubleArray> harr{
-      env, wpi::java::MakeJDoubleArray(
-               env, {reinterpret_cast<const jdouble *>(homography->data),
-                     static_cast<size_t>(homography->nrows * homography->ncols)})};
-  wpi::java::JLocal<jdoubleArray> carr{
-      env, wpi::java::MakeJDoubleArray(
-               env, {reinterpret_cast<const jdouble *>(detect->p), 4 * 2})};
+  jstring family = env->NewStringUTF(detect->family->name);
+  if (!family) return nullptr;
 
-  return env->NewObject(detectionCls, constructor, fam.obj(), static_cast<jint>(detect->id),
-                        static_cast<jint>(detect->hamming),
-                        static_cast<jfloat>(detect->decision_margin), harr.obj(),
-                        static_cast<jdouble>(detect->c[0]), static_cast<jdouble>(detect->c[1]),
-                        carr.obj());
+  const size_t homography_size = static_cast<size_t>(detect->H->nrows * detect->H->ncols);
+  jdoubleArray homography = env->NewDoubleArray(static_cast<jsize>(homography_size));
+  if (!homography) {
+    env->DeleteLocalRef(family);
+    return nullptr;
+  }
+  env->SetDoubleArrayRegion(
+      homography, 0, static_cast<jsize>(homography_size),
+      reinterpret_cast<const jdouble *>(detect->H->data));
+
+  jdoubleArray corners = env->NewDoubleArray(4 * 2);
+  if (!corners) {
+    env->DeleteLocalRef(homography);
+    env->DeleteLocalRef(family);
+    return nullptr;
+  }
+  env->SetDoubleArrayRegion(corners, 0, 4 * 2, reinterpret_cast<const jdouble *>(detect->p));
+
+  jobject result = env->NewObject(detectionCls, constructor, family,
+                                   static_cast<jint>(detect->id),
+                                   static_cast<jint>(detect->hamming),
+                                   static_cast<jfloat>(detect->decision_margin), homography,
+                                   static_cast<jdouble>(detect->c[0]),
+                                   static_cast<jdouble>(detect->c[1]), corners);
+  env->DeleteLocalRef(corners);
+  env->DeleteLocalRef(homography);
+  env->DeleteLocalRef(family);
+  return result;
 }
 
 jobjectArray MakeJObjectArray(JNIEnv *env, const zarray_t *detections) {
@@ -287,8 +332,13 @@ jobjectArray MakeJObjectArray(JNIEnv *env, const zarray_t *detections) {
   for (int i = 0; i < n; ++i) {
     apriltag_detection_t *det;
     zarray_get(detections, i, &det);
-    wpi::java::JLocal<jobject> elem{env, MakeJObject(env, det)};
-    env->SetObjectArrayElement(jarr, i, elem.obj());
+    jobject elem = MakeJObject(env, det);
+    if (!elem) {
+      env->DeleteLocalRef(jarr);
+      return nullptr;
+    }
+    env->SetObjectArrayElement(jarr, i, elem);
+    env->DeleteLocalRef(elem);
   }
   return jarr;
 }
@@ -682,7 +732,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
   JNIEnv *env;
   if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
   for (auto &c : classes) {
-    *c.cls = wpi::java::JClass(env, c.name);
+    *c.cls = GlobalJClass(env, c.name);
     if (!*c.cls) {
       std::cout << "971 library could not find class " << c.name << std::endl;
       return JNI_ERR;
@@ -778,7 +828,7 @@ JNIEXPORT jint JNICALL Java_org_photonvision_jni_GpuDetectorJNI_decodeMjpegBgr(
 JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *) {
   JNIEnv *env;
   if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) return;
-  for (auto &c : classes) c.cls->free(env);
+  for (auto &c : classes) c.cls->Free(env);
 }
 
 JNIEXPORT jlong JNICALL Java_org_photonvision_jni_GpuDetectorJNI_createGpuDetector(

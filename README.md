@@ -12,6 +12,11 @@ Built by Spectrum 3847 with Claude Opus 5.5 (Anthropic) in Claude Code, which di
 
 *Last updated September 24, 2026.*
 
+> **Experimental alpha-7 branch:** this branch ports the SpectrumJetson CUDA and Jetson features to
+> PhotonVision source that targets WPILib `2027.0.0-alpha-7`. It has not passed a build on the target
+> Jetson or a real robot-network test. Do not install it in place of the tested JetPack 6 image.
+> See [CUDA13-MIGRATION.md](docs/CUDA13-MIGRATION.md) for the exact pins and acceptance checklist.
+
 ## Headlines
 
 Measured on the bench:
@@ -42,7 +47,7 @@ A camera frame goes over USB into PhotonVision on the Jetson. PhotonVision finds
 
 ```mermaid
 flowchart LR
-  CAM["2-4x Thriftiest Cam<br/>USB 2.0, MJPEG 1280x800"] --> PV["PhotonVision 2026 fork<br/>(4143 CUDA version + our patches)"]
+  CAM["2-4x Thriftiest Cam<br/>USB 2.0, MJPEG 1280x800"] --> PV["PhotonVision alpha-7 source<br/>(CUDA features, unverified)"]
   PV --> DET["971 CUDA AprilTag<br/>detector on the GPU"]
   DET --> PV
   PV -->|NetworkTables| SC["SystemCore<br/>2027 alpha-6 robot code"]
@@ -56,7 +61,7 @@ flowchart LR
 | Power mode | MAXN SUPER (the fastest mode, which gives the board its "Super" name) |
 | Cameras | 2 Thrifty Bot [Thriftiest Cams](https://www.thethriftybot.com/products/thriftiest-cam) ([docs](https://docs.thethriftybot.com/electrical/thriftiest-cam/latest/overview)) for AprilTags: OV9281, mono, global shutter, 1280x800, USB 2.0. On the bench also: 2 "Global Shutter Camera" (32e4:0144) and a colour USB camera (32e4:62f0) for game pieces |
 | Power | From the robot through a 15 V boost regulator board, which kept the Jetson running down to a 5 V input (tested 2026-09-25) |
-| Vision software | FRC-Team-4143's PhotonVision fork (2026 version), merged with upstream PhotonVision v2026.3.4, plus our patches |
+| Vision software | PhotonVision source `1f419c9d` targets WPILib `2027.0.0-alpha-7`. The CUDA features are ported in this branch but remain unverified on Jetson. |
 | Tag detector | Austin Schuh's current CUDA detector (from 971 / RealtimeRoboticsGroup), built from frc971/bos |
 | Game pieces | YOLO models on the GPU through TensorRT 10.3 (our backend), FUEL model by Team 2826 |
 | Robot side | Stock PhotonLib v2027.0.0-alpha-2 in `2026-FM-SystemCore`, team 8515 |
@@ -103,10 +108,10 @@ The vision stack has four parts. Two are built on the Jetson, one on the laptop,
 
 | # | Part | Built where | Script | Notes |
 | --- | --- | --- | --- | --- |
-| 1 | PhotonVision service | Jetson (installer) | `jetson/03-photonvision.sh` | Installs the systemd service that starts PhotonVision at boot. We then replace its jar with the fork. |
-| 2 | allwpilib `v2026.2.1` | Jetson | `jetson/04-build-allwpilib.sh` | Libraries the CUDA detector links against. Must be the **v2026.2.1 tag**: its `main` branch has moved on and won't compile with the detector. Took 17 minutes. |
+| 1 | PhotonVision service | Jetson (installer) | `jetson/03-photonvision.sh` | Installs the systemd service that starts PhotonVision at boot. |
+| 2 | allwpilib `v2027.0.0-alpha-7` | Jetson | `jetson/04-build-allwpilib.sh` | Fetches the exact tag object and commit used by the alpha-7 source. This has not been built on the target Jetson. |
 | 3 | CUDA detector `lib971apriltag.so` | Jetson | `jetson/07-build-bos-detector.sh`, then `08-select-detector.sh bos --mwbd 20 --jpeg nvjpg` | Austin Schuh's current code (see below) plus our JNI wrapper in `detector/`. `--jpeg nvjpg` decodes the camera JPEGs on the Jetson's JPEG hardware (`libspectrumnvjpg.so`, see Performance), gray and colour; it uses ~180 MB of memory per camera. Leave it out to decode on the CPU. |
-| 4 | PhotonVision fork jar | Laptop | `host/03-build-photonvision-fork.sh`, then `jetson/06-install-fork-jar.sh` | The 4143 fork, upstream v2026.3.4 (patch 00) and our patches 01–34. It builds on the laptop in about 30 s instead of taxing the Jetson. The Jetson runs it on Java 17. |
+| 4 | PhotonVision alpha-7 jar | Laptop | `host/03-build-photonvision-fork.sh`, then `jetson/06-install-fork-jar.sh` | Applies `patches/photonvision-2027-alpha7-migration.patch` to an exact source commit and runs on Java 25. Real Jetson and robot-network tests are still required. |
 | 5 | Camera driver with a bandwidth cap | Jetson | `jetson/11-uvcvideo-payload-cap.sh --install` | Needed for 3–4 cameras on the USB-A ports (see Performance). |
 | 6 | TensorRT backend `libspectrumtrt.so` | Jetson | built by `07-build-bos-detector.sh`; install to `/usr/lib` | Game-piece detection. Models go in with `jetson/12-install-yolo-model.sh`. |
 | 7 | USB controller watchdog | Jetson | `jetson/14-usb-watchdog.sh --install` | Resets the USB controller if the kernel says it died, so the cameras come back without a person. It never reboots (see Known issues). |

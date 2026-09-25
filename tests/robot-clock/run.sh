@@ -10,7 +10,7 @@
 set -euo pipefail
 OFFSET=${1:-120}
 HERE=$(cd "$(dirname "$0")" && pwd)
-JAVA=/usr/lib/jvm/java-17-openjdk-arm64/bin/java
+JAVA=${JAVA:-/usr/lib/jvm/java-25-openjdk-arm64/bin/java}
 P=$(systemctl show photonvision -p MainPID --value)
 "$JAVA" -cp /opt/photonvision/photonvision.jar "$HERE/FakeRobotClock.java" "$OFFSET" 40 2>&1 \
   | grep -v "^\[" | sed 's/^/  fake robot: /' &

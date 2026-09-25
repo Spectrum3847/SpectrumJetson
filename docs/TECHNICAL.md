@@ -1,5 +1,10 @@
 # SpectrumJetson: technical reference
 
+> **Alpha-7 status:** this branch is an unverified migration target. The existing JetPack 6 setup
+> and its measurements describe the tested `v2026.2.1` baseline. Do not apply those results to the
+> alpha-7 branch until the checks in [CUDA13-MIGRATION.md](CUDA13-MIGRATION.md) pass on the real
+> Jetson and robot.
+
 Imaging and setup for a **Jetson Orin Nano Super Developer Kit** (P3768 carrier +
 P3767-0005 8GB module) running PhotonVision with FRC 971's CUDA AprilTag detector,
 for Spectrum 3847/8515. Boots from NVMe, with no SD card.
@@ -121,15 +126,17 @@ fork's base and the alpha-6 era (checked in source on 2026-09-23, not yet on har
 > after alpha-7 (`a6167b0`, 2026-09-17) renamed the timestamp fields, which changed the
 > hashes, and the robot would throw against this Jetson.
 
-Porting CUDA to 2027 PhotonVision was rejected. 2027 allwpilib needs JDK 25, C++23
-and GCC 13 (Ubuntu 24.04), while JetPack 6 has GCC 11.
+The CUDA port to PhotonVision source that targets WPILib `2027.0.0-alpha-7` is a
+separate experimental migration. It requires Java 25 and the alpha-7 C++ headers. Alpha-7
+requires C++23 and G++ 14.x, while the documented JetPack 6 image has GCC 11. No
+JetPack 6 build or runtime result is claimed for the migration.
 
 | Piece | Version | Built on | Script |
 |---|---|---|---|
-| allwpilib | `v2026.2.1` (not `main`: `wpi/jni_util.h` moved) | Jetson, `-j4` (more OOMs on wpimath); **17 min** in MAXN SUPER | `scripts/jetson/04-build-allwpilib.sh` |
-| GpuDetectorJNI | `FRC-Team-4143` `ef9fc1e`, CUDA arch 87 → `/usr/lib/lib971apriltag.so` | Jetson | `scripts/jetson/05-build-gpudetector.sh` |
-| PhotonVision fork jar | `d8c9e8e`, Java 17 target | Laptop (Node 22, pnpm 10, Temurin 17, as in CI) | `scripts/host/03-build-photonvision-fork.sh` |
-| Java runtime | **17** for the fork (the PV 2027 installer made 25 the default) | systemd drop-in `photonvision.service.d/java17.conf` | `scripts/jetson/06-install-fork-jar.sh <jar>` |
+| allwpilib migration target | `v2027.0.0-alpha-7` headers, G++ 14.x and C++23 required upstream | Not yet built on the target Jetson | `scripts/jetson/04-build-allwpilib.sh` |
+| GpuDetectorJNI | BOS `62e93b4` plus the local JNI bridge, CUDA arch 87 | Not yet built against alpha-7 | `scripts/jetson/07-build-bos-detector.sh` |
+| PhotonVision migration jar | source `1f419c9d` plus one Spectrum migration patch, Java 25 | Host build pending | `scripts/host/03-build-photonvision-fork.sh` |
+| Java runtime | Java 25 for the alpha-7 source | Jetson install not tested | `scripts/jetson/06-install-fork-jar.sh <jar>` |
 
 `scripts/jetson/03-photonvision.sh` installs upstream `v2027.0.0-alpha-2` (CPU only).
 That's a placeholder, and it provides the systemd service; the fork jar replaces its
@@ -1031,7 +1038,8 @@ came back.
   with bug fixes. JetPack 7.2.x now supports Orin, but it moves the Jetson to
   Ubuntu 24.04 / CUDA 13, which the fork and detector were not built for.
 - The flash command adds `--erase-all`, per the 36.5.2 Quick Start.
-- allwpilib is pinned to `v2026.2.1` instead of `main`.
+- The baseline image uses allwpilib `v2026.2.1`. The alpha-7 migration uses the exact
+  `v2027.0.0-alpha-7` tag object and commit shown in `docs/CUDA13-MIGRATION.md`.
 - CUDA isn't part of a BSP-only flash; install `nvidia-jetpack` after first boot.
 - The 2026 fork runs against 2027 alpha-6 robot code (see above).
 

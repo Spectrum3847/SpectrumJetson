@@ -3,10 +3,11 @@
 // /photonvision/jetson and each camera's /health and /mount tables. Run ON THE JETSON with
 // PhotonVision's NT server address set to 127.0.0.1 (see run.sh):
 //   java -cp /opt/photonvision/photonvision.jar NtTelemetryDump.java [seconds]
-import edu.wpi.first.networktables.NetworkTableInstance;
-import edu.wpi.first.networktables.NetworkTableValue;
-import edu.wpi.first.networktables.PubSubOption;
-import edu.wpi.first.networktables.Topic;
+import org.wpilib.networktables.MultiSubscriber;
+import org.wpilib.networktables.NetworkTableInstance;
+import org.wpilib.networktables.NetworkTableValue;
+import org.wpilib.networktables.PubSubOption;
+import org.wpilib.networktables.Topic;
 import java.util.Arrays;
 import java.util.TreeMap;
 import org.photonvision.jni.LibraryLoader;
@@ -18,7 +19,7 @@ public class NtTelemetryDump {
         var nt = NetworkTableInstance.create();
         nt.startServer("/tmp/nt-telemetry-dump.json");
         // Subscribe to everything under /photonvision so the values are sent to us.
-        var sub = new edu.wpi.first.networktables.MultiSubscriber(
+        var sub = new MultiSubscriber(
                 nt, new String[] {"/photonvision/"}, PubSubOption.sendAll(false));
         System.out.println("NT server up; waiting for PhotonVision to connect...");
         long deadline = System.nanoTime() + 30_000_000_000L;

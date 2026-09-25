@@ -3,7 +3,7 @@
 // then correct. Run ON THE JETSON with PhotonVision's NT server address set to 127.0.0.1 (see
 // run.sh):
 //   java -cp /opt/photonvision/photonvision.jar FakeRobotClock.java [offset_s] [seconds_each]
-import edu.wpi.first.networktables.NetworkTableInstance;
+import org.wpilib.networktables.NetworkTableInstance;
 import org.photonvision.jni.LibraryLoader;
 
 public class FakeRobotClock {

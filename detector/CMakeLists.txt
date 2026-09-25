@@ -25,6 +25,29 @@ if(NOT EXISTS "${BOS_DIR}/third_party/971apriltag/apriltag.h")
   message(FATAL_ERROR "BOS_DIR must point at a frc971/bos checkout")
 endif()
 
+set(ALLWPILIB_DIR "" CACHE PATH "AllWPILib v2027.0.0-alpha-7 source checkout")
+set(ALLWPILIB_INCLUDE_DIR "${ALLWPILIB_DIR}/wpiutil/src/main/native/include")
+if(NOT EXISTS "${ALLWPILIB_INCLUDE_DIR}/wpi/util/RawFrame.h" OR
+   NOT EXISTS "${ALLWPILIB_INCLUDE_DIR}/wpi/util/PixelFormat.h")
+  message(FATAL_ERROR "ALLWPILIB_DIR must contain the v2027.0.0-alpha-7 wpiutil headers")
+endif()
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_INCLUDES "${ALLWPILIB_INCLUDE_DIR}")
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+check_cxx_source_compiles([=[
+#include <wpi/util/PixelFormat.h>
+#include <wpi/util/RawFrame.h>
+int main() {
+  WPI_RawFrame frame{};
+  return frame.pixelFormat == WPI_PIXFMT_MJPEG ? 0 : 1;
+}
+]=] SPECTRUM_WPIUTIL_CXX20_HEADERS)
+unset(CMAKE_REQUIRED_INCLUDES)
+unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
+if(NOT SPECTRUM_WPIUTIL_CXX20_HEADERS)
+  message(FATAL_ERROR "The JNI bridge must compile as C++20 with AllWPILib alpha-7 headers")
+endif()
+
 # Same globals frc971/bos's top-level CMakeLists.txt sets for its subprojects.
 find_package(CUDAToolkit REQUIRED)
 include_directories(${CUDAToolkit_INCLUDE_DIRS})
@@ -43,10 +66,10 @@ find_package(JPEG REQUIRED)  # libjpeg-turbo (libjpeg-turbo8-dev), for decodeMjp
 add_library(971apriltag_jni SHARED GpuDetectorJNI.cc fault_kernel.cu)
 set_target_properties(971apriltag_jni PROPERTIES OUTPUT_NAME 971apriltag)
 target_include_directories(971apriltag_jni PRIVATE ${BOS_DIR} ${JNI_INCLUDE_DIRS}
-                                                   ${OpenCV_INCLUDE_DIRS})
+                                                   ${OpenCV_INCLUDE_DIRS} ${ALLWPILIB_INCLUDE_DIR})
 # bos uses ABSL_FLAG (use_neon, debug_blob_index) but its CMake does not link absl::flags.
 find_package(Threads REQUIRED)
-target_link_libraries(971apriltag_jni PRIVATE 971apriltag absl::flags wpiutil CUDA::cudart JPEG::JPEG
+target_link_libraries(971apriltag_jni PRIVATE 971apriltag absl::flags CUDA::cudart JPEG::JPEG
                                               ${JNI_LIBRARIES} Threads::Threads ${CMAKE_DL_LIBS})
 # Fail at link time, not in the JVM, if a symbol is missing.
 target_link_options(971apriltag_jni PRIVATE -Wl,--no-undefined)
@@ -92,5 +115,5 @@ endif()
 # PhotonVision. Build it alone with --target fieldcal_detect.
 add_executable(fieldcal_detect fieldcal_detect.cc)
 target_include_directories(fieldcal_detect PRIVATE ${BOS_DIR})
-target_link_libraries(fieldcal_detect PRIVATE 971apriltag absl::flags wpiutil CUDA::cudart JPEG::JPEG
+target_link_libraries(fieldcal_detect PRIVATE 971apriltag absl::flags CUDA::cudart JPEG::JPEG
                                               Threads::Threads ${CMAKE_DL_LIBS})
