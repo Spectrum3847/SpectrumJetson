@@ -280,7 +280,7 @@
       }, { rootMargin: '600px 0px' });
       io.observe(s);
     });
-    if (location.hash) document.querySelector(location.hash)?.scrollIntoView();
+    restorePlace();
   }
 
   function buildToc() {
@@ -399,6 +399,61 @@
         }
       });
     }, { passive: true });
+  }
+
+  /* ── Keep the reader's place across refresh, zoom and resize ─────────────
+     The chapters load after the page and the labs resize as they start, so the browser's
+     own pixel-based restore lands in the wrong place. Instead we remember which element is
+     at the top of the screen (as a path from its top-level section) and how far into it
+     you were, then hold you there while the page settles, until you scroll yourself. */
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  const LINE = () => (parseFloat(css('--nav-h')) || 60) + 12; // the reading line, just under the top bar
+  const tops = () => [...document.querySelectorAll('body > section')];
+  const pathOf = (el, root) => { const p = []; while (el && el !== root) { p.unshift([...el.parentElement.children].indexOf(el)); el = el.parentElement; } return el === root ? p : null; };
+  const fromPath = (root, p) => p.reduce((el, i) => el && el.children[i], root);
+  let anchor = null, pinUntil = 0, pinning = false;
+  function takeAnchor() {
+    if (scrollY < 40) return { top: true };
+    const y = LINE();
+    let el = document.elementFromPoint(innerWidth / 2, y);
+    if (!el || el.closest('.topnav, .toc, .scrim')) return anchor;
+    // sticky visuals move with the scroll, so anchor to their scrolly block instead
+    const sticky = el.closest('.scrolly .vis');
+    if (sticky) el = sticky.closest('.scrolly');
+    const sec = el.closest('body > section');
+    if (!sec) return anchor;
+    const r = el.getBoundingClientRect();
+    return { el, sec: tops().indexOf(sec), path: pathOf(el, sec), frac: r.height ? (y - r.top) / r.height : 0 };
+  }
+  function applyAnchor(a) {
+    if (!a) return;
+    if (a.top) { scrollTo(0, 0); return; }
+    let el = a.el && a.el.isConnected ? a.el : null;
+    if (!el) { const sec = tops()[a.sec]; el = sec && a.path ? fromPath(sec, a.path) : null; if (!el) el = sec; }
+    if (!el || !el.getClientRects().length) return;
+    const r = el.getBoundingClientRect();
+    const d = r.top + (a.frac || 0) * r.height - LINE();
+    if (Math.abs(d) > 1) { pinning = true; scrollBy(0, d); pinning = false; }
+  }
+  // Hold the anchor for a while (layout still settling); any input from the reader releases it.
+  function pin(a, ms) { anchor = a; pinUntil = performance.now() + ms; applyAnchor(a); }
+  const release = () => { pinUntil = 0; };
+  ['wheel', 'touchstart', 'keydown', 'pointerdown'].forEach((t) => addEventListener(t, release, { passive: true }));
+  new ResizeObserver(() => { if (performance.now() < pinUntil) applyAnchor(anchor); }).observe(document.body);
+  addEventListener('scroll', () => { if (!pinning && performance.now() >= pinUntil) anchor = takeAnchor(); }, { passive: true });
+  // zoom or window resize: go back to the element you were reading
+  addEventListener('resize', () => { const a = anchor; if (a) { pin(a, 1500); requestAnimationFrame(() => applyAnchor(a)); } });
+  const KEY = 'vt-place:' + location.pathname;
+  addEventListener('pagehide', () => {
+    const a = takeAnchor();
+    try { sessionStorage.setItem(KEY, JSON.stringify(a && (a.top ? { top: true } : { sec: a.sec, path: a.path, frac: a.frac }))); } catch (e) {}
+  });
+  function restorePlace() {
+    let saved = null;
+    try { saved = JSON.parse(sessionStorage.getItem(KEY) || 'null'); } catch (e) {}
+    if (saved) pin(saved, 6000);
+    else if (location.hash) { const t = document.querySelector(location.hash); if (t) { t.scrollIntoView(); pin(takeAnchor(), 4000); } }
+    anchor = anchor || takeAnchor();
   }
 
   document.addEventListener('DOMContentLoaded', () => { chrome(); load(); });
