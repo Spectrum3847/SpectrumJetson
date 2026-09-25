@@ -256,19 +256,21 @@ if [[ -n $tach ]]; then
     sleep 0.3
   done
 fi
-if systemctl is-active --quiet nvfancontrol; then fanmode="NVIDIA fan control (nvfancontrol), pwm ${fan:-?}/255"
+profile=$(sed -n 's/^[[:space:]]*FAN_DEFAULT_PROFILE[[:space:]]*//p' /etc/nvfancontrol.conf 2>/dev/null | head -1)
+if systemctl is-active --quiet nvfancontrol; then fanmode="NVIDIA fan control, ${profile:-?} profile"
 elif [[ ${fan:-0} -ge 250 ]]; then fanmode="full speed (jetson_clocks)"
 else fanmode="fixed at pwm ${fan:-?}/255"; fi
 if [[ -z $rpm ]]; then
   warn "fan speed unknown (no tachometer found); mode: $fanmode"
 elif [[ ${fan:-0} -ge 100 && $rpm -lt 1000 ]]; then
   fail "fan not spinning: $rpm rpm at pwm ${fan}/255 (unplugged, jammed or dead: check its cable)"
-elif [[ $fanmode != "full speed (jetson_clocks)" ]]; then
-  warn "fan not at full speed: $fanmode, $rpm rpm (run 09-robot-tuning.sh)"
-elif [[ $rpm -lt 4500 ]]; then
+elif [[ $fanmode == "full speed (jetson_clocks)" && $rpm -lt 4500 ]]; then
   warn "fan slow: $rpm rpm at full speed, normally ~5,600-6,200 (dust or a worn bearing?)"
+elif [[ $fanmode == NVIDIA* || $fanmode == full* ]]; then
+  # The quiet profile (09-robot-tuning.sh's default) speeds up as the chip warms; FAN=full is full speed.
+  pass "fan: $fanmode, pwm ${fan:-?}/255, $rpm rpm"
 else
-  pass "fan at full speed: $rpm rpm (jetson_clocks)"
+  warn "fan $fanmode and not controlled: $rpm rpm (run 09-robot-tuning.sh)"
 fi
 year=$(date -u +%Y)
 if [[ $year -ge 2026 ]]; then pass "clock: $(date -u '+%Y-%m-%d %H:%M UTC')"

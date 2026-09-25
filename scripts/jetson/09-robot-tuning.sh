@@ -13,8 +13,10 @@
 #                               the system log is kept on the SSD, synced every 5 s (default: RAM
 #                               only, so it vanished at every power cut, taking brownout clues).
 #                               ext4's journal keeps the filesystem itself consistent.
-#   7. Fan at full speed      - jetson_clocks --fan (noise doesn't matter on a robot; NVIDIA's
-#                               "quiet" profile ran it at ~2000 rpm at 56 C)
+#   7. Fan: quiet by default  - NVIDIA's fan control (nvfancontrol) on its "quiet" profile, which
+#                               speeds the fan up as the chip warms (~2000 rpm at 56 C).
+#                               FAN=full 09-robot-tuning.sh runs it at full speed instead
+#                               (jetson_clocks --fan, ~5,800 rpm).
 #   8. Recover from hangs     - hardware watchdog 30 s (NVIDIA's default 2 min), also while
 #                               rebooting (default 10 min), kernel panic -> reboot in 3 s (default:
 #                               hang forever), PhotonVision restarted on any exit (default: only on
@@ -27,7 +29,7 @@
 #                               retries it: ~65 s each with the default 5 s timeout. 1 s cuts that
 #                               to seconds. A healthy device answers in milliseconds.
 #
-# Usage: 09-robot-tuning.sh [--undo]
+# Usage: [FAN=quiet|full] 09-robot-tuning.sh [--undo]   (FAN defaults to quiet)
 set -euo pipefail
 
 APT_CONF=/etc/apt/apt.conf.d/99spectrum-no-auto-updates
@@ -43,6 +45,9 @@ PANIC_CONF=/etc/sysctl.d/90-spectrum-panic.conf
 PV_RESTART_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-restart.conf
 PV_OPENCV_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-opencv.conf
 USB_TMPFILES=/etc/tmpfiles.d/90-spectrum-usb.conf
+FAN=${FAN:-quiet}
+[[ $FAN == quiet || $FAN == full ]] || { echo "FAN must be quiet or full, not $FAN" >&2; exit 2; }
+if [[ $FAN == full ]]; then CLOCKS_ARGS="--fan"; else CLOCKS_ARGS=""; fi
 
 sudo -n true 2>/dev/null || sudo -v   # ask for the password only if sudo needs one
 
@@ -92,17 +97,17 @@ echo "==> 3. Headless (multi-user.target)"
 sudo systemctl set-default multi-user.target
 
 echo "==> 4. jetson_clocks at boot"
-sudo tee "$CLOCKS_UNIT" >/dev/null <<'EOF'
+sudo tee "$CLOCKS_UNIT" >/dev/null <<EOF
 [Unit]
-Description=Lock Jetson CPU/GPU/EMC clocks and the fan at max for consistent vision latency (SpectrumJetson)
-# After nvfancontrol: --fan stops it and sets full speed; if nvfancontrol started later it would
-# take the fan back.
+Description=Lock Jetson CPU/GPU/EMC clocks at max for consistent vision latency (SpectrumJetson)
+# After nvfancontrol: with --fan (FAN=full) jetson_clocks stops it and sets full speed; if
+# nvfancontrol started later it would take the fan back. Without --fan it leaves the fan alone.
 After=nvpmodel.service nvfancontrol.service
 Before=photonvision.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/jetson_clocks --fan
+ExecStart=/usr/bin/jetson_clocks $CLOCKS_ARGS
 RemainAfterExit=yes
 
 [Install]
@@ -147,8 +152,15 @@ sudo systemd-tmpfiles --create --prefix /var/log/journal
 sudo systemctl restart systemd-journald
 sudo journalctl --flush
 
-echo "==> 7. Fan at full speed (jetson_clocks --fan, in step 4's service)"
-sudo systemctl restart jetson-clocks.service
+if [[ $FAN == full ]]; then
+  echo "==> 7. Fan at full speed (jetson_clocks --fan, in step 4's service)"
+  sudo systemctl restart jetson-clocks.service
+else
+  echo "==> 7. Fan on NVIDIA's quiet profile (nvfancontrol)"
+  sudo systemctl restart jetson-clocks.service   # clocks only now
+  sudo systemctl enable nvfancontrol
+  sudo systemctl restart nvfancontrol
+fi
 
 echo "==> 8. Recover from hangs"
 sudo mkdir -p "$(dirname "$WATCHDOG_CONF")" "$(dirname "$PV_RESTART_CONF")"

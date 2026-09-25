@@ -117,7 +117,7 @@ The vision stack has four parts. Two are built on the Jetson, one on the laptop,
 
 **Safe deploys.** `06-install-fork-jar.sh` refuses to install a jar that isn't a valid zip, and it keeps the previous working jar as `photonvision.jar.prev`. We added that after a truncated jar took PhotonVision down (see the bugs section).
 
-**Robot readiness.** `jetson/09-robot-tuning.sh` prepares the Jetson for the robot: no automatic updates, headless boot, snapd off (it was adding 45 s to every boot), clocks locked at max on boot, USB autosuspend off for cameras, power-cut safety (data on the SSD within 3 s, the system log kept across power cuts), the fan at full speed, a 30 s hardware watchdog (also while rebooting, where it was 10 minutes), reboot on kernel panic, PhotonVision restarted on any exit, OpenCV's worker threads sleeping instead of spinning, and 1 s USB retries (a stuck camera held up the others on its hub for ~65 s each). The system log keeps up to 2 GB. After it, the Jetson boots in 16.5 s instead of 57 s, and both cameras are detecting about 20 s after power-on. `jetson/health-check.sh` prints a PASS / WARN / FAIL readiness report you can run over SSH before a match.
+**Robot readiness.** `jetson/09-robot-tuning.sh` prepares the Jetson for the robot: no automatic updates, headless boot, snapd off (it was adding 45 s to every boot), clocks locked at max on boot, USB autosuspend off for cameras, power-cut safety (data on the SSD within 3 s, the system log kept across power cuts), the fan on NVIDIA's quiet profile (`FAN=full` for full speed), a 30 s hardware watchdog (also while rebooting, where it was 10 minutes), reboot on kernel panic, PhotonVision restarted on any exit, OpenCV's worker threads sleeping instead of spinning, and 1 s USB retries (a stuck camera held up the others on its hub for ~65 s each). The system log keeps up to 2 GB. After it, the Jetson boots in 16.5 s instead of 57 s, and both cameras are detecting about 20 s after power-on. `jetson/health-check.sh` prints a PASS / WARN / FAIL readiness report you can run over SSH before a match.
 
 ## Bugs we found and fixed
 
@@ -483,7 +483,7 @@ The detailed technical reference, with exact versions, commits and measurements,
 - [x] Calibrate both cameras at 1280x800 (done on the bench; redo on the robot)
 - [x] Deploy the jar with the Device Control and 8-coefficient fixes
 - [x] Robot tuning: no auto-updates, headless boot, clocks locked, USB autosuspend off, power-cut safety (data on the SSD within 3 s, system log kept across power cuts)
-- [x] Fan at full speed from boot (43 °C on the bench), 30 s hardware watchdog, reboot on kernel panic, PhotonVision always restarted
+- [x] Fan on NVIDIA's quiet profile by default (775 rpm at 43 °C on the bench; `FAN=full 09-robot-tuning.sh` for full speed), 30 s hardware watchdog, reboot on kernel panic, PhotonVision always restarted
 - [x] Camera unplug test: the camera detects again ~1 s after it's plugged back in; the other camera is unaffected (`tests/camera-replug/run.sh`)
 - [x] Power-cut test: pulled the plug mid-recording. No filesystem errors, the log survived, PhotonVision came back healthy, 1.4 s of video lost (`tests/power-cut/run.sh`)
 - [x] Reboot test: tuning survives a reboot; boot 57 s → 16.5 s, first detection ~20 s after power-on
@@ -498,7 +498,7 @@ The detailed technical reference, with exact versions, commits and measurements,
 - [ ] Lock each lens after focusing (glue or silicone, like 6328), then recalibrate. Vibration can turn a lens and spoil its calibration
 - [ ] Turn off Wi-Fi for competition (Bluetooth is already off)
 - [ ] Write the vision subsystem in `2026-FM-SystemCore` using the AndyMark field layout, with photonlib kept at alpha-2
-- [ ] Check temperatures with the Jetson mounted on the robot (44 °C on the bench with the fan at full speed). We're working on running it fanless; the tests are in the passive-cooling work
+- [ ] Check temperatures with the Jetson mounted on the robot (44 °C on the bench with the fan at full speed, 43 °C on the quiet profile). We're working on running it fanless; the tests are in the passive-cooling work
 - [x] Decode speedup: both cameras at 122 fps, 13 ms latency, 1.3 of 6 CPU cores
 - [x] Upstream PhotonVision v2026.3.4 fixes, `setEnabled()` support, OpenCV leak fixes (`docs/UPSTREAM-PORT.md`)
 - [x] Frame timestamps moved to mid-exposure (`photonvision-13`); the camera's own delay is still to be measured with the robot spin test
