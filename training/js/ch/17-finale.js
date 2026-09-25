@@ -60,8 +60,10 @@ Site.chapter('finale', (root) => {
     let T = 0, playing = false, shown = -1;
     const setT = (v) => { T = Site.clamp(v, 0, N * PER - 0.001); scrub.value = Math.round((T / (N * PER)) * 1000); };
     btn.onclick = () => { if (!playing && T >= N * PER - 0.01) setT(0); playing = !playing; btn.textContent = playing ? '❚❚ Pause' : '▶ Play'; };
-    scrub.oninput = () => { T = (scrub.value / 1000) * N * PER; playing = false; btn.textContent = '▶ Play'; };
-    jr.onclick = (e) => { const b = e.target.closest('button'); if (b) { setT(+b.dataset.i * PER + 0.01); playing = false; btn.textContent = '▶ Play'; } };
+    // update the text and chips at once, even if the canvas is scrolled off screen (its loop pauses then)
+    const syncUI = () => { const i = Math.min(N - 1, Math.floor(T / PER)); if (i !== shown) { shown = i; info(i); } lis.forEach((li, j) => { li.classList.toggle('on', j === i); li.classList.toggle('done', j < i); }); };
+    scrub.oninput = () => { T = (scrub.value / 1000) * N * PER; playing = false; btn.textContent = '▶ Play'; syncUI(); };
+    jr.onclick = (e) => { const b = e.target.closest('button'); if (b) { setT(+b.dataset.i * PER + 0.01); playing = false; btn.textContent = '▶ Play'; syncUI(); } };
     const info = (i) => {
       const s0 = S[i], sh = document.body.classList.contains('mode-short') && s0.chs;
       const s = sh ? { ...s0, ch: s0.chs, cn: s0.cns } : s0;

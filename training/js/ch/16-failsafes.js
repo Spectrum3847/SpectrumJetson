@@ -370,13 +370,13 @@ Site.chapter('failsafes', (root) => {
     dash.innerHTML = tiles.map(([k]) => `<div class="tile" data-k="${k}"><small>${k}</small><b>–</b>${k === 'gpuLoadPct' || k === 'tjTempC' ? '<canvas></canvas>' : ''}</div>`).join('');
     const el = (k) => dash.querySelector(`[data-k="${k}"]`);
     const spark = { gpuLoadPct: [], tjTempC: [] };
-    const S = { gpu: 12, temp: 43, fan: 5586, pw: 9.1, oc: 0, hb: 48200, sagT: -99, fanDead: false, deadT: 0 };
+    const S = { gpu: 12, temp: 43, fan: 5586, pw: 9.1, oc: 0, hb: 48200, sagT: 99, fanDead: false, deadT: 0 };
     const fanB = $('#f-fan'), sagB = $('#f-sag');
     let acc = 1;
     const now = () => (acc = 1); // redraw on the next frame, so every click shows at once
     sagB.onclick = () => { S.sagT = 0; S.oc++; now(); };
     fanB.onclick = () => { S.fanDead = !S.fanDead; S.deadT = 0; if (!S.fanDead) S.temp = 43; now(); };
-    $('#f-reset').onclick = () => { S.fanDead = false; S.temp = 43; S.sagT = -99; S.oc = 0; now(); };
+    $('#f-reset').onclick = () => { S.fanDead = false; S.temp = 43; S.sagT = 99; S.oc = 0; now(); };
     Site.loop(dash, (t, dt) => {
       acc += dt; if (acc < 0.5) return; const step = Math.min(acc, 0.6); acc = 0;
       fanB.textContent = S.fanDead ? '🌀 Fan dead: press to fix' : '🌀 Fan dies'; fanB.classList.toggle('on', S.fanDead); fanB.setAttribute('aria-pressed', S.fanDead);

@@ -44,9 +44,8 @@
   #linux .xbar { display: grid; grid-template-columns: 120px 1fr; gap: 8px; align-items: center; font-size: .82rem; margin: 6px 0; }
   #linux .xbar i { display: block; height: 20px; border-radius: 4px; background: var(--accent-soft); font: 700 .72rem/20px var(--mono); font-style: normal; color: #1a0a2b; padding-left: 6px; white-space: nowrap; }
   /* diff viewer */
-  #linux .diff, #linux .conf, #linux .svc, #linux .kmsg, #linux code { font-variant-ligatures: none; font-feature-settings: "calt" 0, "liga" 0; }
   #linux .diff { background: #0e0518; border-radius: 12px; padding: 12px 0; overflow-x: auto; font: 500 .8rem/1.55 var(--mono); color: #d6ccf0; }
-  #linux .diff div { white-space: pre; padding: 0 14px 0 34px; position: relative; min-width: max-content; }
+  #linux .diff div { white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 14px 0 34px; position: relative; }
   #linux .diff .add { background: rgba(34,197,94,.14); color: #bbf7d0; }
   #linux .diff .add::before { content: "+"; position: absolute; left: 14px; color: #4ade80; }
   #linux .diff .del { background: rgba(244,63,94,.16); color: #fecdd3; }
@@ -101,6 +100,9 @@
   @media (max-width: 640px) { #linux .seg button { padding: 11px 13px; } #linux .btn-sm { padding: 11px 15px; } }
   #linux .do { font-size: .86rem; color: var(--lab-muted); margin: -6px 0 12px; }
   #linux .do b { color: #fff; }
+  @media (max-width: 560px) { #linux .diff { font-size: .7rem; } }
+  /* after the font shorthands above, which reset these: no "->" arrows in code */
+  #linux .diff, #linux .diff div, #linux .conf, #linux .svc, #linux .kmsg, #linux code { font-variant-ligatures: none; font-feature-settings: "calt" 0, "liga" 0; }
 </style>
 <div class="shell">
   <div class="ch-head">

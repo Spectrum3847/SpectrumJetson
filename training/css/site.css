@@ -259,7 +259,7 @@ table.data tr.hl td { background: #faf5ff; font-weight: 700; }
 .term-tip b { color: var(--accent-soft); }
 
 /* ── Scrollytelling ──────────────────────────────────────── */
-.scrolly { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.2fr); gap: 48px; margin: 50px 0; }
+.scrolly { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.2fr); gap: 64px; margin: 50px 0; }
 .scrolly .steps { padding: 10vh 0 30vh; }
 .scrolly .step { min-height: 55vh; display: flex; flex-direction: column; justify-content: center; opacity: .3; transition: opacity .4s; }
 .scrolly .step.active { opacity: 1; }
@@ -270,7 +270,8 @@ table.data tr.hl td { background: #faf5ff; font-weight: 700; }
 .scrolly .vis > * { width: 100%; }
 @media (max-width: 900px) {
   .scrolly { grid-template-columns: 1fr; }
-  .scrolly .vis { order: -1; top: var(--nav-h); height: auto; z-index: 2; background: inherit; padding: 8px 0; }
+  .scrolly .vis { order: -1; top: var(--nav-h); height: auto; z-index: 2; background: var(--surface); padding: 8px 0; }
+  .chapter:nth-of-type(even) .scrolly .vis { background: var(--surface-alt); }
   .scrolly .step { min-height: 70vh; }
 }
 
@@ -347,8 +348,8 @@ body.mode-full .short { display: none !important; }
 /* progress rail for scrollytelling steps (built by Site.scrolly) */
 .scrolly .vis { position: sticky; }
 .scrolly .vis > .sc-prog { width: auto; }
-.sc-prog.right { left: auto; right: -32px; }
-.sc-prog { position: absolute; left: -32px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; align-items: center; gap: 7px; z-index: 3; }
+.sc-prog.right { left: auto; right: -46px; }
+.sc-prog { position: absolute; left: -46px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; align-items: center; gap: 7px; z-index: 3; }
 .sc-prog button { width: 10px; height: 10px; padding: 0; border-radius: 50%; border: 2px solid var(--accent); background: #fff; cursor: pointer; transition: transform .2s, background .2s; }
 .sc-prog button.done { background: var(--accent-soft); border-color: var(--accent-soft); }
 .sc-prog button.on { background: var(--accent); transform: scale(1.35); }
@@ -357,5 +358,7 @@ body.mode-full .short { display: none !important; }
 @media (max-width: 900px) {
   .scrolly .vis { padding-bottom: 26px; }
   .sc-prog, .sc-prog.right { left: 50%; right: auto; top: auto; bottom: 4px; transform: translateX(-50%); flex-direction: row; gap: 9px; }
-  .sc-prog .n { writing-mode: horizontal-tb; transform: none; margin: 0 0 0 4px; }
+  .sc-prog .n { margin: 0 0 0 4px; }
+  .sc-prog button { width: 14px; height: 14px; }
+  .sc-prog { gap: 11px; }
 }
