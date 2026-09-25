@@ -268,8 +268,11 @@ Site.chapter('pose', (root) => {
   /* ── three.js PnP scene ─────────────────────────────── */
   {
     const wrap = $('#po-3d'), insetCv = $('#po-3d-img');
-    const TAGP = { x: 0, y: 4.1, z: 0.9, yaw: 0 };
-    const S = { x: 3.2, y: 3.3, th: (-20 * Math.PI) / 180 + Math.PI, noise: 0.5, chain: true };
+    // Tags 3 and 4 as on the 2026 AndyMark layout's red hub face: 0.3556 m apart, 1.124 m up, side by side
+    // (tag 4 on tag 3's right as you face them). The wall is x = 0, facing +x.
+    const TAGP = { x: 0, y: 4.1, z: 1.124, yaw: 0 }, TAG4 = { x: 0, y: 4.1 + 0.3556, z: 1.124, yaw: 0 };
+    // default view: 1.7 m from tag 3, straight on; the single-tag solve is right in every noisy frame here (checked: 500 draws, worst 9.6 cm)
+    const S = { x: 1.8, y: 3.6, th: Math.PI, noise: 0.5, chain: true, two: false };
     const W2T = (x, y, z) => new THREE.Vector3(x, z, -y);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -287,10 +290,14 @@ Site.chapter('pose', (root) => {
     floor.rotation.x = -Math.PI / 2; floor.position.copy(W2T(3.5, 3.5, 0)); scene.add(floor);
     const grid = new THREE.GridHelper(8, 16, 0x5b3d85, 0x3a2757); grid.position.copy(W2T(4, 4, 0.002)); scene.add(grid);
     const wall = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.6, 2.6), new THREE.MeshStandardMaterial({ color: 0x3a3a44, roughness: 0.9 }));
-    wall.position.copy(W2T(-0.04, TAGP.y, 0.8)); scene.add(wall);
-    const tex = new THREE.CanvasTexture(Site.tagCanvas(3, 100)); tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter; tex.colorSpace = THREE.SRGBColorSpace;
-    const tagMesh = new THREE.Mesh(new THREE.PlaneGeometry(TAG * 10 / 8, TAG * 10 / 8), new THREE.MeshBasicMaterial({ map: tex }));
-    tagMesh.position.copy(W2T(0.002, TAGP.y, TAGP.z)); tagMesh.rotation.y = Math.PI / 2; scene.add(tagMesh);
+    wall.position.copy(W2T(-0.04, TAGP.y + 0.18, 0.8)); scene.add(wall);
+    const tagMeshOf = (id, t) => {
+      const tex = new THREE.CanvasTexture(Site.tagCanvas(id, 100)); tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter; tex.colorSpace = THREE.SRGBColorSpace;
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(TAG * 10 / 8, TAG * 10 / 8), new THREE.MeshBasicMaterial({ map: tex }));
+      m.position.copy(W2T(0.002, t.y, t.z)); m.rotation.y = Math.PI / 2; scene.add(m); return m;
+    };
+    tagMeshOf(3, TAGP);
+    const tag4Mesh = tagMeshOf(4, TAG4); tag4Mesh.visible = false;
     const axes = (len, w = 3) => { const g = new THREE.Group(); [[1, 0, 0, 0xef4444], [0, 1, 0, 0x22c55e], [0, 0, 1, 0x3b82f6]].forEach(([x, y, z, c]) => g.add(new THREE.ArrowHelper(W2T(x, y, z).normalize(), new THREE.Vector3(), len, c, len * 0.25, len * 0.14))); void w; return g; };
     const tagAx = axes(0.35); tagAx.position.copy(W2T(0.01, TAGP.y, TAGP.z)); scene.add(tagAx);
     const originAx = axes(0.6); scene.add(originAx);
@@ -300,7 +307,8 @@ Site.chapter('pose', (root) => {
       const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false })); sp.scale.set(0.9, 0.225, 1); sp.renderOrder = 10; return sp;
     };
     const lOrigin = label('field origin', '#c4b5fd'); lOrigin.position.copy(W2T(0.2, -0.3, 0.3)); scene.add(lOrigin);
-    const lTag = label('tag 3', '#ffffff'); lTag.position.copy(W2T(0.1, TAGP.y, TAGP.z + 0.35)); scene.add(lTag);
+    const lTag = label('tag 3', '#ffffff'); lTag.position.copy(W2T(0.1, TAGP.y - 0.1, TAGP.z + 0.35)); scene.add(lTag);
+    const lTag4 = label('tag 4', '#ffffff'); lTag4.position.copy(W2T(0.1, TAG4.y + 0.1, TAG4.z + 0.35)); lTag4.visible = false; scene.add(lTag4);
     // robot
     const mkRobot = (color, ghost) => {
       const g = new THREE.Group();
@@ -332,11 +340,12 @@ Site.chapter('pose', (root) => {
       if (!ist || !ist.w) return;
       const { ctx, w, h } = ist, s = w / K.w;
       ctx.fillStyle = '#16092a'; ctx.fillRect(0, 0, w, h);
-      const pose = camFromRobot(S.x, S.y, S.th), outer = tagCorners(TAGP, 10 / 8).map((p) => project(pose, p));
-      const solC = sol ? tagCorners(TAGP).map((p) => project(sol, p)) : null;
+      const pose = camFromRobot(S.x, S.y, S.th), tags = S.two ? [[3, TAGP], [4, TAG4]] : [[3, TAGP]];
+      const outers = tags.map(([id, t]) => [id, tagCorners(t, 10 / 8).map((p) => project(pose, p))]);
+      const solCs = sol ? tags.map(([, t]) => tagCorners(t).map((p) => project(sol, p))) : [];
       const paint = (M, r) => {
-        if (outer.every(Boolean)) Site.drawQuad(ctx, Site.tagCanvas(3, 100), outer.map(M), 6);
-        if (solC && solC.every(Boolean)) quad(ctx, solC.map(M), GREEN, 1.2);
+        for (const [id, o] of outers) if (o.every(Boolean)) Site.drawQuad(ctx, Site.tagCanvas(id, 100), o.map(M), 6);
+        for (const c of solCs) if (c.every(Boolean)) quad(ctx, c.map(M), GREEN, 1.2);
         obs.forEach((o) => dot(ctx, M(o.uv), r, RED));
       };
       paint((q) => [q[0] * s, q[1] * s], 2);
@@ -347,12 +356,16 @@ Site.chapter('pose', (root) => {
         paint((q) => [zx + (q[0] - cx0 + half) * zs, zy + (q[1] - cy0 + half) * zs], 3);
         ctx.restore(); ctx.strokeStyle = LAV; ctx.lineWidth = 1; ctx.strokeRect(zx, zy, Z, Z); ctx.strokeRect((cx0 - half) * s, (cy0 - half) * s, 2 * half * s, 2 * half * s);
       }
-      if (!obs.length) { ctx.fillStyle = AMBER; ctx.font = '600 11px Plus Jakarta Sans'; ctx.fillText('Tag not in view', 8, h - 8); }
+      if (!obs.length) { ctx.fillStyle = AMBER; ctx.font = '600 11px Plus Jakarta Sans'; ctx.fillText(S.two ? 'No tag fully in view' : 'Tag not in view', 8, h - 8); }
     };
     ist = Site.canvas(insetCv, 0.625, later(() => lastInset && inset(...lastInset)));
     const resize = () => { const r = wrap.getBoundingClientRect(); if (!r.width) return; renderer.setSize(r.width, r.height, false); cam.aspect = r.width / r.height; cam.updateProjectionMatrix(); render(); };
     const render = () => renderer.render(scene, cam);
     function update() {
+      // The corner noise comes from the scene itself: the same pose, noise level and tag count
+      // always give the same noisy frame (and the same solve), so redrawing for something
+      // unrelated, like the chain checkbox, can't make the solved robot jump.
+      seed = 1 + (Math.abs(Math.round(S.x * 1000) * 73856093 ^ Math.round(S.y * 1000) * 19349663 ^ Math.round(S.th * 1000) * 83492791 ^ Math.round(S.noise * 100) * 2654435761 ^ (S.two ? 97 : 13)) % 2147483645);
       const truth = camFromRobot(S.x, S.y, S.th);
       setBot(robot, S);
       const cp = W2T(...truth.C); camAx.position.copy(cp);
@@ -363,30 +376,44 @@ Site.chapter('pose', (root) => {
       const cs = [corner(hf, vf), corner(-hf, vf), corner(-hf, -vf), corner(hf, -vf)];
       cs.forEach((c, i) => fr.push(cp, c, c, cs[(i + 1) % 4]));
       setLines(frust, fr);
-      const obs = observe(truth, [TAGP], S.noise);
-      let sol = null, res = null;
+      const tagsIn = S.two ? [TAGP, TAG4] : [TAGP], names = S.two ? [3, 4] : [3];
+      const obs = observe(truth, tagsIn, S.noise);
+      const seen = [...new Set(obs.map((o) => o.tag))];
+      tag4Mesh.visible = lTag4.visible = S.two;
+      let sol = null, res = null, multi = false;
+      const status = $('#po-3d-status');
       if (obs.length) {
-        res = singleTag(obs, truth, TAGP);
-        sol = res.best;
+        let flipped = false;
+        if (seen.length > 1) {
+          // multi-tag: one PnP over all 8 corners, in field coordinates (like PhotonVision's multi-tag)
+          multi = true; sol = pnp(obs, jitter(truth));
+          status.textContent = 'Two tags in view: one PnP over all 8 corners (multi-tag). Only one pose fits, so it can\'t flip.';
+        } else {
+          const t = tagsIn[seen[0]];
+          res = singleTag(obs, truth, t); sol = res.best;
+          flipped = !res.bestIsA && !res.same && Math.hypot(res.A.C[0] - res.B.C[0], res.A.C[1] - res.B.C[1]) > 0.3;
+          status.textContent = S.two ? `Only tag ${names[seen[0]]} is fully in view, so this falls back to the single-tag solve (4 corners).` : 'One tag: PnP on its 4 corners.';
+        }
         const rb = robotFromCam(sol);
-        const flipped = !res.bestIsA && !res.same && Math.hypot(res.A.C[0] - res.B.C[0], res.A.C[1] - res.B.C[1]) > 0.3;
         ghost.visible = true; setBot(ghost, rb);
         ghost.children.forEach((c) => c.material.color.set(flipped ? 0xf59e0b : 0xa3e635));
-        setLines(rays, tagCorners(TAGP).flatMap((p) => [cp, W2T(...p)]));
+        setLines(rays, seen.flatMap((i) => tagCorners(tagsIn[i]).flatMap((p) => [cp, W2T(...p)])));
         $('#po-3d-sol').textContent = `${rb.x.toFixed(2)}, ${rb.y.toFixed(2)} m`;
         const err = Math.hypot(rb.x - S.x, rb.y - S.y);
         const e = $('#po-3d-err'); e.textContent = err < 1 ? (err * 100).toFixed(1) + ' cm' : err.toFixed(2) + ' m'; e.style.color = err > 0.3 ? AMBER : '';
-        const a = $('#po-3d-amb'); a.textContent = res.amb.toFixed(2); a.style.color = res.amb > 0.2 ? AMBER : '';
+        const a = $('#po-3d-amb');
+        if (multi) { a.textContent = 'none (multi-tag)'; a.style.color = ''; } else { a.textContent = res.amb.toFixed(2); a.style.color = res.amb > 0.2 ? AMBER : ''; }
         const px = Math.hypot(obs[0].uv[0] - obs[1].uv[0], obs[0].uv[1] - obs[1].uv[1]);
         $('#po-3d-px').textContent = px.toFixed(0) + ' px';
         // chain: origin -> tag -> camera (solved) -> robot (solved)
-        const sc = W2T(...sol.C), tg = W2T(TAGP.x, TAGP.y, TAGP.z), rc = W2T(rb.x, rb.y, 0.2);
+        const t0 = tagsIn[seen[0]], sc = W2T(...sol.C), tg = W2T(t0.x, t0.y, t0.z), rc = W2T(rb.x, rb.y, 0.2);
         [chainA, chainB, chainC, lL, lP, lM].forEach((o) => (o.visible = S.chain));
         setLines(chainA, [new THREE.Vector3(0, 0.02, 0), tg]); setLines(chainB, [tg, sc]); setLines(chainC, [sc, rc]);
         lL.position.copy(tg.clone().multiplyScalar(0.5)).add(new THREE.Vector3(0, 0.25, 0)); lP.position.copy(tg.clone().add(sc).multiplyScalar(0.5)).add(new THREE.Vector3(0, 0.2, 0)); lM.position.copy(sc.clone().add(rc).multiplyScalar(0.5)).add(new THREE.Vector3(0, 0.35, 0));
       } else {
         ghost.visible = false; setLines(rays, []); [chainA, chainB, chainC, lL, lP, lM].forEach((o) => (o.visible = false));
         $('#po-3d-sol').textContent = '–'; $('#po-3d-err').textContent = 'no tag'; $('#po-3d-amb').textContent = '–'; $('#po-3d-px').textContent = '–';
+        status.textContent = S.two ? 'Neither tag is fully in view: nothing to solve. Turn or move the robot.' : 'The tag isn\'t fully in view: nothing to solve. Turn or move the robot.';
       }
       $('#po-3d-true').textContent = `${S.x.toFixed(2)}, ${S.y.toFixed(2)} m`;
       $('#po-3d-dist').textContent = Math.hypot(truth.C[0] - TAGP.x, truth.C[1] - TAGP.y, truth.C[2] - TAGP.z).toFixed(2) + ' m';
@@ -395,11 +422,15 @@ Site.chapter('pose', (root) => {
     }
     // drag the robot on the floor
     const ray = new THREE.Raycaster(), ndc = new THREE.Vector2(), plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), hit = new THREE.Vector3();
-    let dragging = false;
+    let dragging = false; const grabOff = [0, 0];
     const pick = (e) => { const r = renderer.domElement.getBoundingClientRect(); ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1); ray.setFromCamera(ndc, cam); };
     renderer.domElement.addEventListener('pointerdown', (e) => {
       pick(e);
-      if (ray.intersectObject(robot, true).length) { dragging = true; controls.enabled = false; renderer.domElement.setPointerCapture(e.pointerId); renderer.domElement.style.cursor = 'grabbing'; }
+      if (ray.intersectObject(robot, true).length) {
+        dragging = true; controls.enabled = false; renderer.domElement.setPointerCapture(e.pointerId); renderer.domElement.style.cursor = 'grabbing';
+        // keep the grab point under the pointer, so the robot doesn't jump
+        if (ray.ray.intersectPlane(plane, hit)) { grabOff[0] = S.x - hit.x; grabOff[1] = S.y + hit.z; } else grabOff[0] = grabOff[1] = 0;
+      }
       else renderer.domElement.style.cursor = 'grabbing';
     }, true);
     renderer.domElement.addEventListener('pointermove', (e) => {
@@ -408,7 +439,7 @@ Site.chapter('pose', (root) => {
         pick(e); renderer.domElement.style.cursor = ray.intersectObject(robot, true).length ? 'move' : 'grab'; return;
       }
       pick(e);
-      if (ray.ray.intersectPlane(plane, hit)) { S.x = Site.clamp(hit.x, 0.7, 7.5); S.y = Site.clamp(-hit.z, -0.5, 7.5); update(); }
+      if (ray.ray.intersectPlane(plane, hit)) { S.x = Site.clamp(hit.x + grabOff[0], 0.7, 7.5); S.y = Site.clamp(-hit.z + grabOff[1], -0.5, 7.5); update(); }
     });
     const end = () => { renderer.domElement.style.cursor = 'grab'; if (dragging) { dragging = false; controls.enabled = true; } };
     renderer.domElement.addEventListener('pointerup', end); renderer.domElement.addEventListener('pointercancel', end);
@@ -416,6 +447,7 @@ Site.chapter('pose', (root) => {
     new ResizeObserver(resize).observe(wrap);
     Site.range($('#po-3d-yaw'), (v) => { S.th = Math.PI + (v * Math.PI) / 180; update(); }, (v) => (v > 0 ? '+' : '') + v + '° from facing the wall');
     Site.range($('#po-3d-noise'), (v) => { S.noise = v; update(); }, (v) => v.toFixed(2) + ' px');
+    Site.seg($('#po-3d-tags'), (v, b) => { S.two = v === '2'; b.parentElement.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x === b)); update(); });
     $('#po-3d-chain').addEventListener('change', (e) => { S.chain = e.target.checked; update(); });
     resize(); update();
   }

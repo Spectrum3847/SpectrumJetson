@@ -11,7 +11,7 @@
   #pose .three-wrap canvas { width: 100% !important; height: 100% !important; border-radius: 0; background: transparent; display: block; }
   #pose .three-wrap .inset { position: absolute; z-index: 2; pointer-events: none; right: 10px; top: 10px; width: 36%; border: 1px solid var(--lab-line); border-radius: 8px; box-shadow: 0 8px 20px rgba(0,0,0,.5); }
   #pose .three-wrap .inset canvas { height: auto !important; }
-  #pose .three-wrap .inset b { position: absolute; left: 8px; top: 5px; font: 700 .62rem var(--font); letter-spacing: .1em; text-transform: uppercase; color: var(--lab-muted); }
+  #pose .three-wrap .inset b { position: absolute; right: 8px; bottom: 5px; font: 700 .62rem var(--font); letter-spacing: .1em; text-transform: uppercase; color: var(--lab-muted); }
   #pose .three-wrap .tip { position: absolute; z-index: 2; left: 10px; bottom: 8px; font-size: .75rem; color: var(--lab-muted); background: rgba(14,5,24,.75); padding: 3px 8px; border-radius: 6px; pointer-events: none; }
   @media (max-width: 600px) { #pose .three-wrap { aspect-ratio: 4 / 5; } #pose .three-wrap .inset { width: 52%; } }
   #pose .chain svg { width: 100%; height: auto; }
@@ -124,18 +124,19 @@
 
   <div class="prose short">
     <p>Every FRC AprilTag is the same size, so its four corners say a lot: its size gives distance, its place in the picture gives direction, and how squashed it looks gives its angle. <span class="term">PnP</span> (Perspective-n-Point) uses all four corners at once to find where the camera must be. The field layout and the camera's mount on the robot then give the robot's pose on the field.</p>
-    <p>The catch: a small, far tag seen nearly straight on can fit two poses, turned left or right, on opposite sides of the tag (pose <span class="term">ambiguity</span>). With two or more tags in view, PhotonVision's multi-tag mode solves all the corners at once, and only one answer fits. Drag the robot far away, nearly straight on, and watch for flips:</p>
+    <p>The catch: a small, far tag seen nearly straight on can fit two poses, turned left or right, on opposite sides of the tag (pose <span class="term">ambiguity</span>). With two or more tags in view, PhotonVision's multi-tag mode solves all the corners at once, and only one answer fits. Drag the robot far away, nearly straight on, and watch for flips. Then switch to Two tags and watch the ambiguity disappear:</p>
   </div>
 
   <div class="lab">
     <div class="lab-head"><span class="tag">Lab</span><h4>Solve the camera's pose</h4></div>
-    <p class="todo">Drag the robot to move it. Drag anywhere else to turn the view; scroll or pinch to zoom.</p>
+    <p class="todo">Drag the robot to move it; drag anywhere else to turn the view. Drag it back or turn it until the solve flips (orange), then switch to Two tags.</p>
     <div class="three-wrap" id="po-3d">
-      <div class="inset"><b>What the camera sees</b><canvas id="po-3d-img"></canvas></div>
+      <div class="inset"><b>Camera view</b><canvas id="po-3d-img"></canvas></div>
     </div>
     <div class="lab-grid" style="margin-top:16px">
       <div>
-        <div class="ctl"><label>Robot heading <output></output></label><input type="range" id="po-3d-yaw" min="-70" max="70" step="1" value="-20"></div>
+        <div class="seg" id="po-3d-tags" style="margin-bottom:14px"><button data-v="1" class="on" aria-pressed="true">One tag</button><button data-v="2" aria-pressed="false">Two tags</button></div>
+        <div class="ctl"><label>Robot heading <output></output></label><input type="range" id="po-3d-yaw" min="-70" max="70" step="1" value="0"></div>
         <div class="ctl"><label>Corner noise <output></output></label><input type="range" id="po-3d-noise" min="0" max="2" step="0.05" value="0.5"></div>
         <label class="chk"><input type="checkbox" id="po-3d-chain" checked> Show the chain of transforms</label>
         <div class="legend"><span><i style="background:#fff"></i>real robot</span><span><i style="background:#a3e635"></i>solved from the corners</span><span><i style="background:#f59e0b"></i>solved, but flipped</span></div>
@@ -149,6 +150,8 @@
         <div><small>Ambiguity</small><b id="po-3d-amb">–</b></div>
       </div>
     </div>
+    <p class="hint" id="po-3d-status" aria-live="polite" style="color:#efe6ff"></p>
+    <p class="hint">Tag 4 sits 0.3556 m beside tag 3, the spacing of tags 3 and 4 on the red hub face in the 2026 AndyMark field layout, both 1.124 m up. The rest of the scene is illustrative.</p>
     <p class="hint full">The camera uses our calibration (fx 737, 1280×800). Each change adds fresh random noise to the four corners and solves again, the way the real system does 120 times a second. Drag the robot far away and near straight-on to the tag, and watch for flips.</p>
   </div>
 
