@@ -52,6 +52,24 @@ GROUPS = [
 ]
 
 
+# NVIDIA's devkit CAD carries PCB-design annotations that aren't physical parts: a lavender
+# keep-out box around every connector (the space it needs), flat footprint pads (zero
+# thickness, light blue) and red pin-1 markers. Drop them so the ports look like ports.
+KEEPOUT = (164, 164, 255)   # lavender keep-out boxes (a few dozen faces; the fan wire is also lavender, so size matters)
+PIN1 = (255, 0, 0)          # red pin-1 markers
+
+
+def is_annotation(m):
+    mat = getattr(m.visual, 'material', None)
+    col = getattr(mat, 'baseColorFactor', None)
+    col = tuple(int(c) for c in col[:3]) if col is not None else None
+    if col == KEEPOUT and len(m.faces) <= 150:
+        return True
+    if col == PIN1:
+        return True
+    return bool(len(m.faces)) and min(m.extents) < 1e-5  # flat sheets: footprint pads, outlines
+
+
 def group_meshes(scene, group_of, default=None):
     g = scene.graph
     kids = lambda n: g.transforms.children.get(n, [])
@@ -63,7 +81,7 @@ def group_meshes(scene, group_of, default=None):
                 grp = name
                 break
         gn = g.transforms.node_data[node].get('geometry')
-        if gn and grp:
+        if gn and grp and not is_annotation(scene.geometry[gn]):
             T, _ = g.get(node)
             m = scene.geometry[gn].copy()
             m.apply_transform(T)
