@@ -301,8 +301,10 @@ Site.chapter('camera', (root) => {
     const FRAME30 = 2.0, READ = 0.9, TAG_V = 26, S = 44; // tag speed in image px per unit of scene time; tag size
     const period = () => (FRAME30 * 30) / fps; // on-screen seconds per frame
     const tagG = Site.tagGrid(3);
-    // the tag sweeps back and forth across the view (the robot turning one way, then back), always fully in view
-    const tagX = (tm) => { const span = N - S - 8, u = ((tm * TAG_V) % (2 * span) + 2 * span) % (2 * span); return 4 + (u < span ? u : 2 * span - u); };
+    // The robot keeps turning left, so the tag sweeps across the view from left to right, leaves,
+    // and comes around again after the rest of the turn (the empty stretch, GAP px of scene).
+    const GAP = 60;
+    const tagX = (tm) => -S + (((tm * TAG_V) % (N + S + GAP)) + N + S + GAP) % (N + S + GAP);
     const scene = (x, y, tm) => {
       if (mode === 'prop') {
         const dx = x - 50, dy = y - 50, rr = Math.hypot(dx, dy), a = Math.atan2(dy, dx) - tm * 2.2;
