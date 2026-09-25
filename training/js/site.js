@@ -311,6 +311,14 @@
   Site.mode = new URLSearchParams(location.search).get('mode') || getSaved() || 'short';
   if (Site.mode !== 'full') Site.mode = 'short';
   const applyClass = (m) => { document.body.classList.toggle('mode-short', m === 'short'); document.body.classList.toggle('mode-full', m === 'full'); };
+  // The address always says which version you're on, so a copied or shared link opens the same one.
+  const baseTitle = document.title;
+  const showInUrl = (m) => {
+    const u = new URL(location.href);
+    u.searchParams.set('mode', m);
+    history.replaceState(history.state, '', u);
+    document.title = `${baseTitle} (${m === 'short' ? 'Short tour' : 'Full course'})`;
+  };
   Site.setMode = (m, keepPlace = true) => {
     if (m !== 'short' && m !== 'full') return;
     // keep the reader's place: remember what's at the top of the screen, restore it after the switch
@@ -323,6 +331,7 @@
     Site.mode = m;
     applyClass(m);
     try { localStorage.setItem('vt-mode', m); } catch (e) {}
+    showInUrl(m);
     document.querySelectorAll('[data-mode]').forEach((b) => b.classList.toggle('on', b.dataset.mode === m));
     showTimes();
     if (anchor) scrollBy(0, anchor.getBoundingClientRect().top - top);
@@ -360,6 +369,7 @@
 
   function chrome() {
     applyClass(Site.mode);
+    showInUrl(Site.mode);
     document.querySelectorAll('[data-mode]').forEach((b) => { b.classList.toggle('on', b.dataset.mode === Site.mode); b.addEventListener('click', () => Site.setMode(b.dataset.mode)); });
     const nav = document.querySelector('.topnav');
     const bar = nav.querySelector('.progress');
