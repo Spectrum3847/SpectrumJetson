@@ -373,7 +373,8 @@
         // content a chapter builds with JS after load (e.g. the quiz) isn't in the DOM yet: data-extra-short / data-extra-full add minutes for it
         const t = min + (hidden ? 0 : +(c.dataset['extra' + m[0].toUpperCase() + m.slice(1)] || 0));
         c.dataset['t' + m] = t;
-        total += t;
+        // the Reference part (section.chapter.ref) is for looking things up, not part of the course's length
+        if (!c.classList.contains('ref')) total += t;
       });
       return total;
     };

@@ -1,0 +1,323 @@
+<style>
+  #coords .lab-grid > *, #coords .split > * { min-width: 0; }
+  #coords .todo {    margin: -4px 0 14px; font: 600 .92rem/1.45 var(--font); color: #efe6ff;  padding-left: 1.6em; text-indent: -1.6em; }
+  #coords .todo::before { content: "\1F449"; display: inline-block; width: 1.6em; text-indent: 0; flex: none; }
+  #coords .code { font-family: var(--mono); font-size: .78rem; background: #1f1b23; border-radius: 10px; padding: 12px 14px; color: #f4efff; white-space: pre; overflow-x: auto; margin: 12px 0; }
+  #coords .code .c { color: #9d8fb8; }
+  #coords .code .k { color: #c4b5fd; }
+  #coords .code .n { color: #fcd34d; }
+  #coords .code .bad { color: #f59e0b; text-decoration: underline wavy rgba(245,158,11,.7); text-underline-offset: 3px; }
+  #coords .three-wrap { position: relative; border-radius: 12px; overflow: hidden; background: #0e0518; aspect-ratio: 16 / 10; touch-action: none; }
+  #coords .three-wrap > canvas { cursor: grab; width: 100% !important; height: 100% !important; display: block; border-radius: 0; background: transparent; }
+  #coords .three-wrap .tip { position: absolute; left: 10px; bottom: 8px; font-size: .75rem; color: var(--lab-muted); background: rgba(14,5,24,.75); padding: 3px 8px; border-radius: 6px; pointer-events: none; }
+  #coords .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: .8rem; color: var(--lab-muted); margin-top: 8px; }
+  #coords .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+  #coords .why { background: rgba(255,255,255,.05); border: 1px solid var(--lab-line); border-radius: 10px; padding: 10px 14px; margin-top: 12px; font-size: .9rem; color: var(--lab-ink); min-height: 4.2em; }
+  #coords .why.bad { border-color: rgba(245,158,11,.5); }
+  #coords .why.ok { border-color: rgba(163,230,53,.45); }
+  #coords .cap { font-size: .74rem; letter-spacing: .1em; text-transform: uppercase; color: var(--lab-muted); margin: 14px 0 6px; font-weight: 700; }
+  #coords #co-field { width: 100%; aspect-ratio: 2059 / 980; height: auto; cursor: crosshair; touch-action: manipulation; }
+  @media (max-width: 600px) { #coords #co-field { aspect-ratio: 980 / 2059; } }
+  #coords .ans { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+  #coords .ans button { all: unset; box-sizing: border-box; cursor: pointer; font: 500 .8rem/1.4 var(--mono); color: var(--lab-ink); background: rgba(255,255,255,.06); border: 1px solid var(--lab-line); border-radius: 10px; padding: 10px 12px; overflow-wrap: anywhere; }
+  #coords .ans button:hover:not([disabled]) { border-color: var(--accent-soft); }
+  #coords .ans button:focus-visible { outline: 2px solid var(--accent); }
+  #coords .ans button.right { background: rgba(163,230,53,.14); border-color: rgba(163,230,53,.6); color: #d9f99d; }
+  #coords .ans button.wrong { background: rgba(245,158,11,.14); border-color: rgba(245,158,11,.6); color: #fcd34d; }
+  #coords .ans button[disabled] { cursor: default; }
+  #coords .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+  #coords .axes4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 26px 0; }
+  @media (max-width: 900px) { #coords .axes4 { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 520px) { #coords .axes4 { grid-template-columns: 1fr; } }
+  #coords .axes4 .card h4 { margin-bottom: 4px; }
+  #coords .axes4 .card ul { margin: 8px 0 0; padding-left: 1.1em; font-size: .9rem; color: var(--muted); }
+  #coords .x { color: #dc2626; font-weight: 700; } #coords .y { color: #16a34a; font-weight: 700; } #coords .z { color: #2563eb; font-weight: 700; }
+  #coords .fig svg { width: 100%; height: auto; display: block; }
+  #coords table.data code { overflow-wrap: anywhere; }
+  @media (max-width: 600px) { #coords table.data { font-size: .85rem; } #coords table.data code { font-size: .78em; } }
+  @media (max-width: 600px) { #coords .three-wrap { aspect-ratio: 4 / 5; } #coords .ans { grid-template-columns: 1fr; } #coords .seg button, #coords .btn-sm, #coords .ans button { min-height: 40px; } #coords .lab input[type=range] { height: 40px; } }
+</style>
+<div class="shell">
+  <div class="ch-head">
+    <span class="eyebrow"><span class="num">19</span> · Reference</span>
+    <h2>Coordinate <em>systems.</em></h2>
+    <p class="lede">Most "vision bugs" in robot code aren't vision bugs. They're a minus sign, a transform pointing the wrong way, or degrees where radians belong. Here are the rules in one place, so the numbers going into robot code mean what you think they mean.</p>
+  </div>
+
+  <div class="prose short">
+    <p>Everything uses WPILib's rules. <b>The field:</b> the origin is always the blue corner, on both alliances. x points toward the red wall, y to the left (as the blue drivers see it), z up. Metres and radians. <b>Angles:</b> counter-clockwise is positive. <b>The robot:</b> x forward, y left, z up, origin at the robot's centre on the floor.</p>
+    <p>The one number robot code must get right is <code>robotToCamera</code>: where each camera sits on the robot. A camera tilted <em>up</em> has <em>negative</em> pitch, the angles are in radians, and it points from the robot to the camera. Try it:</p>
+  </div>
+
+  <div class="full">
+
+  <h3 style="margin-top:0">The field: one origin for everyone</h3>
+  <div class="prose">
+    <p>A pose is just three numbers: x, y and heading. They only mean something if everyone agrees where zero is and which way is positive. WPILib, PhotonVision, PathPlanner, Choreo and AdvantageScope all use the same rule, so pick it up once:</p>
+    <ul>
+      <li><strong>The origin is the blue corner.</strong> It's the right-hand corner of the blue alliance wall, as the blue drivers see it, on the floor. <em>Always</em>, even when we're on the red alliance.</li>
+      <li><strong><span class="x">x</span> points away from the blue wall</strong>, toward the red one. <strong><span class="y">y</span> points left</strong> as the blue drivers see it. <strong><span class="z">z</span> points up.</strong></li>
+      <li><strong>Metres and radians</strong>, everywhere in code. Degrees and inches are only for people.</li>
+    </ul>
+    <p>That's called <span class="term" data-term="NWU" data-def="North-West-Up: x forward, y left, z up. The axis convention WPILib uses for the field, the robot and (in PhotonLib) the camera.">NWU</span>: x "north", y "west", z up. It's a right-handed system: point your right hand's fingers along x, curl them toward y, and your thumb points along z.</p>
+    <p>On the 2026 <strong>AndyMark</strong> field, the one we'll play on in October, the far corner is at x = <strong>16.518 m</strong>, y = <strong>8.043 m</strong>. The centre of the field is (8.259, 4.022). The blue hub is at about x = 4.6 m and the red hub at about 11.9 m.</p>
+  </div>
+
+  </div>
+
+  <div class="lab">
+    <div class="lab-head"><span class="tag">Lab</span><h4>Which way is positive?</h4></div>
+    <p class="todo">Tap the field to put the robot there. Then switch to Quiz and pick the right pose.</p>
+    <canvas id="co-field" aria-label="Top-down view of the 2026 field with the WPILib origin in the blue corner; tap to place the robot"></canvas>
+    <div class="row">
+      <div class="seg" id="co-f-mode"><button data-v="explore" class="on">Explore</button><button data-v="quiz">Quiz</button></div>
+      <span class="hint" id="co-f-score" style="margin:0"></span>
+    </div>
+    <div id="co-f-explore">
+      <div class="ctl" style="margin-top:14px"><label>Heading <output></output></label><input type="range" id="co-f-h" min="-180" max="180" step="5" value="45"></div>
+      <div class="code" id="co-f-code"></div>
+    </div>
+    <div id="co-f-quiz" hidden>
+      <p class="cap">Which Pose2d is the purple robot at?</p>
+      <div class="ans" id="co-f-ans"></div>
+      <div class="why" id="co-f-fb" aria-live="polite">Pick one. Positions are rounded to 0.1 m.</div>
+      <div class="row"><button class="btn-sm primary" id="co-f-next">Next robot</button></div>
+    </div>
+    <p class="hint">The dashed red outline is the same spot for the red alliance: the 2026 field is the same when turned 180° around its centre, so red's version of (x, y, θ) is (16.518 − x, 8.043 − y, θ + 180°). Field layout: the 2026 AndyMark JSON.</p>
+  </div>
+
+  <div class="full">
+
+  <h3>Angles: counter-clockwise is positive</h3>
+  <div class="split top">
+    <div class="prose">
+      <p>Every angle in WPILib follows the <span class="term" data-term="right-hand rule" data-def="Point your right thumb along an axis; your fingers curl the way a positive rotation around that axis turns.">right-hand rule</span>. Point your right thumb along an axis, and your fingers curl the way a positive turn goes.</p>
+      <ul>
+        <li><b>Yaw</b> is a turn around z (thumb up). Seen from above, that's <strong>counter-clockwise</strong>: turning left makes yaw bigger. Heading 0 faces the red wall, +90° faces the left side wall.</li>
+        <li><b>Pitch</b> is a turn around y (thumb to the robot's left). Your fingers curl so the front tips <strong>down</strong>. So a camera tilted <strong>up is negative pitch</strong>. This one catches everybody.</li>
+        <li><b>Roll</b> is a turn around x (thumb forward): the left side rises.</li>
+      </ul>
+      <p>In code the angles are radians: 15° is 0.262 rad, and 1 rad is 57.3°. Let WPILib convert for you with <code>Units.degreesToRadians(15)</code> or <code>Rotation2d.fromDegrees(15)</code>, and never type a bare degree number into a constructor.</p>
+    </div>
+    <figure class="fig reveal" style="margin:0">
+      <svg viewBox="0 0 520 250" role="img" aria-label="Side view of a robot facing right with a camera tilted up 15 degrees: pitch is minus 15 degrees">
+        <rect x="0" y="0" width="520" height="250" fill="#faf5ff"/>
+        <line x1="20" y1="200" x2="500" y2="200" stroke="#b7a6cf" stroke-width="3"/>
+        <rect x="90" y="150" width="200" height="44" rx="6" fill="#6b1199"/>
+        <rect x="258" y="96" width="8" height="56" fill="#8f84a3"/>
+        <g transform="translate(262 92) rotate(-15)"><rect x="-22" y="-14" width="36" height="28" rx="5" fill="#1f1b23"/><rect x="14" y="-9" width="12" height="18" rx="2" fill="#4c0070"/><line x1="26" y1="0" x2="210" y2="0" stroke="#8b5cf6" stroke-width="3" stroke-dasharray="7 6"/></g>
+        <line x1="288" y1="92" x2="480" y2="92" stroke="#8f84a3" stroke-width="2" stroke-dasharray="4 6"/>
+        <path d="M 420 92 A 158 158 0 0 0 414.6 51.1" fill="none" stroke="#f59e0b" stroke-width="3"/>
+        <text x="330" y="128" font-family="JetBrains Mono, monospace" font-size="17" font-weight="700" fill="#c2410c">pitch = −15°</text>
+        <g transform="translate(46 200)"><line x1="0" y1="0" x2="58" y2="0" stroke="#dc2626" stroke-width="4"/><path d="M58 -7 L70 0 L58 7z" fill="#dc2626"/><line x1="0" y1="0" x2="0" y2="-58" stroke="#2563eb" stroke-width="4"/><path d="M-7 -58 L0 -70 L7 -58z" fill="#2563eb"/><circle r="10" fill="#fff" stroke="#16a34a" stroke-width="3"/><path d="M-6 -6 L6 6 M6 -6 L-6 6" stroke="#16a34a" stroke-width="3"/>
+          <text x="74" y="6" font-family="Outfit, sans-serif" font-weight="700" font-size="16" fill="#dc2626">x</text><text x="-6" y="-76" font-family="Outfit, sans-serif" font-weight="700" font-size="16" fill="#2563eb">z</text><text x="14" y="26" font-family="Outfit, sans-serif" font-weight="700" font-size="14" fill="#16a34a">y (into the screen)</text></g>
+      </svg>
+      <figcaption>The robot faces right, so its left (+y) points into the screen. Right thumb along +y: your fingers curl clockwise here, tipping the lens down. Down is positive, so this camera, tilted 15° up, has pitch −15°.</figcaption>
+    </figure>
+  </div>
+
+  <details class="deep">
+    <summary>Rotation3d: roll, pitch, yaw, in that order</summary>
+    <div>
+      <p><code>new Rotation3d(roll, pitch, yaw)</code> takes radians and applies the turns around the <em>fixed</em> axes in the order x, then y, then z (WPILib calls these <em>extrinsic</em> rotations). That's the same as turning around the object's own axes in the opposite order: yaw first, then pitch around the camera's new left axis, then roll around its new forward axis. For a camera, that matches how you'd describe it: "turned 30° left, then tilted 15° up".</p>
+      <p>Order matters once two angles are non-zero: yaw 90° then pitch 20° is not the same as pitch 20° then yaw 90°. As long as you build the rotation from the constructor and read it back with <code>getX()</code> (roll), <code>getY()</code> (pitch) and <code>getZ()</code> (yaw), the order is handled for you.</p>
+      <p><code>Rotation2d</code> is only the yaw. <code>Pose3d.toPose2d()</code> keeps x, y and yaw and drops z, roll and pitch, which is what the drivetrain's pose estimator wants.</p>
+    </div>
+  </details>
+
+  <h3>Four frames you'll meet</h3>
+  <div class="prose"><p>A frame is an origin plus three axes. Vision code hops between four of them, and every one uses WPILib's x-forward, y-left, z-up pattern:</p></div>
+  <div class="axes4 reveal">
+    <div class="card"><h4>Field</h4><p>Origin: the blue corner, on the floor.</p><ul><li><span class="x">x</span> toward the red wall</li><li><span class="y">y</span> left, as blue sees it</li><li><span class="z">z</span> up</li></ul></div>
+    <div class="card"><h4>Robot</h4><p>Origin: the robot's centre, <b>on the floor</b>.</p><ul><li><span class="x">x</span> forward</li><li><span class="y">y</span> left</li><li><span class="z">z</span> up</li></ul></div>
+    <div class="card"><h4>Camera</h4><p>Origin: the lens.</p><ul><li><span class="x">x</span> out of the lens</li><li><span class="y">y</span> the camera's left</li><li><span class="z">z</span> the camera's up</li></ul></div>
+    <div class="card"><h4>AprilTag</h4><p>Origin: the tag's centre.</p><ul><li><span class="x">x</span> straight out of the printed face</li><li><span class="y">y</span> to your right as you face the tag</li><li><span class="z">z</span> up</li></ul></div>
+  </div>
+  <p class="prose">A robot facing a tag head-on sees it straight ahead (+x) and turned 180° (its x points back at the robot). PhotonVision draws all of these with the same colours as this page: <span class="x">x red</span>, <span class="y">y green</span>, <span class="z">z blue</span>, in the 3D view and the target overlay.</p>
+
+  <details class="deep">
+    <summary>OpenCV's camera frame, and why you never see it</summary>
+    <div>
+      <p>Inside PhotonVision, OpenCV's solvePnP works in its own camera frame: <b>x right, y down, z out of the lens</b>, the way image pixels are laid out (u grows right, v grows down). The tag's frame in OpenCV is different again.</p>
+      <p>Before the result leaves the Jetson, PhotonVision rotates it into the WPILib-style frames above, so <code>getBestCameraToTarget()</code> is already x-forward, y-left, z-up. You only need OpenCV's frame if you read raw corner pixels and do your own math: then remember pixel v grows <em>downward</em>, which is why a target above the centre of the image has positive pitch even though its v is smaller. Tick "OpenCV axes" in the lab below to see both on the same camera.</p>
+    </div>
+  </details>
+
+  <h3>robotToCamera: where the camera sits</h3>
+  <div class="prose">
+    <p>Each camera needs one <code>Transform3d</code> in robot code: the move and turn that take you <strong>from the robot's origin to the camera's lens</strong>. PhotonLib's <code>PhotonPoseEstimator</code> takes it in its constructor (<a href="#photonlib">chapter 18</a>). Every number is in the robot frame:</p>
+    <ul>
+      <li><b>x</b>: how far the lens is in front of the robot's centre (negative = behind).</li>
+      <li><b>y</b>: how far it is to the left of centre (negative = right).</li>
+      <li><b>z</b>: how high the lens is above the <em>floor</em>, not above the frame rails.</li>
+      <li><b>yaw</b>: which way it faces. 0 = forward, +90° = out the left side, 180° = backward.</li>
+      <li><b>pitch</b>: tilt. Up is negative.</li>
+      <li><b>roll</b>: usually 0, unless the camera is mounted sideways or twisted.</li>
+    </ul>
+    <p>The name tells you the direction: robot <em>to</em> camera. PhotonLib finds the camera's pose on the field from the tags, then walks back to the robot with <code>robotToCamera.inverse()</code> (<a href="#pose">chapter 12</a> shows the whole chain). Get any number wrong and every pose from that camera is wrong by the same amount.</p>
+  </div>
+
+  </div>
+
+  <div class="lab">
+    <div class="lab-head"><span class="tag">Lab</span><h4>Mount a camera, write the Java</h4></div>
+    <p class="todo">Move the sliders and watch the Java change. Then pick a mistake and see where robot code would think the robot is.</p>
+    <div class="three-wrap" id="co-3d"><span class="tip">Drag to turn the view</span></div>
+    <div class="legend"><span><i style="background:#ef4444"></i>x</span><span><i style="background:#22c55e"></i>y</span><span><i style="background:#3b82f6"></i>z</span><span><i style="background:#8b5cf6"></i>camera view</span><span><i style="background:#f59e0b"></i>where robot code thinks the robot is</span></div>
+    <div class="lab-grid" style="margin-top:16px">
+      <div>
+        <div class="code" id="co-code" aria-live="polite"></div>
+        <p class="cap">Common mistakes</p>
+        <div class="seg" id="co-mis"><button data-v="none" class="on">None</button><button data-v="pitch">Pitch sign</button><button data-v="lr">Left/right</button><button data-v="deg">Degrees</button><button data-v="inv">No .inverse()</button></div>
+        <div class="why ok" id="co-why"></div>
+        <div class="readout">
+          <div><small>Position error</small><b id="co-e-xy">–</b></div>
+          <div><small>Heading error</small><b id="co-e-h">–</b></div>
+          <div><small>Height off the floor</small><b id="co-e-z">–</b></div>
+          <div><small>Tilt</small><b id="co-e-t">–</b></div>
+        </div>
+      </div>
+      <div>
+        <div class="ctl"><label>x, forward <output></output></label><input type="range" id="co-x" min="-0.45" max="0.45" step="0.01" value="0.26"></div>
+        <div class="ctl"><label>y, left <output></output></label><input type="range" id="co-y" min="-0.45" max="0.45" step="0.01" value="0.26"></div>
+        <div class="ctl"><label>z, height above the floor <output></output></label><input type="range" id="co-z" min="0.1" max="1" step="0.01" value="0.45"></div>
+        <div class="ctl"><label>yaw (CCW +) <output></output></label><input type="range" id="co-yaw" min="-180" max="180" step="1" value="30"></div>
+        <div class="ctl"><label>pitch (down +) <output></output></label><input type="range" id="co-p" min="-45" max="45" step="1" value="-15"></div>
+        <div class="ctl full"><label>roll <output></output></label><input type="range" id="co-r" min="-30" max="30" step="1" value="0"></div>
+        <label class="chk full" style="display:flex;gap:8px;align-items:center;font-size:.86rem;cursor:pointer;margin-top:4px"><input type="checkbox" id="co-cv" style="accent-color:var(--accent);width:16px;height:16px"> OpenCV axes on the camera</label>
+      </div>
+    </div>
+    <p class="hint">The camera's pose on the field is taken as known (the tags give it). Only what robot code <em>believes</em> about the mount changes. The dashed red, green and blue legs are the x, y and z of the translation, measured from the robot's origin on the floor. Starting numbers: the example mount from our field calibration tool's docs.</p>
+    <p class="hint full">Estimators that assume the robot is flat on the floor (the gyro-heading solves in <a href="#gyro">chapter 13</a>) turn a pitch mistake into a distance mistake too: about 7 cm per degree for a tag 4 m away.</p>
+  </div>
+
+  <div class="prose short">
+    <p>Measure the mount from CAD or with a tape measure, then cross-check it: with the robot level and 2+ tags in view, PhotonVision's Targets tab shows each camera's height, pitch and roll with <code>robotToCamera</code>'s signs (our <code>photonvision-17</code>).</p>
+    <p>Two more traps. <code>target.getYaw()</code> is in degrees and <strong>positive to the right</strong>, the opposite of WPILib, so "turn toward the tag" is <code>turn = -kP * target.getYaw()</code>. And on the red alliance, <strong>don't flip vision poses</strong>: they're blue-origin already. Flip only what you wrote down for blue, like auto paths and aim points. Load the field with <code>AprilTagFields.k2026RebuiltAndymark</code>; the default in WPILib 2027 is the welded field.</p>
+  </div>
+
+  <div class="full">
+
+  <h3>Measuring it on the real robot</h3>
+  <div class="split top">
+    <div class="prose">
+      <p><b>Start from CAD.</b> Put a point at the robot's centre on the floor plane and read off the lens position and the mount angles. CAD is usually right to a few millimetres, if the robot was built like the CAD.</p>
+      <p><b>Check with a tape measure.</b> Measure from the robot's centre (halfway between the frame rails, both ways) to the middle of the lens, and from the floor up. Use a digital angle gauge or a phone level on the camera's face for pitch. Write the numbers in metres and degrees with the sign: "0.26 forward, 0.26 left, 0.45 up, yawed 30° left, tilted 15° up" becomes <code>(0.26, 0.26, 0.45)</code>, yaw <code>+30°</code>, pitch <code>−15°</code>.</p>
+      <p><b>Name it after the port.</b> Our cameras are named after their USB ports (TopLeft, TopRight, BottomLeft, BottomRight), so give each camera's transform the same name in robot code. Swapping two cables swaps two mounts, and every pose from both cameras goes wrong. <a href="#camsetup">Chapter 20</a> covers setting up the names.</p>
+    </div>
+    <div class="callout spectrum" style="margin:0">
+      <h5>What we built: two ways to check it</h5>
+      <p><b>Camera mount estimate</b> (<code>photonvision-17</code>). With the robot level on the floor and 2+ tags in view, the Targets tab shows each camera's height, pitch and roll, averaged over 100 samples. They use <code>robotToCamera</code>'s signs (tilted up = negative pitch), so compare them straight with robot code's z, pitch and roll. Robot code can read them at <code>/photonvision/&lt;camera&gt;/mount</code> and warn when a camera gets bumped.</p>
+      <p><b>Field calibration</b> (<code>photonvision-30</code>). Push the robot to 10–20 spots and the Jetson solves every camera's full mount, x, y and yaw included, and gives a Java snippet. For that, robot code publishes each camera's <code>robotToCamera</code> at <code>/photonvision/&lt;camera&gt;/robotToCamera</code>. See <a href="#calibration">chapter 11</a>.</p>
+    </div>
+  </div>
+
+  <h3>Target yaw and pitch: the other sign convention</h3>
+  <div class="prose">
+    <p>PhotonLib gives two kinds of answers for each target. The <b>2D</b> ones, <code>getYaw()</code> and <code>getPitch()</code>, are angles in <b>degrees</b> from the centre of the image to the target. The <b>3D</b> one, <code>getBestCameraToTarget()</code>, is a <code>Transform3d</code> in the camera frame, in metres and radians.</p>
+    <p>Here's the trap: <strong><code>getYaw()</code> is positive to the right</strong> (clockwise), the opposite of every other angle in WPILib. <code>getPitch()</code> is positive up. We checked PhotonVision's source at the version on our robot: the yaw is <code>atan((u − cx) / fx)</code>, and pixel u grows to the right. PhotonLib's own <code>PhotonUtils</code> notes that "Photon returns CW-positive". Some of PhotonVision's docs and one Javadoc comment say "positive left". They're wrong.</p>
+  </div>
+  <div class="table-wrap reveal">
+    <table class="data">
+      <tr><th>What</th><th>Units</th><th>Positive means</th><th>Frame</th></tr>
+      <tr><td><code>target.getYaw()</code></td><td>degrees</td><td><b>right</b> (clockwise)</td><td>the image, from its centre</td></tr>
+      <tr><td><code>target.getPitch()</code></td><td>degrees</td><td>up</td><td>the image, from its centre</td></tr>
+      <tr><td><code>getBestCameraToTarget()</code></td><td>metres, radians</td><td>x ahead, y left, z up; angles CCW</td><td>camera</td></tr>
+      <tr><td>Pitch in <code>robotToCamera</code></td><td>radians</td><td><b>down</b></td><td>robot</td></tr>
+      <tr><td><code>cameraPitchRadians</code> in <code>PhotonUtils.calculateDistanceToTargetMeters</code></td><td>radians</td><td><b>up</b></td><td>robot</td></tr>
+      <tr><td>Robot heading, <code>Pose2d</code> rotation</td><td>radians</td><td>counter-clockwise</td><td>field</td></tr>
+    </table>
+  </div>
+  <p class="caption">Yes, the last two pitches have opposite signs. <code>calculateDistanceToTargetMeters</code> takes the camera's tilt "positive up", so pass <code>-robotToCamera.getRotation().getY()</code>.</p>
+  <div class="split top">
+    <div class="prose">
+      <p>The two agree if you convert: for a tag, <code>getYaw()</code> is minus the angle of the 3D translation, <code>−atan2(y, x)</code>, and <code>getPitch()</code> is <code>atan2(z, √(x² + y²))</code>. Both are measured from the <em>camera's</em> axis, not the robot's, so a camera yawed 30° needs that added before you aim the robot.</p>
+      <p>That's why the classic "turn toward the tag" code has a minus sign in it. A tag to the right gives a positive yaw, but turning right is a <em>negative</em> (clockwise) rotation speed.</p>
+    </div>
+    <div class="code"><span class="c">// Aim at a tag: yaw is + to the RIGHT,</span>
+<span class="c">// rotation speed is + to the LEFT (CCW).</span>
+<span class="k">double</span> turn = -kP * target.getYaw();
+
+<span class="c">// The same angle from the 3D transform (radians, + left):</span>
+Translation3d t = target.getBestCameraToTarget().getTranslation();
+<span class="k">double</span> leftRad = Math.atan2(t.getY(), t.getX());
+<span class="c">// Units.radiansToDegrees(leftRad) == -target.getYaw()</span></div>
+  </div>
+
+  <h3>Red alliance: flip the plans, not the poses</h3>
+  <div class="prose">
+    <p>Because the origin never moves, <strong>vision poses need no flipping</strong>. PhotonVision on the Jetson always measures from the blue corner, and so does the pose estimator. A robot 2 m in front of the red wall is at x = 14.5 m, whichever alliance it's on.</p>
+    <p>What does need flipping is anything <em>we</em> wrote down for blue: auto paths, scoring spots, aim targets like "the centre of our hub". The 2026 field is the same when turned 180° around its centre, so red's version of a blue pose is (16.518 − x, 8.043 − y, heading + 180°). PathPlanner and Choreo can do this for paths. Also, for red drivers, "push the stick forward" means −x on the field, so field-centric driving flips the joystick on red.</p>
+  </div>
+  <div class="callout pitfall">
+    <h5>Don't move the origin</h5>
+    <p>Old robot code sometimes called <code>layout.setOrigin(OriginPosition.kRedAllianceWallRightSide)</code> on red. Don't. The Jetson's poses are always blue-origin, so the robot code's layout must be too. And load the right field: in WPILib 2027 alpha-6, <code>AprilTagFields.kDefaultField</code> is the <b>welded</b> 2026 field (16.541 × 8.069 m). Ours is AndyMark: <code>AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltAndymark)</code>, the same layout loaded in PhotonVision.</p>
+  </div>
+
+  <details class="deep">
+    <summary>The mount in code, the 2027 way</summary>
+    <div>
+      <p>In WPILib 2027 the packages moved from <code>edu.wpi.first.math</code> to <code>org.wpilib.math</code>. PhotonLib 2027.0.0-alpha-2 uses the new ones:</p>
+      <div class="code"><span class="k">import</span> org.wpilib.math.geometry.*;
+<span class="k">import</span> org.wpilib.math.util.Units;
+<span class="k">import</span> org.wpilib.vision.apriltag.AprilTagFieldLayout;
+<span class="k">import</span> org.wpilib.vision.apriltag.AprilTagFields;
+
+<span class="c">// TopLeft: 0.26 m forward, 0.26 m left, 0.45 m up, turned 30° left, tilted 15° UP</span>
+<span class="k">static final</span> Transform3d TOP_LEFT = <span class="k">new</span> Transform3d(
+    <span class="k">new</span> Translation3d(0.26, 0.26, 0.45),
+    <span class="k">new</span> Rotation3d(0, Units.degreesToRadians(-15), Units.degreesToRadians(30)));
+
+<span class="k">static final</span> AprilTagFieldLayout LAYOUT =
+    AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltAndymark);
+
+<span class="c">// Need camera → robot instead? Invert it, don't retype it.</span>
+Transform3d cameraToRobot = TOP_LEFT.inverse();</div>
+      <p>The numbers here are an example, not our real mounts. Our robot code doesn't have vision yet; <a href="#photonlib">chapter 18</a> walks through the rest of it.</p>
+    </div>
+  </details>
+
+  <div class="table-wrap reveal">
+    <table class="data">
+      <tr><th colspan="2">Sign cheat sheet</th></tr>
+      <tr><td>Field origin</td><td>Blue corner, right-hand side as blue sees it, on the floor. Both alliances.</td></tr>
+      <tr><td>x / y / z</td><td>Toward red / left (blue's view) / up. Robot: forward / left / up.</td></tr>
+      <tr><td>Heading, yaw</td><td>Counter-clockwise +. 0 = facing the red wall.</td></tr>
+      <tr><td>Camera pitch in <code>robotToCamera</code></td><td>Down +, so tilted up is negative.</td></tr>
+      <tr><td><code>target.getYaw()</code></td><td>Right +, in degrees. The odd one out.</td></tr>
+      <tr><td>Units in code</td><td>Metres and radians. <code>Units.degreesToRadians</code>, <code>Units.inchesToMeters</code>.</td></tr>
+      <tr><td>Direction</td><td><code>robotToCamera</code> = robot → camera. Use <code>.inverse()</code> for camera → robot.</td></tr>
+      <tr><td>Red side of a blue pose</td><td>(16.518 − x, 8.043 − y, θ + 180°) on the 2026 AndyMark field.</td></tr>
+    </table>
+  </div>
+
+  <div class="deeper">
+    <a href="https://docs.photonvision.org/en/latest/docs/apriltag-pipelines/coordinate-systems.html">PhotonVision: coordinate systems</a>
+    <a href="https://docs.wpilib.org/en/stable/docs/software/basic-programming/coordinate-system.html">WPILib: coordinate system</a>
+    <a href="https://docs.wpilib.org/en/stable/docs/software/advanced-controls/geometry/coordinate-systems.html">WPILib: geometry coordinate systems</a>
+    <a href="https://docs.photonvision.org/en/latest/docs/programming/photonlib/getting-target-data.html">PhotonLib: getting target data</a>
+  </div>
+
+  </div>
+
+  <div class="recap reveal short">
+    <h5>Chapter 19 recap</h5>
+    <ul>
+      <li>Field origin: the blue corner, on both alliances. x toward red, y left, z up. Metres and radians.</li>
+      <li>Angles are counter-clockwise positive, except camera pitch in <code>robotToCamera</code> (tilted up = negative) and <code>target.getYaw()</code> (right = positive).</li>
+      <li><code>robotToCamera</code> goes robot → camera, from the robot's centre on the floor. Wrap degrees in <code>Units.degreesToRadians</code>.</li>
+      <li>Use <code>k2026RebuiltAndymark</code>, not the default (welded) field.</li>
+    </ul>
+  </div>
+  <div class="recap reveal full">
+    <h5>Chapter 19 recap</h5>
+    <ul>
+      <li>Field: origin at the blue corner (right-hand side as blue sees it), on both alliances. x toward red, y left, z up. The AndyMark 2026 field is 16.518 × 8.043 m.</li>
+      <li>Angles follow the right-hand rule: yaw counter-clockwise +, pitch down +, roll left-side-up +. Radians in code.</li>
+      <li>Robot frame: origin at the centre on the floor. Camera frame (PhotonLib): x out of the lens, y left, z up. OpenCV's x-right, y-down frame stays inside PhotonVision.</li>
+      <li><code>robotToCamera</code> = robot → camera. PhotonLib walks back with <code>.inverse()</code>. A flipped pitch tilts and shifts every pose; check it with the mount estimate or field calibration.</li>
+      <li><code>getYaw()</code> is degrees, positive right; <code>getBestCameraToTarget()</code> is metres and radians, positive left.</li>
+      <li>Red alliance: don't flip poses or the origin; mirror the paths and aim points. Load <code>k2026RebuiltAndymark</code>.</li>
+    </ul>
+  </div>
+</div>

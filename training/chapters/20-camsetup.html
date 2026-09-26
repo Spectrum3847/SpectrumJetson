@@ -1,0 +1,442 @@
+<style>
+  #camsetup .lab-grid > *, #camsetup .split > * { min-width: 0; }
+  #camsetup .todo { margin: -4px 0 14px; font: 600 .92rem/1.45 var(--font); color: #efe6ff; padding-left: 1.6em; text-indent: -1.6em; }
+  #camsetup .todo::before { content: "\1F449"; display: inline-block; width: 1.6em; text-indent: 0; }
+  #camsetup .code { font-family: var(--mono); font-size: .78rem; background: #1f1b23; border-radius: 10px; padding: 12px 14px; color: #f4efff; white-space: pre; overflow-x: auto; margin: 12px 0; }
+  #camsetup .code .c { color: #9d8fb8; }
+  #camsetup .code .k { color: #c4b5fd; }
+  #camsetup .code .s { color: #bef264; }
+
+  /* ── The steps ── */
+  #camsetup .cs-map { display: flex; flex-wrap: wrap; gap: 6px; margin: 22px 0 8px; padding: 0; list-style: none; counter-reset: m; }
+  #camsetup .cs-map a { display: inline-flex; align-items: center; gap: 7px; font: 600 .82rem var(--font); text-decoration: none; color: var(--p700); background: var(--accent-low); border: 1px solid var(--border-strong); border-radius: 999px; padding: 5px 12px 5px 6px; }
+  #camsetup .cs-map a:hover { border-color: var(--accent); }
+  #camsetup .cs-map a b { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--p700); color: #fff; font: 700 .72rem var(--font-heading); }
+  #camsetup .cs-step { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 18px; margin: 34px 0; }
+  #camsetup .cs-num { width: 52px; height: 52px; border-radius: 14px; background: linear-gradient(135deg, var(--p700), var(--accent)); color: #fff; display: grid; place-items: center; font: 800 1.45rem var(--font-heading); box-shadow: var(--shadow-md); position: sticky; top: calc(var(--nav-h) + 14px); }
+  #camsetup .cs-body h3 { margin: 6px 0 10px; }
+  #camsetup .cs-body > p, #camsetup .cs-body li { max-width: var(--prose); }
+  #camsetup .cs-do { margin: 0 0 12px; padding-left: 1.3em; }
+  #camsetup .cs-do li { margin-bottom: .35em; }
+  #camsetup .cs-meta { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-top: 6px; }
+  #camsetup .cs-pass { font-size: .9rem; background: #f0fdf4; color: #14532d; border: 1px solid #bbf7d0; border-radius: 10px; padding: 7px 12px; max-width: var(--prose); }
+  #camsetup .cs-pass b { color: #15803d; }
+  #camsetup .cs-why { font: 600 .86rem var(--font); }
+  #camsetup .cs-step details.deep { margin-top: 14px; max-width: var(--prose); }
+  @media (max-width: 600px) {
+    #camsetup .cs-step { grid-template-columns: minmax(0, 1fr); gap: 6px; margin: 28px 0; }
+    #camsetup .cs-num { position: static; width: 40px; height: 40px; font-size: 1.1rem; border-radius: 11px; }
+  }
+  #camsetup table.data td:first-child { white-space: nowrap; }
+
+  /* ── Port map lab ── */
+  #camsetup #cs-robot { cursor: default; touch-action: pan-y; }
+  #camsetup .jet { background: #0e0518; border: 1px solid var(--lab-line); border-radius: 14px; padding: 12px; }
+  #camsetup .jet-top { display: flex; justify-content: space-between; font: 600 .7rem var(--mono); color: var(--lab-muted); margin-bottom: 8px; letter-spacing: .04em; }
+  #camsetup .ports { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  #camsetup .port { all: unset; box-sizing: border-box; cursor: pointer; touch-action: manipulation; border-radius: 10px; padding: 8px 10px 9px; background: rgba(255,255,255,.04); border: 2px solid var(--lab-line); transition: border-color .2s, background .2s, transform .15s; min-height: 92px; display: flex; flex-direction: column; gap: 3px; }
+  #camsetup .port:hover { background: rgba(255,255,255,.08); }
+  #camsetup .port:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #camsetup .port.sel { border-color: #fff; background: rgba(139,92,246,.28); transform: translateY(-2px); }
+  #camsetup .port .sock { height: 12px; width: 62%; border-radius: 3px; background: linear-gradient(#000 0 35%, #3b82f6 35% 70%, #000 70%); border: 1px solid #555; margin-bottom: 4px; }
+  #camsetup .port .nm { font: 700 .95rem var(--font-heading); color: #fff; line-height: 1.1; }
+  #camsetup .port .nm small { font: 500 .68rem var(--mono); color: var(--lab-muted); margin-left: 4px; }
+  #camsetup .port .cam { font-size: .76rem; color: var(--lab-ink); display: flex; align-items: center; gap: 6px; line-height: 1.25; }
+  #camsetup .port .cam i { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+  #camsetup .port .st { font: 600 .7rem var(--mono); line-height: 1.3; }
+  #camsetup .port .st.ok { color: #a3e635; }
+  #camsetup .port .st.warn { color: #fcd34d; }
+  #camsetup .port .st.bad { color: #fda4af; }
+  #camsetup .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  #camsetup .pm-note { font-size: .86rem; color: var(--lab-muted); margin: 12px 0 0; min-height: 3.2em; }
+  #camsetup .pm-note b { color: #fff; }
+  #camsetup .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: .78rem; color: var(--lab-muted); margin-top: 8px; }
+  #camsetup .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+
+  /* ── Bench sheet (checklist) lab ── */
+  #camsetup .sheet { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 6px; }
+  #camsetup .sheet label { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 9px 12px; border-radius: 10px; background: rgba(255,255,255,.04); border: 1px solid var(--lab-line); cursor: pointer; transition: background .2s, border-color .2s; }
+  #camsetup .sheet label:hover { background: rgba(255,255,255,.08); }
+  #camsetup .sheet input { width: 20px; height: 20px; margin: 2px 0 0; accent-color: #a3e635; cursor: pointer; }
+  #camsetup .sheet b { display: block; color: #fff; font: 700 .92rem var(--font-heading); }
+  #camsetup .sheet small { display: block; color: var(--lab-muted); font-size: .8rem; line-height: 1.4; margin-top: 2px; }
+  #camsetup .sheet a { font: 600 .72rem var(--font); color: var(--accent-soft); white-space: nowrap; margin-top: 3px; }
+  #camsetup .sheet li.done label { background: rgba(163,230,53,.08); border-color: rgba(163,230,53,.35); }
+  #camsetup .sheet li.done b { text-decoration: line-through; text-decoration-color: rgba(163,230,53,.6); }
+  #camsetup .bar { height: 10px; border-radius: 999px; background: rgba(255,255,255,.08); overflow: hidden; margin-top: 12px; }
+  #camsetup .bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #8b5cf6, #a3e635); transition: width .3s; }
+  #camsetup .sheet-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+  #camsetup .sheet-count { font: 700 .9rem var(--mono); color: #a3e635; }
+
+  @media (max-width: 600px) {
+    #camsetup .seg button, #camsetup .btn-sm { min-height: 40px; }
+    #camsetup .port { min-height: 104px; padding: 8px; }
+    #camsetup .port .nm small { display: block; margin: 2px 0 0; }
+    #camsetup .sheet label { grid-template-columns: 26px minmax(0, 1fr); min-height: 44px; }
+    #camsetup .sheet a { grid-column: 2; }
+  }
+</style>
+<div class="shell">
+  <div class="ch-head">
+    <span class="eyebrow"><span class="num">20</span> · Reference</span>
+    <h2>Setting up <em>a camera.</em></h2>
+    <p class="lede">A new camera, or one that replaces a broken one, from the box to poses you can trust on the robot. Nine steps, each with a number to hit. The why is in earlier chapters; this is the how.</p>
+  </div>
+
+  <div class="prose">
+    <p>Every step says where to click in <em>our</em> PhotonVision (at <code>http://10.85.15.15:5800</code> on the robot, or <code>192.168.55.1:5800</code> over the USB-C cable on the bench), what "done" looks like, and which chapter explains it. Do them in order: later steps depend on earlier ones. Focus changes the calibration, and the calibration is needed for 3D.</p>
+    <p class="full">It's written for a Thriftiest Cam, the <span class="term">OV9281</span> camera we run at 1280x800 MJPEG, about 120 fps. A different camera model works the same way, with its own numbers.</p>
+  </div>
+
+  <ul class="cs-map" aria-label="The nine steps">
+    <li><a href="#cs-s1"><b>1</b>Plug in and name</a></li>
+    <li><a href="#cs-s2"><b>2</b>USB bandwidth</a></li>
+    <li><a href="#cs-s3"><b>3</b>Check the defaults</a></li>
+    <li><a href="#cs-s4"><b>4</b>Focus and lock</a></li>
+    <li><a href="#cs-s5"><b>5</b>Exposure</a></li>
+    <li><a href="#cs-s6"><b>6</b>Calibrate</a></li>
+    <li><a href="#cs-s7"><b>7</b>Measure the mount</a></li>
+    <li><a href="#cs-s8"><b>8</b>Copy to siblings</a></li>
+    <li><a href="#cs-s9"><b>9</b>Final checks</a></li>
+  </ul>
+
+  <!-- 1 ─────────────────────────────────────────── -->
+  <div class="cs-step" id="cs-s1">
+    <div class="cs-num">1</div>
+    <div class="cs-body">
+      <h3>Plug in and name it after its port</h3>
+      <p>Every Thriftiest Cam tells the Jetson the same name and the same serial number. So PhotonVision can't tell two of them apart by asking. The only thing that's different is <strong>which USB port</strong> each one is plugged into. That's why our cameras are named after their ports, and why a name, its settings and its calibration all stay with the port.</p>
+      <div class="table-wrap">
+        <table class="data">
+          <tr><th>Name</th><th>Port (looking at the Jetson's USB-A ports)</th><th>Hub port</th></tr>
+          <tr><td><b>TopLeft</b></td><td>top row, left</td><td>2.1</td></tr>
+          <tr><td><b>TopRight</b></td><td>top row, right</td><td>2.3</td></tr>
+          <tr><td><b>BottomLeft</b></td><td>bottom row, left</td><td>2.2</td></tr>
+          <tr><td><b>BottomRight</b></td><td>bottom row, right</td><td>2.4 (expected)</td></tr>
+        </table>
+      </div>
+      <p class="caption">The hub numbers don't go in reading order. That's how the hub inside the Jetson is wired. Linux writes them as <code>1-2.1</code> and so on, which is what you'll see in logs and on the Camera Matching page.</p>
+      <ul class="cs-do">
+        <li>Plug the camera into its port. Open <b>Camera Matching</b> in the sidebar.</li>
+        <li>A camera PhotonVision has never seen in that port shows as <b>Unassigned</b>. Press <b>Activate</b>.</li>
+        <li>On the <b>Dashboard</b>, press the pencil next to the camera's name (<b>Edit Camera Name</b>) and type the port name exactly: <code>TopLeft</code>, not <code>topleft</code>.</li>
+        <li>Label the cable and the port (<a href="#failsafes">chapter 16</a>).</li>
+      </ul>
+      <p class="full">Robot code finds the camera by that name: <code>new PhotonCamera("TopLeft")</code>. Names are case-sensitive. If robot code asks for a name PhotonVision doesn't have, PhotonLib reports an error on the Driver Station and lists the camera names it did find.</p>
+      <div class="cs-meta">
+        <span class="cs-pass"><b>Pass:</b> the camera shows <b>Active</b> on Camera Matching, with its port name.</span>
+        <a class="cs-why" href="#networktables">Names on NetworkTables: chapter 15</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout pitfall">
+    <h5>The swapped-cable trap</h5>
+    <p>PhotonVision matches a camera to its saved settings by port. Swap two Thriftiest Cams' cables and each one gets the <em>other's</em> name, settings and calibration. The Camera Matching page can't warn you, because the two cameras look identical to it. (It does show <b>Mismatch</b> if a different model, with a different name, lands in a port.) Robot code then applies the wrong mount to each camera, and the poses are wrong by far more than any calibration error. Try it in the lab below.</p>
+  </div>
+
+  <div class="lab">
+    <div class="lab-head"><span class="tag">Lab</span><h4>Plug in the cameras</h4></div>
+    <p class="todo">Tap two ports to swap their cables. Or try the buttons: swap, replace a camera, recalibrate.</p>
+    <div class="lab-grid">
+      <div>
+        <canvas id="cs-robot" aria-label="Top-down view of the robot with four cameras, each drawing where it thinks the robot is"></canvas>
+        <div class="legend"><span><i style="background:#fff"></i>real robot</span><span><i style="border:2px dashed #c4b5fd;background:none"></i>where each camera says the robot is</span></div>
+      </div>
+      <div>
+        <div class="jet">
+          <div class="jet-top"><span>JETSON · USB-A PORTS</span><span>looking at them</span></div>
+          <div class="ports" id="cs-ports"></div>
+        </div>
+        <div class="seg" id="cs-solver" style="margin-top:12px"><button data-v="mt2" class="on">Heading from the gyro</button><button data-v="mt1">Full pose</button></div>
+        <div class="btns">
+          <button class="btn-sm" data-act="reset">All correct</button>
+          <button class="btn-sm" data-act="swap">Swap two cables</button>
+          <button class="btn-sm" data-act="replace">Replace a camera</button>
+          <button class="btn-sm" data-act="recal">Recalibrate what's plugged in</button>
+        </div>
+        <div class="readout">
+          <div><small>Right mount in robot code</small><b id="cs-r-mount">–</b></div>
+          <div><small>Right calibration</small><b id="cs-r-cal">–</b></div>
+          <div><small>Worst pose miss</small><b id="cs-r-miss">–</b></div>
+          <div><small>Camera Matching says</small><b id="cs-r-match">–</b></div>
+        </div>
+        <p class="pm-note" id="cs-note" aria-live="polite"></p>
+      </div>
+    </div>
+    <p class="hint">In this lab, robot code says TopLeft is the front-left camera, TopRight the front-right, and so on (example mounts, not our robot's). Each camera sees a tag 3 m ahead. The lenses really differ: TopLeft's calibration puts the image centre at x = 650.5 px and TopRight's at 597.9 px, so using the wrong one turns every direction by about 4°. At 3 m that's about 21 cm. Recalibrating fixes the lens, but never a swapped mount: only the right cable fixes that. "Heading from the gyro" is the solve our robot uses for its position (<a href="#gyro">chapter 13</a>): a swapped camera looks for its tag in the wrong direction, so the robot lands metres away. "Full pose" lands close, but facing the wrong way.</p>
+  </div>
+
+  <div class="prose">
+    <p><strong>Replacing a camera?</strong> Plug the new one into the same port and PhotonVision gives it the old camera's name, settings <em>and calibration</em>, without a word. The name and settings are what you want. The calibration isn't: it belongs to the old lens. Always do steps 4 and 6 again for a replacement.</p>
+  </div>
+  <details class="deep">
+    <summary>More on Camera Matching</summary>
+    <div>
+      <ul>
+        <li><b>How matching works:</b> PhotonVision saves each camera with its USB path, a name under <code>/dev/v4l/by-path/</code> that includes the port number (like <code>…usb-0:2.1…</code>). On start-up it opens each saved camera by that path. A camera shows <b>Mismatch</b> only if the name, USB vendor/product ID or path differ from what was saved, and two Thriftiest Cams share all but the path.</li>
+        <li><b>Deactivate</b> stops using a camera but keeps its settings, so you can unplug it without the log filling with errors. <b>Activate</b> brings it back.</li>
+        <li><b>Delete</b> throws away the camera's settings <em>and its calibration</em>, and can't be undone. Export the settings first (step 9).</li>
+        <li><b>A different model</b> in a Thriftiest Cam's port (a Global Shutter camera, say) shows Mismatch, and PhotonVision still tries to run it with the saved settings. Put it back in its own port, or delete and set it up fresh.</li>
+      </ul>
+    </div>
+  </details>
+
+  <!-- 2 ─────────────────────────────────────────── -->
+  <div class="cs-step" id="cs-s2">
+    <div class="cs-num">2</div>
+    <div class="cs-body">
+      <h3>Check it fits on USB</h3>
+      <p>All the Jetson's USB 2.0 ports share one <span class="term">bandwidth</span> budget, about 6700 bytes per microframe, and the USB-C port doesn't add any. With the stock camera driver, each Thriftiest Cam reserves about 196 Mbps and only two fit. Our capped driver cuts that to 82 Mbps each, so four fit on the USB-A ports.</p>
+      <ul class="cs-do">
+        <li>On <b>Camera Matching</b>, look at the <b>USB bandwidth</b> card at the top: one bar for the whole budget, one colour per camera.</li>
+        <li>For each camera read <b>Using</b> (a share of its allocation) and <b>Largest frame</b> ("fits 1.4x").</li>
+        <li>A camera that won't stream at all ("Not enough bandwidth" in the kernel log): lower another camera's <b>Allocation</b> first, then raise this one. Each change resets that camera for about 2 s.</li>
+      </ul>
+      <div class="cs-meta">
+        <span class="cs-pass"><b>Pass:</b> every camera streaming, none "squeezed" (Using under 90%), largest frame fits 1.3x or more.</span>
+        <a class="cs-why" href="#speed">Why: the bandwidth lab in chapter 10</a>
+      </div>
+      <details class="deep">
+        <summary>From the command line</summary>
+        <div>
+          <p><code>scripts/jetson/health-check.sh</code> says which camera driver is loaded (it must be the capped one for four cameras) and runs <code>scripts/jetson/usb-bandwidth.py</code>, which lists what each camera reserves, which ports failed and why, and the exact cap command to install if something doesn't fit. Allocations set on the page are saved per port and survive a reboot.</p>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <!-- 3 ─────────────────────────────────────────── -->
+  <div class="cs-step" id="cs-s3">
+    <div class="cs-num">3</div>
+    <div class="cs-body">
+      <h3>Check the team defaults</h3>
+      <p>Stock PhotonVision gives a brand-new camera a slow CPU pipeline at its first video mode: 320x240, YUYV. Ours (<code>photonvision-06</code>) gives it our tuned settings instead, the same ones TopLeft and TopRight run:</p>
+      <div class="table-wrap">
+        <table class="data">
+          <tr><th>Setting</th><th>Default</th><th>Why</th></tr>
+          <tr><td>Pipeline type</td><td>AprilTagCuda</td><td>The GPU detector: under 2 ms a frame</td></tr>
+          <tr><td>Video mode</td><td>1280x800 MJPEG, highest fps</td><td>YUYV only manages 5 fps at this size</td></tr>
+          <tr><td>Exposure</td><td>50 (5 ms), auto off</td><td>Short enough not to blur when the robot spins</td></tr>
+          <tr><td>Decision margin cutoff</td><td>15</td><td>Short exposure gives lower margins; 35 would drop real tags</td></tr>
+          <tr><td>Brightness</td><td>100</td><td>Makes up some of the light the short exposure loses</td></tr>
+          <tr><td>White balance</td><td>2800 K, auto off</td><td>Nothing changes by itself during a match</td></tr>
+          <tr><td>Low Latency Mode</td><td>off</td><td>On, PhotonVision misses every other frame</td></tr>
+          <tr><td>Stream resolution</td><td>small (1/6)</td><td>Only the browser preview; saves CPU</td></tr>
+          <tr><td>Multi-tag</td><td>on</td><td>The robot's pose code needs it</td></tr>
+          <tr><td>3D</td><td>off, until calibrated</td><td>3D can't work without a calibration (step 6)</td></tr>
+        </table>
+      </div>
+      <ul class="cs-do">
+        <li>On the Dashboard, check the Input tab and the AprilTagCuda tab show these values.</li>
+      </ul>
+      <p class="full">The defaults apply only to a camera with no saved pipelines: a port PhotonVision has never seen. A replacement camera in a known port keeps that port's saved settings instead, and so does every existing camera. The team defaults are one Java file (<code>TeamCameraDefaults</code>), so changing them for every future camera is a one-line change.</p>
+      <div class="cs-meta">
+        <span class="cs-pass"><b>Pass:</b> AprilTagCuda, 1280x800 MJPEG, exposure 5.0 ms, cutoff 15, Low Latency off.</span>
+        <a class="cs-why" href="#settings">Why these values: chapter 4</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4 ─────────────────────────────────────────── -->
+  <div class="cs-step" id="cs-s4">
+    <div class="cs-num">4</div>
+    <div class="cs-body">
+      <h3>Focus the lens, then lock it</h3>
+      <p>A Thriftiest Cam's lens screws in and out. Turning it changes focus <em>and</em> the calibration, so focus first and lock it before you calibrate.</p>
+      <ul class="cs-do">
+        <li>Open <b>Camera</b> in the sidebar and find the <b>Focus</b> card. Turn on <b>Measure</b>.</li>
+        <li>Point the camera at something detailed that stays still, like a tag or the calibration board, about as far away as the tags you care about most.</li>
+        <li>Press <b>Reset</b>. Turn the lens slowly past its sharpest point, then back until <b>Centre</b> reads 100%.</li>
+        <li>Check the 3x3 grid. Each part of the image is scored against its own sharpest.</li>
+        <li>Lock the lens with glue or silicone.</li>
+      </ul>
+      <p class="full">The score depends on the scene and the light, so only compare numbers while nothing moves. A corner well below 100% while the centre is at 100% means the lens is tilted or that corner is soft; try another lens before you calibrate a bad one. The score is measured only while <b>Measure</b> is on, about 5 times a second, away from the vision thread.</p>
+      <div class="cs-meta">
+        <span class="cs-pass"><b>Pass:</b> centre at 100%, the grid close to 100% everywhere, lens locked.</span>
+        <a class="cs-why" href="#camera">Why focus matters: chapter 3</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5 ─────────────────────────────────────────── -->
+  <div class="cs-step" id="cs-s5">
+    <div class="cs-num">5</div>
+    <div class="cs-body">
+      <h3>Quick-check the exposure</h3>
+      <p>The defaults are a good start: 5 ms exposure, cutoff 15. The main rule is <strong>short exposure on a robot</strong>. Auto exposure, or tuning by eye with the robot standing still, picks long exposures that blur as soon as it moves.</p>
+      <ul class="cs-do">
+        <li>Follow the <b>Tuning guide</b> on the camera's Input tab: what to set, in order, with our values. Each control's tooltip starts with its recommended value.</li>
+        <li>Hold a tag at your far distance. Watch its decision margin in the Targets tab. It should sit well above the cutoff.</li>
+        <li>At an event, run <code>tests/flicker-check/run.sh</code> under the real lights. If frames pulse by several percent, go to exposure 83 (8.3 ms).</li>
+      </ul>
+      <p class="full">At an event, the <b>Field Calibration</b> page can tune each camera under the field's lights: turn the robot so that camera faces tags near and far, press <b>Tune</b>, then <b>Apply recommended</b>. It picks the shortest exposure that still finds every tag.</p>
+      <div class="cs-meta">
+        <span class="cs-pass"><b>Pass:</b> tags found at your far distance without flickering in and out; still about 120 fps.</span>
+        <a class="cs-why" href="#settings">Why: chapter 4</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 6 ─────────────────────────────────────────── -->
+  <div class="cs-step" id="cs-s6">
+    <div class="cs-num">6</div>
+    <div class="cs-body">
+      <h3>Calibrate</h3>
+      <p>A calibration belongs to one camera, one lens and one resolution. Do it after the lens is locked, at 1280x800, the resolution the camera runs at.</p>
+      <ul class="cs-do">
+        <li>On the camera's page, in <b>Camera Calibration</b>, pick 1280x800. The board settings already match our board: ChArUco, Dict_5X5_1000, 30 mm squares, 22 mm markers, <b>width 12, height 9</b>. (The board says "9x12". 9x12 fails with "Negative corner in reprojection error calc".)</li>
+        <li>Press <b>Start Calibration</b>. In the card, set <b>Auto Exposure off</b> and <b>Exposure about 150</b>: calibration has its own exposure, and its default is nearly black.</li>
+        <li>Press <b>Auto Snapshots</b> (1 per second) and keep moving the board slowly. Cover every corner of the image, tilt up to about 45°, and change the distance.</li>
+        <li>Take at least <b>100 snapshots</b>, then <b>Finish Calibration</b>.</li>
+      </ul>
+      <p>When the calibration is saved, <strong>3D and multi-tag turn on by themselves</strong> for that resolution. You don't need to touch the Output tab.</p>
+      <div class="cs-meta">
+        <span class="cs-pass"><b>Pass:</b> mean error under 1 px (under 0.5 px is great), few outliers, fx near 737 px.</span>
+        <a class="cs-why" href="#calibration">Why and how: chapter 11</a>
+      </div>
+      <p class="full" style="margin-top:14px">Our bench calibrations: TopLeft 0.87 px, TopRight 0.97 px. Both found fx at about 737 px, so a Thriftiest Cam that comes out far from 737 went wrong somewhere. <strong>Outliers are the better warning:</strong> one early try had 42% outliers, because many snapshots had the board mostly outside the image. For the edges, keep most of the board in view and just touch the edge.</p>
+      <details class="deep">
+        <summary>When calibration goes wrong</summary>
+        <div>
+          <ul>
+            <li><b>Stuck or failed:</b> restart PhotonVision (Settings → <b>Restart Software</b>) to clear the bad snapshots, then start again.</li>
+            <li><b>Nearly black image:</b> you forgot the exposure in the calibration card.</li>
+            <li><b>Check it:</b> <code>tests/calibration-check/check_calibration.py</code> reads the saved calibration and reports the error, outliers and coverage.</li>
+            <li><b>8 distortion numbers:</b> the calibration fits 8 distortion coefficients. Our GPU detector uses all 8 (<code>photonvision-04</code>); its stock interface only took 5 and dropped the rest. PhotonLib's <code>getDistCoeffs()</code> hands the robot all 8 too.</li>
+            <li><b>Keep the calibration exposure out of the pipelines.</b> 15 ms is fine for a board held still, and a blur disaster on a moving robot.</li>
+          </ul>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <!-- 7 ─────────────────────────────────────────── -->
+  <div class="cs-step" id="cs-s7">
+    <div class="cs-num">7</div>
+    <div class="cs-body">
+      <h3>Measure the mount: <code>robotToCamera</code></h3>
+      <p>The robot needs to know where each camera sits, to turn "where the camera is" into "where the robot is". That's a <code>Transform3d</code> called <code>robotToCamera</code> in robot code, one per camera: how far forward, left and up the lens is from the robot's centre on the floor, and how it's turned. <a href="#coords">Chapter 19</a> has the axes and signs.</p>
+      <ul class="cs-do">
+        <li>Take it from CAD, or measure with a tape: x forward, y left, z up, in metres.</li>
+        <li>Cross-check with the tags. With the robot level on the floor and 2+ tags in view, the Dashboard's Targets tab shows a <b>Camera mount estimate</b>: height, pitch and roll, averaged over 100 samples with a ± spread. The numbers use <code>robotToCamera</code>'s signs, so negative pitch means tilted up.</li>
+        <li>Robot code publishes each camera's mount at <code>/photonvision/&lt;camera&gt;/robotToCamera</code>, so the Jetson can compare.</li>
+      </ul>
+      <div class="cs-meta">
+        <span class="cs-pass"><b>Pass:</b> the estimate agrees with robot code within a centimetre or two of height and about a degree of pitch and roll.</span>
+        <a class="cs-why" href="#gyro">Why a degree matters: chapter 13</a>
+      </div>
+      <p class="full" style="margin-top:14px">A degree is worth caring about: 1° of pitch error at 5 m moves the pose about 9 cm. The estimate only finds height, pitch and roll, because those are the same wherever the robot stands. Forward, left and yaw also need the robot's pose. The <b>Field Calibration</b> page finds all six: push the robot to 10–20 spots, press Solve, and the results compare each camera's mount with robot code's and give a Java snippet. The solved mounts come back on <code>/photonvision/&lt;camera&gt;/fieldcal/robotToCamera</code> (<a href="#calibration">chapter 11</a>).</p>
+    </div>
+  </div>
+
+  <!-- 8 ─────────────────────────────────────────── -->
+  <div class="cs-step" id="cs-s8">
+    <div class="cs-num">8</div>
+    <div class="cs-body">
+      <h3>Copy the settings to its siblings</h3>
+      <p>Once one camera is tuned, don't retype its settings on the others (<code>photonvision-25</code>).</p>
+      <ul class="cs-do">
+        <li>On the Dashboard, open the camera you want to fill in. In the pipeline menu (☰ next to the pipeline name), choose <b>Copy settings from…</b>.</li>
+        <li>Pick the tuned camera and pipeline. Tick the groups: Camera, AprilTag, 3D and multi-tag, Resolution, Object detection.</li>
+        <li>Or copy into the same pipeline number on every other camera at once.</li>
+        <li>Check it worked: <code>/photonvision/&lt;camera&gt;/settingsJson</code> on NetworkTables holds each camera's full settings as actually set.</li>
+      </ul>
+      <p class="full">Never copied: orientation, names, and each camera's exposure limits. Resolution only copies between cameras with the same video modes. <strong>Calibration is never copied</strong>: every camera needs its own from step 6. The <code>settingsJson</code> topics are also recorded in every robot log, so after a match you can see exactly what each camera was set to (<code>photonvision-24</code>).</p>
+      <div class="cs-meta">
+        <span class="cs-pass"><b>Pass:</b> the two cameras' <code>settingsJson</code> match, apart from name, calibration and orientation.</span>
+        <a class="cs-why" href="#photonvision">Our patches: chapter 9</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 9 ─────────────────────────────────────────── -->
+  <div class="cs-step" id="cs-s9">
+    <div class="cs-num">9</div>
+    <div class="cs-body">
+      <h3>Final checks, then back up</h3>
+      <ul class="cs-do">
+        <li><b>Frame rate:</b> the Dashboard shows about 120 fps for a Thriftiest Cam at 1280x800 (we measured 122). Close other camera streams first: each open stream costs CPU. Robot code sees the same on <code>/photonvision/&lt;camera&gt;/health/fps</code>.</li>
+        <li><b>Distance:</b> tags found, steadily, at the nearest and farthest distances you care about.</li>
+        <li><b>Pose:</b> put the robot on a spot you measured with a tape. Each camera's pose should land where the robot really is, and all cameras should agree with each other. Turn the robot: the pose should turn with it, not jump.</li>
+        <li><b>Field layout:</b> the Settings page says <b>2026 Rebuilt AndyMark</b>, the same layout robot code uses. The excluded-tags box is empty, unless a tag at the event is mounted wrong.</li>
+        <li><b>Back up:</b> Settings → Device Control → <b>Export Settings</b> saves every camera's settings and calibration in one file. Keep it on the team drive.</li>
+      </ul>
+      <div class="cs-meta">
+        <span class="cs-pass"><b>Pass:</b> ~120 fps, tags at every distance you need, poses where the robot really is, settings exported.</span>
+        <a class="cs-why" href="#pose">From corners to pose: chapter 12</a>
+      </div>
+      <p class="full" style="margin-top:14px">For the whole Jetson, <code>scripts/host/04-backup-ssd.sh</code> images the SSD (about 8.7 GB, 7 minutes) with PhotonVision's settings inside. Keep that on the team drive too, never on GitHub: it holds the Wi-Fi password and SSH keys. And if cameras are stuck after a USB glitch, power-cycle the robot rather than pressing <b>Reboot Device</b>: a reboot doesn't cut the cameras' power (<a href="#failsafes">chapter 16</a>).</p>
+    </div>
+  </div>
+
+  <!-- Pipelines, profiles, driver mode (full only) ─── -->
+  <div class="full">
+    <h3>Pipelines, profiles and driver mode</h3>
+    <div class="split top">
+      <div class="prose">
+        <p>A <span class="term">pipeline</span> is one saved set of settings for a camera: its type (AprilTagCuda, object detection…), exposure, resolution, detector settings. A camera can have several, numbered from 0, and runs one at a time. Robot code picks one with <code>camera.setPipelineIndex(n)</code>, which goes over NetworkTables as <code>pipelineIndexRequest</code>.</p>
+        <p><strong>Profiles</strong> are our habit of giving every camera the same pipelines at the same numbers: 0 = event field, 1 = practice field. Robot code then switches all cameras together, and the robot log records which one was active. Tune one camera's pipeline, then Copy settings (step 8) fills in the rest.</p>
+        <p><span class="term">Driver mode</span> is a pipeline that does no vision at all: it just sends a picture for the drivers. Pick <b>Driver Mode</b> in the Dashboard's pipeline list, or call <code>camera.setDriverMode(true)</code>. Our build decodes those colour frames on the JPEG hardware, which about halves the CPU cost (1.12 → 0.59 cores at 120 fps).</p>
+      </div>
+      <div>
+        <div class="code"><span class="c">// names must match PhotonVision exactly</span>
+<span class="k">var</span> topLeft = <span class="k">new</span> PhotonCamera(<span class="s">"TopLeft"</span>);
+<span class="k">var</span> topRight = <span class="k">new</span> PhotonCamera(<span class="s">"TopRight"</span>);
+
+<span class="c">// profile: same number on every camera</span>
+<span class="k">int</span> profile = atEvent ? 0 : 1;   <span class="c">// 0 = event, 1 = practice</span>
+topLeft.setPipelineIndex(profile);
+topRight.setPipelineIndex(profile);
+
+<span class="c">// a camera just for the drivers</span>
+driverCam.setDriverMode(<span class="k">true</span>);</div>
+        <div class="callout pitfall" style="margin-top:12px">
+          <h5>Don't borrow a tag camera</h5>
+          <p>A camera in driver mode finds no tags. Switch an AprilTag camera to driver mode during a match and the robot loses that camera's poses until it switches back.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bench sheet ─────────────────────────────────── -->
+  <div class="lab">
+    <div class="lab-head"><span class="tag">Lab</span><h4>Bench sheet</h4></div>
+    <p class="todo">Pick the camera you're setting up and tick each step as it passes.</p>
+    <div class="sheet-head">
+      <div class="seg" id="cs-cam"><button data-v="TopLeft" class="on">TopLeft</button><button data-v="TopRight">TopRight</button><button data-v="BottomLeft">BottomLeft</button><button data-v="BottomRight">BottomRight</button></div>
+      <span class="sheet-count" id="cs-count">0 of 9</span>
+    </div>
+    <div class="bar"><i id="cs-bar"></i></div>
+    <ul class="sheet" id="cs-sheet"></ul>
+    <div class="btns"><button class="btn-sm" id="cs-clear">Clear this camera</button></div>
+    <p class="hint">Ticks are saved in this browser only, per camera, so you can come back to them in the pit. Nothing is sent anywhere.</p>
+  </div>
+
+  <div class="deeper full">
+    <a href="https://docs.photonvision.org/en/latest/docs/quick-start/camera-matching.html">PhotonVision: camera matching</a>
+    <a href="https://docs.photonvision.org/en/latest/docs/calibration/calibration.html">PhotonVision: calibrating your camera</a>
+    <a href="https://docs.photonvision.org/en/latest/docs/driver-mode/index.html">PhotonVision: driver mode</a>
+  </div>
+
+  <div class="recap reveal short">
+    <h5>Chapter 20 recap</h5>
+    <ul>
+      <li>Cameras are named after their USB port: TopLeft 2.1, TopRight 2.3, BottomLeft 2.2, BottomRight 2.4. Settings and calibration stay with the port.</li>
+      <li>Swapped cables or a replacement camera get the wrong calibration, and PhotonVision can't warn you. Label everything; recalibrate a replacement.</li>
+      <li>Order: bandwidth, defaults, focus and lock, exposure, calibrate (100+ snapshots, under 1 px), mount, copy, check, export.</li>
+    </ul>
+  </div>
+  <div class="recap reveal full">
+    <h5>Chapter 20 recap</h5>
+    <ul>
+      <li>Thriftiest Cams all report the same name and serial, so PhotonVision matches them by port. Name, settings and calibration follow the port, not the camera.</li>
+      <li>Swapping two cables swaps calibrations <em>and</em> mounts, silently. Camera Matching only flags a different model.</li>
+      <li>Four cameras need the capped driver; keep each out of "squeezed" on the USB bandwidth card.</li>
+      <li>New cameras get the team defaults; 3D and multi-tag turn on once calibrated.</li>
+      <li>Focus with the Focus card, lock, then calibrate: 12x9 board, exposure ~150, 100+ snapshots, error under 1 px, fx near 737 px.</li>
+      <li><code>robotToCamera</code> from CAD or a tape, checked with the mount estimate and field calibration.</li>
+      <li>Copy settings to siblings, check <code>settingsJson</code>, then fps, distance, pose, layout, and Export Settings.</li>
+    </ul>
+  </div>
+</div>

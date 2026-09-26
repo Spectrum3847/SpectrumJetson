@@ -189,7 +189,7 @@
         <li><strong>Turn each result into a robot pose</strong>: multi-tag first, falling back to the single tag with the lowest ambiguity.</li>
         <li><strong>Hand it to the drivetrain's pose estimator with its timestamp.</strong> That timestamp is already on the robot's clock (chapter 14).</li>
       </ol>
-      <p class="small muted">Real robot code also sets how much to trust each measurement (standard deviations), and rejects bad ones (too far, too ambiguous, off the field). That's in our robot code's vision subsystem.</p>
+      <p class="small muted">Real robot code also sets how much to trust each measurement (standard deviations), and rejects bad ones (too far, too ambiguous, off the field). <a href="#photonlib">Chapter 18</a> shows how, with a complete four-camera vision subsystem.</p>
     </div>
 <pre class="java" aria-label="Java example using PhotonLib"><span class="c">// Once, when the robot starts</span>
 <span class="t">PhotonCamera</span> cam = <span class="k">new</span> <span class="t">PhotonCamera</span>(<span class="s">"TopLeft"</span>);   <span class="c">// = its USB port</span>

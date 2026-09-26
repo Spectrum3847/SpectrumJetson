@@ -1,0 +1,258 @@
+<style>
+  #pit .lab-grid > *, #pit .split > * { min-width: 0; }
+  #pit .todo { margin: -4px 0 14px; font: 600 .92rem/1.45 var(--font); color: #efe6ff; padding-left: 1.6em; text-indent: -1.6em; }
+  #pit .todo::before { content: "\1F449"; display: inline-block; width: 1.6em; text-indent: 0; flex: none; }
+  #pit .rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 22px 0 8px; }
+  #pit .rule { background: #fff; border: 1px solid var(--border-strong); border-left: 5px solid var(--accent); border-radius: 12px; padding: 12px 16px; box-shadow: var(--shadow-md); }
+  #pit .rule.stop { border-left-color: #e11d48; background: #fff1f2; border-color: #fecdd3; }
+  #pit .rule b { display: block; font: 700 1rem var(--font-heading); color: var(--ink); margin-bottom: 2px; }
+  #pit .rule span { font-size: .9rem; color: var(--muted); }
+
+  /* symptom finder */
+  #pit .syms { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+  #pit .syms button { display: flex; align-items: center; gap: 10px; text-align: left; background: rgba(255,255,255,.06); border: 1px solid var(--lab-line); color: var(--lab-ink); font: 600 .9rem/1.3 var(--font); padding: 11px 13px; border-radius: 12px; cursor: pointer; min-height: 52px; touch-action: manipulation; }
+  #pit .syms button:hover { background: rgba(255,255,255,.13); border-color: rgba(196,181,253,.45); }
+  #pit .syms button:focus-visible, #pit .pf button:focus-visible, #pit .crumbs button:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: 2px; }
+  #pit .syms i { font-style: normal; font-size: 1.25rem; flex: none; width: 1.6em; text-align: center; }
+  #pit .pf[hidden], #pit .syms[hidden] { display: none; }
+  #pit .pf-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  #pit .crumbs ol { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 0; align-items: center; font-size: .82rem; }
+  #pit .crumbs li { display: inline-flex; align-items: center; color: var(--lab-muted); }
+  #pit .crumbs li + li::before { content: "›"; margin: 0 7px; color: var(--accent-soft); }
+  #pit .crumbs button { all: unset; cursor: pointer; color: var(--accent-soft); border-bottom: 1px dotted rgba(196,181,253,.6); }
+  #pit .crumbs button:hover { color: #fff; }
+  #pit .crumbs li[aria-current] { color: #fff; font-weight: 700; }
+  #pit .crumbs .ans { font: 700 .68rem var(--font); letter-spacing: .06em; text-transform: uppercase; background: rgba(255,255,255,.1); color: #fff; border-radius: 5px; padding: 1px 6px; margin-left: 6px; }
+  #pit .pf-card { background: #0e0518; border: 1px solid var(--lab-line); border-radius: 14px; padding: 18px 20px; }
+  #pit .pf-card h5 { margin: 0 0 8px; font: 700 1.15rem/1.35 var(--font-heading); color: #fff; outline: none; }
+  #pit .pf-card .kicker { font: 700 .68rem var(--font); letter-spacing: .14em; text-transform: uppercase; color: var(--accent-soft); margin-bottom: 6px; }
+  #pit .pf-card p { margin: 0 0 10px; }
+  #pit .pf-card .qhelp { font-size: .88rem; }
+  #pit .yn { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  #pit .yn button { min-width: 120px; min-height: 46px; font: 700 .95rem var(--font); border-radius: 10px; cursor: pointer; padding: 8px 18px; border: 1px solid var(--lab-line); background: rgba(255,255,255,.08); color: #fff; touch-action: manipulation; }
+  #pit .yn button:hover { background: rgba(255,255,255,.16); }
+  #pit .yn button.y { background: var(--accent); border-color: var(--accent); }
+  #pit .leaf h6 { margin: 16px 0 6px; font: 700 .7rem var(--font); letter-spacing: .14em; text-transform: uppercase; color: var(--accent-soft); }
+  #pit .leaf ol { margin: 0; padding-left: 1.4em; }
+  #pit .leaf ol li { margin: .35em 0; color: var(--lab-ink); }
+  #pit .leaf ol li::marker { color: var(--accent-soft); font-weight: 700; }
+  #pit .leaf .cause { color: #fff; font-size: 1rem; }
+  #pit .leaf .warn { background: rgba(244,63,94,.14); border: 1px solid rgba(244,63,94,.5); color: #ffe4e6; border-radius: 10px; padding: 9px 12px; margin: 12px 0 4px; font-size: .9rem; }
+  #pit .leaf .warn b { color: #fff; }
+  #pit .leaf .ok { background: rgba(163,230,53,.1); border: 1px solid rgba(163,230,53,.4); border-radius: 10px; padding: 9px 12px; color: #ecfccb; font-size: .9rem; }
+  #pit .leaf .why a { color: var(--accent-soft); font-weight: 700; }
+  #pit .leaf .more { font-size: .86rem; margin-top: 12px; }
+
+  /* terminals */
+  #pit pre.term { background: #120a1c; color: #e9e4f2; border-radius: 14px; padding: 16px 18px; font: .76rem/1.55 var(--mono); overflow-x: auto; margin: 12px 0 0; border-top: 26px solid #2a2233; position: relative; white-space: pre; max-height: 640px; }
+  #pit pre.term::before { content: "● ● ●   spectrum3847@photonvision-3847: ~"; position: absolute; top: -21px; left: 12px; font: .72rem var(--font); color: #8f84a3; letter-spacing: .02em; }
+  #pit pre.term .p { color: #86efac; font-weight: 700; }
+  #pit pre.term .w { color: #fcd34d; font-weight: 700; }
+  #pit pre.term .f { color: #fda4af; font-weight: 700; }
+  #pit pre.term .h { color: #c4b5fd; }
+  #pit pre.term .r { color: #86efac; font-weight: 700; }
+  #pit pre.term .rb { color: #fda4af; font-weight: 700; }
+  #pit pre.term .a { color: #b39ddb; font-style: italic; font-family: var(--font); font-size: .74rem; }
+  #pit pre.term .c { color: #fff; }
+  #pit .stats971 { display: flex; flex-wrap: wrap; gap: 4px; font: .8rem var(--mono); background: #120a1c; border-radius: 12px; padding: 12px; }
+  #pit .stats971 button { all: unset; cursor: pointer; padding: 3px 6px; border-radius: 6px; color: #e9e4f2; background: rgba(255,255,255,.05); border: 1px solid transparent; touch-action: manipulation; }
+  #pit .stats971 button:hover { background: rgba(255,255,255,.12); }
+  #pit .stats971 button.on { background: rgba(139,92,246,.4); border-color: var(--accent-soft); color: #fff; }
+  #pit .stats971 button:focus-visible { outline: 2px solid var(--accent-soft); }
+  #pit .s971-out { min-height: 4.2em; margin-top: 12px; }
+  #pit .s971-out b { font-family: var(--mono); }
+
+  /* health steps */
+  #pit ol.look { counter-reset: look; list-style: none; padding: 0; margin: 16px 0; max-width: var(--prose); }
+  #pit ol.look > li { counter-increment: look; position: relative; padding: 4px 0 14px 46px; }
+  #pit ol.look > li::before { content: counter(look); position: absolute; left: 0; top: 2px; width: 32px; height: 32px; border-radius: 50%; background: var(--p700); color: #fff; font: 700 .95rem/32px var(--font-heading); text-align: center; }
+  #pit ol.look b.t { display: block; font: 700 1.02rem var(--font-heading); color: var(--ink); }
+
+  /* commands */
+  #pit .cmds { display: grid; gap: 10px; max-width: 900px; margin: 16px 0; }
+  #pit .cmd { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 4px 16px; align-items: center; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; box-shadow: var(--shadow-md); }
+  #pit .cmd.avoid { border-color: #fecdd3; background: #fff1f2; }
+  #pit .cmd .line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  #pit .cmd code { display: block; flex: 1; min-width: 0; overflow-x: auto; white-space: pre; background: #1f1b23; color: #f4efff; padding: 7px 10px; border-radius: 8px; font-size: .78rem; }
+  #pit .cmd .copy { flex: none; font: 600 .72rem var(--font); background: var(--accent-low); color: var(--p700); border: 1px solid var(--border-strong); border-radius: 7px; padding: 6px 9px; cursor: pointer; min-height: 32px; }
+  #pit .cmd .copy.done { background: #dcfce7; color: #15803d; border-color: #bbf7d0; }
+  #pit .cmd p { margin: 0; font-size: .88rem; color: var(--muted); }
+  #pit .cmd p b { color: var(--ink); }
+  @media (max-width: 700px) { #pit .cmd { grid-template-columns: minmax(0, 1fr); } }
+  #pit .table-wrap { overflow-x: auto; }
+  #pit table.data td:first-child { font-weight: 700; white-space: nowrap; }
+  #pit table.data tr.bad td { background: #fff1f2; }
+
+  /* checklist */
+  #pit .pchk { list-style: none; padding: 0; margin: 14px 0 6px; max-width: 760px; }
+  #pit .pchk li { margin: 0; border-bottom: 1px dashed var(--border); }
+  #pit .pchk button { all: unset; box-sizing: border-box; cursor: pointer; display: flex; gap: 12px; align-items: flex-start; width: 100%; padding: 9px 4px; font-size: .95rem; color: var(--ink); min-height: 44px; touch-action: manipulation; }
+  #pit .pchk button::before { content: ""; flex: none; width: 20px; height: 20px; margin-top: 1px; border-radius: 6px; border: 2px solid var(--border-strong); background: #fff; display: grid; place-items: center; font: 800 .75rem var(--font); color: #15803d; }
+  #pit .pchk button[aria-pressed="true"]::before { content: "✓"; background: #dcfce7; border-color: #86efac; }
+  #pit .pchk button[aria-pressed="true"] { color: var(--muted); }
+  #pit .pchk button:focus-visible { outline: 2px solid var(--accent); border-radius: 6px; }
+  #pit .pchk-bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; font-size: .9rem; color: var(--muted); }
+  #pit .pchk-bar .btn-sm { color: var(--p700); background: #fff; border-color: var(--border-strong); }
+  #pit .pchk-bar b { color: var(--p700); }
+
+  @media (max-width: 600px) {
+    #pit .syms { grid-template-columns: minmax(0, 1fr); }
+    #pit .pf-card { padding: 14px; }
+    #pit .yn button { flex: 1 1 0; }
+    #pit .seg button, #pit .btn-sm { min-height: 40px; }
+    #pit pre.term { font-size: .7rem; padding: 12px; }
+    #pit .stats971 button { padding: 6px 7px; }
+  }
+</style>
+<div class="shell">
+  <div class="ch-head">
+    <span class="eyebrow"><span class="num">21</span> · Reference</span>
+    <h2>Pit <em>troubleshooting.</em></h2>
+    <p class="lede">Vision is broken and the match is in 10 minutes. Start with what you see. This page walks you to the fix, quickest step first, and tells you how to know it worked.</p>
+  </div>
+
+  <div class="rules">
+    <div class="rule stop"><b>Stuck camera? Don't reboot.</b><span>A reboot doesn't cut USB power, so it can't fix a stuck Thriftiest Cam. It has hung the Jetson twice. Replug the camera, or power-cycle the robot.</span></div>
+    <div class="rule"><b>Quickest thing first.</b><span>Look before you change anything. Most problems are a plug, a name or a setting.</span></div>
+    <div class="rule"><b>One change at a time.</b><span>Then check again. Write down what you changed, so a mentor can follow it later.</span></div>
+  </div>
+  <p class="prose full">This is the action guide. Why the Jetson behaves the way it does (the watchdogs, the health topics, the known issues) is in <a href="#failsafes">chapter 16</a>.</p>
+
+  <h3>What are you seeing?</h3>
+  <div class="lab" id="pit-finder">
+    <div class="lab-head"><span class="tag">Lab</span><h4>Symptom finder</h4></div>
+    <p class="todo">Pick what you're seeing, then answer a question or two. Each answer takes you closer to the fix.</p>
+    <div class="syms" id="pit-syms" role="group" aria-label="Symptoms"></div>
+    <div class="pf" id="pit-flow" hidden>
+      <div class="pf-bar">
+        <nav class="crumbs" aria-label="Your path"><ol id="pit-crumbs"></ol></nav>
+        <div style="display:flex;gap:8px">
+          <button type="button" class="btn-sm" id="pit-back">← Back</button>
+          <button type="button" class="btn-sm primary" id="pit-reset">↺ Start over</button>
+        </div>
+      </div>
+      <div class="pf-card" id="pit-card" aria-live="polite"></div>
+    </div>
+    <p class="hint">Built from our README's troubleshooting table and known issues, and PhotonVision's own troubleshooting pages, rewritten for our Jetson, our four Thriftiest Cams and team 8515.</p>
+  </div>
+
+  <h3>The 60-second health check</h3>
+  <p class="prose">Before you start fixing, or when you're not sure what's wrong, look at these in order. The first two need only a browser.</p>
+  <ol class="look">
+    <li><b class="t">The dashboard</b>Open <code>http://10.85.15.15:5800</code> (on the bench, over the USB-C cable: <code>192.168.55.1:5800</code>). Every camera (TopLeft, TopRight, BottomLeft, BottomRight) should show about <strong>120 fps</strong>. Hold a tag up to each one: it should get a box.<span class="full"> The video in the browser is capped at 30 fps on purpose, to save CPU. Judge by the fps number, not by how smooth the video looks.</span></li>
+    <li><b class="t">The Settings page</b><strong>CPU Throttling</strong> should say <code>None</code>. <code>OVER-CURRENT</code> means the power sagged (check the battery). <code>HIGH TEMP</code> means it's too hot (check the fan and airflow).<span class="full"> The GPU Usage chart below it read 10–13% with two cameras on the bench; a flat 0% means no detector is running.</span></li>
+    <li><b class="t">The robot's view</b>In a <span class="term">NetworkTables</span> viewer on the robot side, <code>/photonvision/&lt;camera&gt;/health/fps</code> should be about 120 for every camera. If a camera's <code>health/problem</code> has text in it, it's telling you what to do. <code>/photonvision/jetson/throttle</code> should say <code>None</code>, and <code>heartbeat</code> should keep counting up.</li>
+    <li><b class="t">The health check</b>Still unsure? <span class="term" data-term="SSH" data-def="Secure Shell: logging in to another computer over the network to type commands on it.">SSH</span> in and run <code>health-check.sh</code>. It checks PhotonVision, the detector, every camera, the robot connection and the Jetson itself, and ends with <code>READY</code> or <code>NOT READY</code>. Every FAIL line says what to do.</li>
+  </ol>
+
+  <div class="lab full">
+    <div class="lab-head"><span class="tag">Lab</span><h4>Reading the health check</h4></div>
+    <p class="todo">Switch between a healthy robot and one that just took a hard hit, and read the purple notes.</p>
+    <div class="seg" id="pit-hc-seg"><button data-v="ok" class="on">Healthy robot</button><button data-v="hit">After a hard hit</button></div>
+<pre class="term" id="pit-hc" aria-label="Example output of health-check.sh"></pre>
+    <p class="hint">Example reports for a robot with four Thriftiest Cams, put together from the exact messages <code>scripts/jetson/health-check.sh</code> prints (compare the real bench run in <a href="#failsafes">chapter 16</a>). The purple ◂ notes are ours, not part of the output. The 4 at the end of the command is how many cameras to expect; leave it off and the script expects 2.</p>
+  </div>
+
+  <h3 class="full">The live log and its "971 stats" line</h3>
+  <div class="split top full">
+    <div class="prose">
+      <p><code>journalctl -u photonvision -f</code> shows PhotonVision's log as it's written (Ctrl+C to stop). It's busy. The most useful lines come from our GPU detector: once a second, one <code>971 stats</code> line for every AprilTag camera.</p>
+      <p>Add <code>| grep "971 stats"</code> to see only those. Four cameras means four lines a second. If a camera's line is missing, that camera isn't reaching the detector.</p>
+      <p>Every 10 s there's also a <code>971 jpeg</code> line: which JPEG decoder is running (the <span class="term">NVJPG</span> hardware, or libjpeg-turbo on the CPU) and whether its checks still match.</p>
+    </div>
+    <div class="lab" style="margin:0">
+      <div class="lab-head"><span class="tag">Lab</span><h4>Take a stats line apart</h4></div>
+      <p class="todo">Tap each piece of the line.</p>
+      <div class="stats971" id="pit-971" role="group" aria-label="Parts of a 971 stats log line"></div>
+      <div class="s971-out" id="pit-971-out" aria-live="polite"></div>
+      <p class="hint">The line's format comes from our detector wrapper, <code>detector/GpuDetectorJNI.cc</code>. The numbers are an example with two tags in view; on the bench, with none, it prints about 1 ms and no margin.</p>
+    </div>
+  </div>
+
+  <h3>Restart, replug, reboot or power-cycle?</h3>
+  <p class="prose">Four ways to "turn it off and on again". They fix different things, and one of them can make things worse.</p>
+  <div class="table-wrap reveal">
+    <table class="data">
+      <tr><th>What</th><th>How</th><th>Fixes</th><th>Back in</th></tr>
+      <tr><td>Restart PhotonVision</td><td>Settings › Device Control › <b>Restart Software</b><span class="full">, or <code>sudo systemctl restart photonvision</code></span></td><td>Settings that didn't take, a camera sending bad frames, a detector that won't load. Safe any time.</td><td>a few seconds</td></tr>
+      <tr><td>Replug one camera</td><td>Pull its USB plug, wait 2 s, push it back into <em>its own</em> labeled port</td><td>A stuck or missing camera. The other cameras keep running.</td><td>~1 s after it's back in</td></tr>
+      <tr><td>Power-cycle the robot</td><td>Robot off, wait a few seconds, on</td><td>Everything a replug fixes, for every camera at once. Also a Jetson that won't boot.</td><td>~20 s to detecting tags</td></tr>
+      <tr class="bad"><td>Reboot the Jetson</td><td><b>Reboot Device</b> button<span class="full">, or <code>sudo reboot</code></span></td><td>Almost nothing a restart doesn't. It doesn't cut USB power, so stuck cameras stay stuck, and it has hung twice.</td><td>avoid</td></tr>
+    </table>
+  </div>
+  <p class="caption full">Replug and power-on times from our bench tests (<code>tests/camera-replug/run.sh</code>, and the reboot test in <a href="#failsafes">chapter 16</a>).</p>
+
+  <h3>Useful buttons and commands</h3>
+  <div class="prose short">
+    <p>In PhotonVision's <strong>Settings › Device Control</strong>: <strong>Restart Software</strong> is always safe. <strong>View Logs</strong> (or press the <kbd>`</kbd> key on any page) shows the live log. <strong>Download Logs</strong> saves it to the laptop for a mentor. Avoid <strong>Reboot Device</strong> when a camera is stuck. The full course lists the Linux commands for the Jetson itself.</p>
+  </div>
+  <div class="full">
+    <p class="prose">From a laptop on the robot network. On the bench, swap <code>10.85.15.15</code> for <code>192.168.55.1</code>. The first one logs you in; the rest run on the Jetson.</p>
+    <div class="cmds" id="pit-cmds">
+      <div class="cmd"><div class="line"><code>ssh -i ~/.ssh/jetson_ed25519 spectrum3847@10.85.15.15</code></div><p><b>Log in to the Jetson.</b> Type <code>exit</code> to leave.</p></div>
+      <div class="cmd"><div class="line"><code>~/SpectrumJetson/scripts/jetson/health-check.sh 4</code></div><p><b>The readiness report</b>, expecting 4 cameras. No sudo needed.</p></div>
+      <div class="cmd"><div class="line"><code>journalctl -u photonvision -f | grep "971 stats"</code></div><p><b>Live fps and detect time</b> per camera, once a second. Drop the <code>grep</code> for the whole log.</p></div>
+      <div class="cmd"><div class="line"><code>lsusb -t</code></div><p><b>Which USB devices the Jetson can see.</b> Each camera is two <code>Class=Video</code> lines under the hub; "Port 1" to "Port 4" are USB ports 2.1 to 2.4. They should say 480M. A camera at 1.5M is a bad cable or plug.</p></div>
+      <div class="cmd"><div class="line"><code>journalctl -k --since "-10 min" | grep usb</code></div><p><b>USB errors from the kernel.</b> <code>error -110</code> and "unable to enumerate" = not answering; <code>error -71</code> = data wires; "Not enough bandwidth" = USB budget. (<code>sudo dmesg</code> shows the same.)</p></div>
+      <div class="cmd"><div class="line"><code>~/SpectrumJetson/scripts/jetson/usb-bandwidth.py</code></div><p><b>What each camera reserves</b> on the shared USB 2.0 budget, which port failed, and the fix.</p></div>
+      <div class="cmd"><div class="line"><code>sudo systemctl restart photonvision</code></div><p><b>Restart PhotonVision.</b> Fine any time; same as Restart Software.</p></div>
+      <div class="cmd"><div class="line"><code>journalctl -u photonvision -b -1 -n 200</code></div><p><b>The end of the last boot's log</b>, e.g. after a power cut. The log is kept on the SSD across power cuts.</p></div>
+      <div class="cmd avoid"><div class="line"><code>sudo reboot</code></div><p><b>Avoid if any camera is stuck.</b> Power-cycle the robot instead.</p></div>
+    </div>
+    <details class="deep">
+      <summary>Getting logs off the Jetson for later</summary>
+      <div>
+        <ul>
+          <li><b>From the browser:</b> Settings › Device Control › <b>Download Logs</b> saves PhotonVision's system log as <code>photonvision-journalctl.txt</code>. The log window (<b>View Logs</b>, or the <kbd>`</kbd> key) has its own Download button, for what this browser has received.</li>
+          <li><b>Export Settings</b> downloads a zip of every setting. PhotonVision's docs say it includes the old log files too. It's also the backup to take before changing anything big.</li>
+          <li><b>Over SSH:</b> <code>journalctl -u photonvision --since "30 min ago" &gt; pv.log</code>, then copy it to the laptop with <code>scp</code>.</li>
+          <li><b>Mode changes are logged.</b> PhotonVision writes a "ROBOT TRANSITIONED MODES!" line when the robot is enabled, disabled or switches between auto and teleop, with the match number when the field is attached. Search for it to find a match in a long log.</li>
+          <li><b>Camera settings are in the robot log</b> (<code>/photonvision/&lt;camera&gt;/settingsJson</code>), so you can check what a camera was set to in any match without touching the Jetson.</li>
+        </ul>
+      </div>
+    </details>
+  </div>
+
+  <h3>Before you leave the pit</h3>
+  <p class="prose">Five minutes before queueing. Tap each one as you check it.</p>
+  <ul class="pchk" id="pit-check">
+    <li><button type="button" aria-pressed="false">Every camera streaming at about 120 fps on the dashboard: TopLeft, TopRight, BottomLeft, BottomRight</button></li>
+    <li><button type="button" aria-pressed="false">Hold a tag to each camera: PhotonVision boxes it, and the robot code sees a target</button></li>
+    <li><button type="button" aria-pressed="false">Pose sanity: park the robot on a spot you know, and the field view puts it there (within a few cm)</button></li>
+    <li><button type="button" aria-pressed="false">Settings: CPU Throttling says None</button></li>
+    <li><button type="button" aria-pressed="false">Lenses still locked, and no camera knocked crooked in its mount</button></li>
+    <li><button type="button" aria-pressed="false">Every USB plug in its labeled port, glue intact, cables strain-relieved; Ethernet seated at both ends</button></li>
+    <li><button type="button" aria-pressed="false">Wi-Fi off (robot coprocessors may not use radios at events)</button></li>
+    <li class="full"><button type="button" aria-pressed="false">Health check says READY, with no warnings you can't explain</button></li>
+  </ul>
+  <div class="pchk-bar"><span id="pit-check-n"></span><button type="button" class="btn-sm" id="pit-check-clear">Clear the list</button></div>
+
+  <div class="deeper">
+    <a href="https://github.com/Spectrum3847/SpectrumJetson#troubleshooting-quick-reference" target="_blank" rel="noopener">Our README: troubleshooting quick reference</a>
+    <a href="https://docs.photonvision.org/en/latest/docs/troubleshooting/common-errors.html" target="_blank" rel="noopener">PhotonVision: common issues</a>
+    <a class="full" href="https://docs.photonvision.org/en/latest/docs/troubleshooting/networking-troubleshooting.html" target="_blank" rel="noopener">PhotonVision: networking troubleshooting</a>
+    <a class="full" href="https://docs.photonvision.org/en/latest/docs/troubleshooting/camera-troubleshooting.html" target="_blank" rel="noopener">PhotonVision: camera troubleshooting</a>
+    <a class="full" href="https://docs.photonvision.org/en/latest/docs/troubleshooting/logging.html" target="_blank" rel="noopener">PhotonVision: logging</a>
+  </div>
+  <p class="small muted">Links need internet. Everything on this page works offline, including on the Jetson's own Documentation page.</p>
+
+  <div class="recap reveal short">
+    <h5>Chapter 21 recap</h5>
+    <ul>
+      <li>Start from the symptom. The quickest check is always first.</li>
+      <li>Look first: dashboard fps (~120), CPU Throttling (None), the health topics, then <code>health-check.sh</code>.</li>
+      <li>A stuck camera needs its power cut: replug it or power-cycle the robot. Don't reboot the Jetson.</li>
+      <li>Restarting PhotonVision is always safe.</li>
+    </ul>
+  </div>
+  <div class="recap reveal full">
+    <h5>Chapter 21 recap</h5>
+    <ul>
+      <li>Symptom first: the finder above covers the problems we've actually seen, with the fix and how to confirm it.</li>
+      <li>The 60-second check: dashboard fps, CPU Throttling, <code>/photonvision/&lt;camera&gt;/health/</code> and <code>/photonvision/jetson/</code>, then <code>health-check.sh 4</code> over SSH.</li>
+      <li><code>971 stats</code> lines: fps, detect time, tags and decision margin, per camera, every second.</li>
+      <li>Restart PhotonVision freely. Replug or power-cycle for stuck cameras. Avoid <code>sudo reboot</code> when cameras are stuck.</li>
+      <li>Logs: Download Logs, Export Settings, or <code>journalctl</code> over SSH. The log survives power cuts.</li>
+    </ul>
+  </div>
+</div>

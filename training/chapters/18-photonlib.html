@@ -1,0 +1,375 @@
+<style>
+  #photonlib .lab-grid > *, #photonlib .split > * { min-width: 0; }
+  #photonlib .todo { margin: -4px 0 14px; font: 600 .92rem/1.45 var(--font); color: #efe6ff; padding-left: 1.6em; text-indent: -1.6em; }
+  #photonlib .todo::before { content: "\1F449"; display: inline-block; width: 1.6em; text-indent: 0; }
+  #photonlib pre.java { background: #1f1b23; color: #eee8f7; border-radius: 14px; padding: 16px 18px; font: .8rem/1.6 var(--mono); overflow-x: auto; box-shadow: var(--shadow-lg); margin: 14px 0; tab-size: 2; }
+  #photonlib pre.java .k { color: #c4b5fd; font-weight: 500; }
+  #photonlib pre.java .t { color: #67e8f9; }
+  #photonlib pre.java .s { color: #bef264; }
+  #photonlib pre.java .n { color: #fcd34d; }
+  #photonlib pre.java .c { color: #8f84a3; font-style: italic; }
+  #photonlib pre.java .m { color: #f9a8d4; }
+  #photonlib .steps4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 26px 0; counter-reset: st; }
+  @media (max-width: 860px) { #photonlib .steps4 { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 480px) { #photonlib .steps4 { grid-template-columns: 1fr; } }
+  #photonlib .steps4 .card { counter-increment: st; padding: 16px 18px; }
+  #photonlib .steps4 .card h4::before { content: counter(st); display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: #fff; font: 700 .8rem var(--font); margin-right: 8px; vertical-align: 2px; }
+  #photonlib .steps4 .card p code { font-size: .8em; }
+  #photonlib table.data td:first-child code { white-space: nowrap; }
+  #photonlib .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: .8rem; color: var(--lab-muted); margin-top: 8px; }
+  #photonlib .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: -1px; margin-right: 5px; }
+  #photonlib .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+  #photonlib .chk { display: flex; gap: 8px; align-items: center; font-size: .86rem; color: var(--lab-ink); margin: 8px 0; cursor: pointer; }
+  #photonlib .chk input { accent-color: var(--accent); width: 16px; height: 16px; }
+  #photonlib .gates { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin: 22px 0; }
+  @media (max-width: 760px) { #photonlib .gates { grid-template-columns: 1fr; } }
+  #photonlib .gates .card { border-top: 4px solid var(--accent); }
+  #photonlib canvas.tap { cursor: pointer; touch-action: manipulation; }
+  @media (max-width: 600px) { #photonlib .seg button, #photonlib .btn-sm { min-height: 40px; } #photonlib .lab input[type=range] { height: 40px; } #photonlib .chk { min-height: 40px; } #photonlib pre.java { font-size: .74rem; padding: 12px 12px; } }
+</style>
+<div class="shell">
+  <div class="ch-head">
+    <span class="eyebrow"><span class="num">18</span> · Reference</span>
+    <h2>PhotonLib <em>on the robot.</em></h2>
+    <p class="lede">You've seen how the Jetson finds tags and works out where the robot is. This chapter is the other half: the Java you write on the robot to read those answers, aim with them, and feed them into the robot's position.</p>
+  </div>
+
+  <div class="prose">
+    <p><span class="term">PhotonLib</span> is PhotonVision's library for robot code. It subscribes to each camera's results over <span class="term">NetworkTables</span> (<a href="#networktables">chapter 15</a>) and turns the bytes back into Java objects. You never talk to the Jetson directly: you make a camera object with the right name, and PhotonLib does the rest.</p>
+    <p class="full">Our robot code (<code>Spectrum3847/2026-FM-SystemCore</code>, WPILib 2027 alpha-6 on the SystemCore) has no vision code yet. So everything here is "how to write it", checked against the exact PhotonLib version the robot uses.</p>
+  </div>
+
+  <div class="steps4 reveal">
+    <div class="card"><h4>Add the vendordep</h4><p>PhotonLib <code>v2027.0.0-alpha-2</code>, and keep it there.</p></div>
+    <div class="card"><h4>Make the cameras</h4><p><code>new PhotonCamera("TopLeft")</code>, one per camera, names exact.</p></div>
+    <div class="card"><h4>Read every frame</h4><p><code>getAllUnreadResults()</code>, once per loop, per camera.</p></div>
+    <div class="card"><h4>Use it</h4><p>Aim at a tag (2D), or turn results into robot poses (3D).</p></div>
+  </div>
+
+  <h3>Step 1: the vendordep, pinned</h3>
+  <div class="split top">
+    <div class="prose">
+      <p>A <span class="term" data-def="A vendor dependency: a small JSON file in your robot project's vendordeps folder that tells the build which extra library (and which version) to download.">vendordep</span> is a JSON file in the robot project's <code>vendordeps/</code> folder. It tells the build which library to download, and which version. In WPILib VS Code, open the WPILib sidebar, go to Vendor Dependencies, and install PhotonLib.</p>
+      <p>Then open <code>vendordeps/photonlib.json</code> and check the version says <code>v2027.0.0-alpha-2</code>. <strong>Never press "To Latest"</strong> on it.</p>
+      <p class="full">Offline (at an event, no internet): download <code>photonlib-v2027.0.0-alpha-2.zip</code> from PhotonVision's GitHub releases ahead of time and unzip it into <code>~/wpilib/2027/vendordeps</code>. It then shows up under the offline install.</p>
+    </div>
+    <div class="callout pitfall" style="margin-top:0">
+      <h5>Why alpha-2, and not newer</h5>
+      <p>Our Jetson runs a 2026 PhotonVision (the only one with the CUDA detector). Every result it sends carries a fingerprint of its message layout, and PhotonLib compares it with its own every few seconds. For alpha-2 they match exactly (<a href="#photonvision">chapter 9</a>).</p>
+      <p>Newer PhotonLib (after alpha-7) renamed the timestamp fields, so the fingerprint changes. Then the robot code throws an error and stops, with a banner that ends "Your code will now crash." (PhotonLib source). Stay in the alpha-6 era.</p>
+    </div>
+  </div>
+  <p class="prose small muted full">Java packages moved in WPILib 2027: geometry is <code>org.wpilib.math.geometry</code>, not <code>edu.wpi.first.math.geometry</code>, and the field layout is <code>org.wpilib.vision.apriltag</code>. Code copied from a 2025 or 2026 example needs its imports fixed. PhotonLib itself is still <code>org.photonvision</code>.</p>
+
+  <h3>Step 2: one PhotonCamera per camera</h3>
+  <div class="split top">
+    <div class="prose">
+      <p>A <code>PhotonCamera</code> is robot code's handle on one camera. You make it with the camera's name, and the name <strong>must match the name in the PhotonVision UI exactly</strong>, capitals included. It's the NetworkTables folder PhotonLib listens to: <code>/photonvision/TopLeft/…</code>.</p>
+      <p>Ours are named after the USB port each camera is plugged into: <code>TopLeft</code>, <code>TopRight</code>, <code>BottomLeft</code>, <code>BottomRight</code>. (Every Thriftiest Cam reports the same serial number, so the port is the only way to tell them apart. <a href="#camsetup">Chapter 20</a> covers naming a new camera.)</p>
+      <p class="full">Get the name wrong and nothing crashes. The Driver Station just says the camera was "not found on NetworkTables" and lists the camera names it <em>can</em> see, which is how you spot a typo. More in <a href="#pit">chapter 21</a>.</p>
+    </div>
+<pre class="java" aria-label="Java: making the four cameras">// Once, when the robot starts
+PhotonCamera topLeft     = new PhotonCamera("TopLeft");
+PhotonCamera topRight    = new PhotonCamera("TopRight");
+PhotonCamera bottomLeft  = new PhotonCamera("BottomLeft");
+PhotonCamera bottomRight = new PhotonCamera("BottomRight");
+
+// Handy extras on PhotonCamera
+topLeft.isConnected();        // false if no results lately
+topLeft.setPipelineIndex(1);  // switch pipeline
+topLeft.setEnabled(false);    // rest while disabled</pre>
+  </div>
+
+  <h3>Step 3: read every frame</h3>
+  <div class="split top">
+    <div class="prose">
+      <p>Each camera sends about 120 results a second. Robot code runs every 20 ms, 50 times a second. So between two loops, <strong>2 or 3 new results</strong> pile up per camera.</p>
+      <p><code>getAllUnreadResults()</code> hands you all of them, oldest first, and empties the pile. Loop over the list and use every one: more measurements means a steadier pose.</p>
+      <p>Two rules. <strong>Call it exactly once per loop per camera</strong>: a second call gets an empty list, because the first call already took everything. And call it every loop: the pile only holds 20 results (about 0.17 s at 120 fps), and older ones are thrown away.</p>
+      <p class="full">The old <code>getLatestResult()</code> still exists, but it's marked deprecated for removal. It returns just the newest result, so at 120 fps it skips more than half the frames, and at low frame rates it hands you the same frame twice.</p>
+    </div>
+    <div class="lab" style="margin:0">
+      <div class="lab-head"><span class="tag">Lab</span><h4>The mailbox</h4></div>
+      <p class="todo">Switch between the three ways of reading, then move the frame rate.</p>
+      <canvas id="pl-mail" aria-label="Timeline: camera results arriving, robot loops every 20 ms, and which results each way of reading uses"></canvas>
+      <div class="legend"><span><i style="background:#a3e635"></i>used</span><span><i style="background:#f43f5e"></i>skipped</span><span><i style="background:#f59e0b"></i>used twice</span><span><i style="background:#c4b5fd"></i>waiting in the pile</span></div>
+      <div class="seg" id="pl-m-mode" style="margin-top:12px"><button data-v="all" class="on">getAllUnreadResults</button><button data-v="latest">getLatestResult</button><button data-v="twice">All unread, called twice</button></div>
+      <div class="ctl" style="margin-top:12px"><label>Camera frame rate <output></output></label><input type="range" id="pl-m-fps" min="15" max="120" step="5" value="120"></div>
+      <div class="readout">
+        <div><small>Results per loop</small><b id="pl-m-per">–</b></div>
+        <div><small>Used per second</small><b id="pl-m-used">–</b></div>
+        <div><small>Skipped per second</small><b id="pl-m-skip">–</b></div>
+      </div>
+      <p class="hint" id="pl-m-note">Slowed down about 25 times. Frame times have a little realistic jitter.</p>
+    </div>
+  </div>
+
+  <h3>What's in a result</h3>
+  <div class="prose">
+    <p>Each item in the list is a <code>PhotonPipelineResult</code>: everything one camera found in one frame. Always check <code>hasTargets()</code> first. <code>getBestTarget()</code> returns <code>null</code> when there are none, and using it then crashes the loop.</p>
+  </div>
+  <div class="table-wrap reveal">
+    <table class="data">
+      <tr><th>On the result</th><th>What it gives you</th></tr>
+      <tr><td><code>hasTargets()</code></td><td>True if at least one tag was seen.</td></tr>
+      <tr><td><code>getTargets()</code></td><td>A list of every tag seen (a <code>PhotonTrackedTarget</code> each), in the sort order set in the UI.</td></tr>
+      <tr><td><code>getBestTarget()</code></td><td>The first one in that order ("best" is whatever the UI's sort mode says), or <code>null</code>.</td></tr>
+      <tr><td><code>getTimestampSeconds()</code></td><td>When the frame was captured, already on the robot's clock (<a href="#latency">chapter 14</a>).</td></tr>
+      <tr class="full"><td><code>getMultiTagResult()</code></td><td>The Jetson's multi-tag solve, if two or more tags were seen and multi-tag is on. Empty otherwise.</td></tr>
+    </table>
+  </div>
+  <div class="table-wrap reveal">
+    <table class="data">
+      <tr><th>On each target</th><th>Units</th><th>Meaning</th></tr>
+      <tr><td><code>getFiducialId()</code></td><td>number</td><td>Which tag it is. Check this before aiming: the best target isn't always the tag you want.</td></tr>
+      <tr><td><code>getYaw()</code></td><td>degrees</td><td>Left/right from the image centre. <strong>Positive = the tag is to the right.</strong></td></tr>
+      <tr><td><code>getPitch()</code></td><td>degrees</td><td>Up/down from the image centre. Positive = above.</td></tr>
+      <tr><td><code>getArea()</code></td><td>% of image</td><td>How much of the picture the tag fills: 0 to 100. A rough "how close".</td></tr>
+      <tr class="full"><td><code>getSkew()</code></td><td>degrees</td><td>How rotated the tag's box is in the image. Rarely useful for tags.</td></tr>
+      <tr><td><code>getPoseAmbiguity()</code></td><td>0 to 1</td><td>How close the two possible 3D solves are (<a href="#pose">chapter 12</a>). Low is good; above about 0.2, don't trust a single tag.</td></tr>
+      <tr><td><code>getBestCameraToTarget()</code></td><td>Transform3d, m</td><td>Where the tag is relative to the camera, from the single-tag solve. Needs 3D mode and a calibration.</td></tr>
+      <tr class="full"><td><code>getAlternateCameraToTarget()</code></td><td>Transform3d, m</td><td>The other, flipped answer.</td></tr>
+      <tr class="full"><td><code>getDetectedCorners()</code></td><td>pixels</td><td>The four corners the detector found. The raw evidence everything else comes from.</td></tr>
+    </table>
+  </div>
+  <p class="caption full">Getter names checked in PhotonLib <code>v2027.0.0-alpha-2</code>. The yaw sign is the opposite of WPILib's usual angles, where counter-clockwise (left) is positive. <a href="#coords">Chapter 19</a> sorts out every sign.</p>
+
+  <h3>2D: aim at a tag</h3>
+  <div class="split top">
+    <div class="prose">
+      <p>The simplest use needs no calibration and no field map: <strong>turn until the tag's yaw is 0</strong>. Yaw is how far off you are, so turn by an amount proportional to it. That's a <span class="term" data-def="Proportional controller: output = gain × error. A bigger error gives a bigger push; the gain (kP) sets how hard it pushes.">P controller</span>:</p>
+      <p style="font-size:1.05rem;color:var(--p700)"><strong>turn = kP × (0 − yaw)</strong></p>
+      <p>The minus sign matters. Positive yaw means the tag is to the right, but a positive turn in WPILib is to the left. Get it backwards and the robot spins away from the tag.</p>
+      <p>Picking kP is a trade-off you can feel in the lab: too low and the robot creeps; too high and it swings past, comes back, and wobbles. The camera's delay makes the wobble worse, because the robot is always reacting to where the tag <em>was</em>.</p>
+    </div>
+<pre class="java" aria-label="Java: turning to face tag 10">// Every loop, while the driver holds the aim button
+double turn = driverTurn;
+for (var result : camera.getAllUnreadResults()) {
+  if (!result.hasTargets()) continue;
+  for (var t : result.getTargets()) {
+    if (t.getFiducialId() == 10) {           // the tag we want
+      turn = AIM_KP * (0 - t.getYaw()) * MAX_TURN_RAD_PER_S;
+    }
+  }
+}
+drivetrain.drive(forward, strafe, turn);   // latest result wins</pre>
+  </div>
+
+  <div class="lab">
+    <div class="lab-head"><span class="tag">Lab</span><h4>Turn to face the tag</h4></div>
+    <p class="todo">Press Restart and watch the robot turn. Push kP up until it wobbles, then try the camera mounted 25 cm left.</p>
+    <div class="lab-grid">
+      <div>
+        <canvas id="pl-aim" class="tap" aria-label="Top-down: a robot turning to face an AprilTag, with a graph of the camera's yaw over time"></canvas>
+        <div class="legend"><span><i style="background:#c4b5fd"></i>camera's view</span><span><i style="background:#a3e635"></i>where the robot's centre points</span><span><i style="background:#fcd34d"></i>yaw the camera reports</span></div>
+      </div>
+      <div>
+        <div class="ctl"><label>kP <output></output></label><input type="range" id="pl-a-kp" min="0.001" max="0.07" step="0.001" value="0.006"></div>
+        <div class="ctl"><label>Distance to the tag <output></output></label><input type="range" id="pl-a-d" min="1.5" max="6" step="0.1" value="3"></div>
+        <div class="seg" id="pl-a-cam"><button data-v="c" class="on">Camera at centre</button><button data-v="l">25 cm left</button><button data-v="f">25 cm left, fixed</button></div>
+        <div class="row"><button class="btn-sm primary" id="pl-a-go">Restart</button></div>
+        <div class="readout">
+          <div><small>Yaw now</small><b id="pl-a-yaw">–</b></div>
+          <div><small>Settled in</small><b id="pl-a-set">–</b></div>
+          <div><small>Overshoot</small><b id="pl-a-os">–</b></div>
+          <div><small>Centre misses tag by</small><b id="pl-a-miss">–</b></div>
+        </div>
+      </div>
+    </div>
+    <p class="hint">Simulated: a 20 ms robot loop, about 35 ms of camera delay, a drivetrain that takes about 0.1 s to reach a new turn speed, and a top turn speed of one turn per second (<code>MAX_TURN_RAD_PER_S</code> = 2π). The camera sees 81° across, like our Thriftiest Cams. If the tag leaves the view, there's no target and the robot stops turning. Real drivetrains also need a small minimum push to start moving, which this leaves out.</p>
+  </div>
+
+  <div class="split top">
+    <div class="prose">
+      <h3 style="margin-top:0">The offset camera trap</h3>
+      <p>Yaw 0 means the <em>camera</em> points at the tag. If the camera sits 25 cm left of the robot's centre, the robot ends up parallel to that line, and its centre misses the tag by 25 cm at every distance. None of our four cameras is at the centre.</p>
+      <p>The fix: aim for a yaw that isn't 0. From the camera, a tag the robot's centre points at appears slightly right, by <code>atan(offset / distance)</code>. That needs the distance, which is the next section. Or skip 2D entirely and aim from the robot's field pose (3D below): the pose estimator already knows where each camera is.</p>
+      <p class="full">A camera mounted turned (yawed) has the same trap: yaw 0 then means the robot faces off by the mount angle. Add it to the setpoint.</p>
+    </div>
+    <div class="prose">
+      <h3 style="margin-top:0">2D: range from pitch</h3>
+      <p>If the camera is at a fixed height and the tag's height is known, the tag's pitch gives the distance. It's the triangle from <a href="#pose">chapter 12</a>: height difference ÷ tan(total angle up).</p>
+<pre class="java" aria-label="Java: distance to a tag from its pitch">double tagZ = layout.getTagPose(10).get().getZ(); // 1.124 m
+double meters = PhotonUtils.calculateDistanceToTargetMeters(
+    0.45,                          // camera height, m
+    tagZ,                          // tag centre height, m
+    Math.toRadians(20),            // camera tilt, UP positive
+    Math.toRadians(t.getPitch())); // target pitch, UP positive</pre>
+      <p class="small muted">Signature from PhotonLib alpha-2: <code>(cameraHeightMeters, targetHeightMeters, cameraPitchRadians, targetPitchRadians)</code>. Careful: here a camera tilted <em>up</em> is positive, the opposite of <code>Rotation3d</code> in <code>robotToCamera</code>.</p>
+      <p class="full">It works best when the tag is well above or below the camera. Our 2026 hub tags are at 1.124 m, but the wall tags are at 0.552 m. With a camera at 0.45 m that's a 10 cm difference, and a tiny pitch error becomes a huge distance error.</p>
+    </div>
+  </div>
+
+  <h3>3D: where is the robot?</h3>
+  <div class="prose">
+    <p>For driving anywhere on the field, you want the robot's field pose. <code>PhotonPoseEstimator</code> turns a result into one. It needs two things:</p>
+    <ul>
+      <li><strong>The <span class="term">field layout</span></strong>: where every tag is. Ours is the 2026 Rebuilt <strong>AndyMark</strong> layout, the same one the Jetson uses. WPILib's default field is the <em>welded</em> version, so name AndyMark explicitly.</li>
+      <li><strong><code>robotToCamera</code></strong>: a <span class="term" data-def="WPILib's type for a 3D move: a translation (x forward, y left, z up, in meters) plus a rotation (roll, pitch, yaw, in radians).">Transform3d</span> saying where the camera sits on the robot and which way it points. <a href="#coords">Chapter 19</a> shows how to measure it and get the signs right.</li>
+    </ul>
+    <p>Then each result goes through a strategy method, and the answer goes to the drivetrain's pose estimator with its capture time and a trust level (<a href="#pose">chapter 12</a>, <a href="#latency">chapter 14</a>).</p>
+  </div>
+
+  <div class="table-wrap reveal">
+    <table class="data">
+      <tr><th>Method (alpha-2)</th><th>What it does</th><th>Use it for</th></tr>
+      <tr class="hl"><td><code>estimateCoprocMultiTagPose</code></td><td>Uses the Jetson's multi-tag solve over every tag in view.</td><td>First choice whenever 2+ tags are seen. Multi-tag must be on in the UI (ours is on by default).</td></tr>
+      <tr class="hl"><td><code>estimateLowestAmbiguityPose</code></td><td>Picks the single tag with the lowest ambiguity and solves from it.</td><td>Fallback for one tag. Filter it (below).</td></tr>
+      <tr><td><code>estimateConstrainedSolvepnpPose</code></td><td>Holds heading to the gyro and solves position from all tags (like MegaTag2).</td><td>Steady single-tag positions. Needs <code>addHeadingData</code> every loop (<a href="#gyro">chapter 13</a>).</td></tr>
+      <tr><td><code>estimatePnpDistanceTrigSolvePose</code></td><td>Gyro heading plus the best tag's distance and direction.</td><td>A cheap gyro-based solve from one tag.</td></tr>
+      <tr class="full"><td><code>estimateRioMultiTagPose</code></td><td>Multi-tag, but solved on the SystemCore.</td><td>Rarely: the Jetson already does it.</td></tr>
+      <tr class="full"><td><code>estimateClosestToCameraHeightPose</code>, <code>…ClosestToReferencePose</code>, <code>…AverageBestTargetsPose</code></td><td>Other ways to choose between single-tag answers.</td><td>Mostly older code.</td></tr>
+    </table>
+  </div>
+  <p class="caption">In alpha-2 each strategy is its own method, and the only constructor is <code>PhotonPoseEstimator(layout, robotToCamera)</code>. The old <code>update()</code> / <code>setPrimaryStrategy</code> style you'll see in older examples is gone. Every method returns an <code>Optional</code>: empty means "no answer from this frame".</p>
+
+  <h3>Sanity filters every team needs</h3>
+  <div class="prose"><p>A bad vision pose can teleport the robot's estimate across the field in one frame. Three cheap checks catch nearly all of them before they reach the pose estimator:</p></div>
+  <div class="gates reveal">
+    <div class="card"><h4>On the field, on the floor</h4><p>Reject a pose outside the field (16.52 × 8.04 m, plus a small margin), or more than about 25 cm above or below the floor. A robot can't be in the stands or flying.</p></div>
+    <div class="card"><h4>No ambiguous single tags</h4><p>With only one tag, reject it if <code>getPoseAmbiguity()</code> is above about 0.2. That's the flip from <a href="#pose">chapter 12</a>. Multi-tag answers don't flip.</p></div>
+    <div class="card"><h4>Trust falls with distance</h4><p>Scale the <span class="term" data-term="standard deviation">standard deviations</span> up with distance², down with more tags, and don't trust a single tag's heading at all. The starting rule: 0.01 × distance² ÷ tags² meters.</p></div>
+  </div>
+  <p class="prose full">These numbers are starting points, not tuned values. PhotonVision computes ambiguity differently from Limelight, so thresholds carried over from old Limelight code need retesting (<code>docs/LIMELIGHT-COMPARISON.md</code>). Rewind recordings replayed through the robot code are the way to tune them.</p>
+
+  <h3>A complete vision subsystem</h3>
+  <div class="prose"><p>Here it all is for our four cameras: one camera and one estimator each, every unread result, multi-tag first, the three filters, then the drivetrain. It's about 60 lines. The mount numbers are made up; yours come from CAD or <a href="#coords">chapter 19</a>.</p></div>
+<pre class="java" aria-label="Java: a vision subsystem for four cameras">public class Vision extends SubsystemBase {
+  /** Where each camera sits: x fwd, y left, z up (m); roll, pitch, yaw (rad). Made-up numbers. */
+  private static final Map&lt;String, Transform3d&gt; MOUNTS = Map.of(
+      "TopLeft",     new Transform3d(0.28,  0.25, 0.45, new Rotation3d(0, Math.toRadians(-20), Math.toRadians(30))),
+      "TopRight",    new Transform3d(0.28, -0.25, 0.45, new Rotation3d(0, Math.toRadians(-20), Math.toRadians(-30))),
+      "BottomLeft",  new Transform3d(-0.28, 0.25, 0.40, new Rotation3d(0, Math.toRadians(-15), Math.toRadians(150))),
+      "BottomRight", new Transform3d(-0.28, -0.25, 0.40, new Rotation3d(0, Math.toRadians(-15), Math.toRadians(-150))));
+
+  /** Must match the Jetson's layout. WPILib's default is the WELDED field. */
+  private static final AprilTagFieldLayout LAYOUT =
+      AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltAndymark);
+
+  /** Usually drivetrain::addVisionMeasurement. */
+  public interface Sink { void accept(Pose2d pose, double timestampSeconds, Matrix&lt;N3, N1&gt; stdDevs); }
+
+  private final List&lt;PhotonCamera&gt; cameras = new ArrayList&lt;&gt;();
+  private final List&lt;PhotonPoseEstimator&gt; estimators = new ArrayList&lt;&gt;();
+  private final Sink sink;
+
+  public Vision(Sink sink) {
+    this.sink = sink;
+    MOUNTS.forEach((name, robotToCamera) -&gt; {
+      cameras.add(new PhotonCamera(name));
+      estimators.add(new PhotonPoseEstimator(LAYOUT, robotToCamera));
+    });
+  }
+
+  @Override
+  public void periodic() {
+    for (int i = 0; i &lt; cameras.size(); i++) {
+      var estimator = estimators.get(i);
+      for (var result : cameras.get(i).getAllUnreadResults()) {   // once per loop, every result
+        var est = estimator.estimateCoprocMultiTagPose(result);   // 2+ tags
+        if (est.isEmpty()) est = estimator.estimateLowestAmbiguityPose(result);  // 1 tag
+        est.ifPresent(this::use);
+      }
+    }
+  }
+
+  private void use(EstimatedRobotPose est) {
+    Pose3d pose = est.estimatedPose;
+    int tags = est.targetsUsed.size();
+
+    // 1. On the field, on the floor
+    if (pose.getX() &lt; -0.5 || pose.getX() &gt; LAYOUT.getFieldLength() + 0.5
+        || pose.getY() &lt; -0.5 || pose.getY() &gt; LAYOUT.getFieldWidth() + 0.5
+        || Math.abs(pose.getZ()) &gt; 0.25) return;
+
+    // 2. A single tag must not be ambiguous
+    if (tags == 1 &amp;&amp; est.targetsUsed.get(0).getPoseAmbiguity() &gt; 0.2) return;
+
+    // 3. Trust falls with distance, rises with more tags
+    double dist = est.targetsUsed.stream()
+        .mapToDouble(t -&gt; t.getBestCameraToTarget().getTranslation().getNorm())
+        .average().orElse(10);
+    double xy = Math.max(0.02, 0.01 * dist * dist / (tags * tags));
+    double heading = tags &gt; 1 ? xy * 2 : 1e6;   // one tag: ignore its heading
+
+    sink.accept(pose.toPose2d(), est.timestampSeconds, VecBuilder.fill(xy, xy, heading));
+  }
+}</pre>
+  <p class="caption">Written against PhotonLib <code>v2027.0.0-alpha-2</code> and WPILib 2027 alpha-6 (<code>SubsystemBase</code> is in <code>org.wpilib.command2</code>, geometry in <code>org.wpilib.math.geometry</code>). Not yet run on our robot. Create it with <code>new Vision(drivetrain::addVisionMeasurement)</code>.</p>
+
+  <div class="callout pitfall">
+    <h5>Check the clock once</h5>
+    <p><code>est.timestampSeconds</code> is the capture time on the robot's clock, courtesy of time sync. WPILib 2027's pose estimator expects the clock of <code>Timer.getMonotonicTimestamp()</code>. On the first day with the robot, log <code>Timer.getMonotonicTimestamp() - result.getTimestampSeconds()</code>: it should be a small positive number, the latency (about 0.01 to 0.03 s). If it's huge or negative, the clocks don't match and every vision measurement lands at the wrong moment.</p>
+  </div>
+
+  <div class="full">
+  <details class="deep">
+    <summary>Adding the gyro (MegaTag2-style)</summary>
+    <div>
+      <p>To use <code>estimateConstrainedSolvepnpPose</code> or <code>estimatePnpDistanceTrigSolvePose</code>, every estimator needs the gyro heading, every loop, so it can look up the heading at each frame's capture time:</p>
+<pre class="java">// in periodic(), before reading results
+for (var e : estimators) e.addHeadingData(Timer.getMonotonicTimestamp(), drivetrain.getHeading());</pre>
+      <p>Chapter 13's "Pitfalls" box lists what bites in alpha-2: a missing heading can throw, the constrained solve costs CPU on the SystemCore (up to about 2 ms each), and it needs <code>camera.getCameraMatrix()</code> and <code>getDistCoeffs()</code>, which stay empty until the camera connects. A common plan: multi-tag to seed and check the heading, then the gyro-held solve for position.</p>
+    </div>
+  </details>
+  <details class="deep">
+    <summary>CTRE swerve and other pose estimators</summary>
+    <div>
+      <p>The <code>Sink</code> shape <code>(Pose2d, double, Matrix&lt;N3, N1&gt;)</code> matches WPILib's <code>SwerveDrivePoseEstimator.addVisionMeasurement</code>. CTRE's swerve drivetrain has a method with the same shape, but it keeps time on its own clock and wants the timestamp converted with <code>Utils.fpgaToCurrentTime(...)</code>. Whichever you use, do the clock check above.</p>
+      <p>A turret camera needs one more step: before each estimate, call <code>estimator.setRobotToCameraTransform(...)</code> with the turret angle <em>at the result's timestamp</em>, not the current angle.</p>
+    </div>
+  </details>
+  <details class="deep">
+    <summary>Simulation: VisionSystemSim</summary>
+    <div>
+      <p>PhotonLib can fake the cameras in simulation. A <code>VisionSystemSim</code> holds the field's tags (<code>addAprilTags(LAYOUT)</code>). Each <code>PhotonCameraSim</code> wraps one of your real <code>PhotonCamera</code> objects, with <code>SimCameraProperties</code> describing it, and is added with the same <code>robotToCamera</code>. Call <code>visionSim.update(simRobotPose)</code> every sim loop, and your real vision code receives results as if the Jetson sent them.</p>
+<pre class="java">var props = new SimCameraProperties();
+props.setCalibration(1280, 800, Rotation2d.fromDegrees(91)); // ~diagonal FOV of our cams
+props.setFPS(120);
+props.setAvgLatencyMs(15);
+visionSim.addCamera(new PhotonCameraSim(topLeft, props), MOUNTS.get("TopLeft"));</pre>
+      <p>The upstream <code>poseest</code> example does exactly this. It's a good way to test filters and std devs before the robot exists.</p>
+    </div>
+  </details>
+  </div>
+
+  <div class="callout spectrum">
+    <h5>Our extras on NetworkTables</h5>
+    <p>Our PhotonVision publishes more than stock: per-camera health (<code>/photonvision/TopLeft/health/fps</code>, <code>latencyMs</code>, <code>problem</code>…), Jetson temperatures and throttling, <code>settingsJson</code> snapshots for the log, and controls like Rewind recording and excluded tags. Robot code reads them with plain NetworkTables subscribers and can raise Driver Station alerts from them. The full topic tree is in <a href="#networktables">chapter 15</a>.</p>
+  </div>
+
+  <div class="deeper full">
+    <a href="https://docs.photonvision.org/en/latest/docs/programming/photonlib/adding-vendordep.html">PhotonLib: installing</a>
+    <a href="https://docs.photonvision.org/en/latest/docs/programming/photonlib/getting-target-data.html">PhotonLib: getting target data</a>
+    <a href="https://docs.photonvision.org/en/latest/docs/programming/photonlib/using-target-data.html">PhotonLib: using target data</a>
+    <a href="https://docs.photonvision.org/en/latest/docs/programming/photonlib/robot-pose-estimator.html">PhotonLib: pose estimator</a>
+    <a href="https://docs.photonvision.org/en/latest/docs/simulation/simulation-java.html">Simulation in Java</a>
+    <a href="https://docs.photonvision.org/en/latest/docs/examples/index.html">Code examples explained</a>
+    <a href="https://github.com/PhotonVision/photonvision/tree/v2027.0.0-alpha-2/photonlib-java-examples">PhotonLib Java examples (alpha-2)</a>
+    <a href="https://github.com/PhotonVision/photonvision/blob/v2027.0.0-alpha-2/photon-lib/src/main/java/org/photonvision/PhotonPoseEstimator.java">PhotonPoseEstimator source (alpha-2)</a>
+  </div>
+
+  <div class="recap reveal short">
+    <h5>Chapter 18 recap</h5>
+    <ul>
+      <li>Vendordep: PhotonLib <code>v2027.0.0-alpha-2</code>. Never "To Latest": a newer one crashes against our Jetson.</li>
+      <li><code>new PhotonCamera("TopLeft")</code>: the name must match the UI exactly.</li>
+      <li><code>getAllUnreadResults()</code> once per loop, and use every result. Check <code>hasTargets()</code> first.</li>
+      <li>2D: <code>turn = kP × (0 − yaw)</code>; positive yaw is right. An off-centre camera needs an offset setpoint.</li>
+      <li>3D: <code>PhotonPoseEstimator(AndyMark layout, robotToCamera)</code>, multi-tag then lowest ambiguity, filter, then <code>addVisionMeasurement(pose, timestamp, stdDevs)</code>.</li>
+    </ul>
+  </div>
+  <div class="recap reveal full">
+    <h5>Chapter 18 recap</h5>
+    <ul>
+      <li>Vendordep: PhotonLib <code>v2027.0.0-alpha-2</code>, pinned. Past the alpha-6 era the message fingerprint changes and <code>PhotonCamera</code> throws.</li>
+      <li>WPILib 2027 moved packages: <code>org.wpilib.math.geometry</code>, <code>org.wpilib.vision.apriltag</code>.</li>
+      <li><code>PhotonCamera</code> names match the UI exactly: TopLeft, TopRight, BottomLeft, BottomRight.</li>
+      <li><code>getAllUnreadResults()</code> exactly once per loop per camera: 2–3 results at 120 fps, a 20-result pile. <code>getLatestResult()</code> is deprecated and skips frames.</li>
+      <li>Targets: id, yaw (right = positive), pitch (up = positive), area %, ambiguity, camera-to-tag transform, corners. <code>getBestTarget()</code> is null without targets.</li>
+      <li>2D aim with a P controller: too low creeps, too high wobbles (the camera delay makes it worse). Offset cameras aim at <code>atan(offset / distance)</code>. Range from pitch with <code>calculateDistanceToTargetMeters</code>, camera tilt up positive.</li>
+      <li>3D: <code>k2026RebuiltAndymark</code> (the default is welded), <code>robotToCamera</code>, one method per strategy, filters for off-field, ambiguity and distance-scaled std devs.</li>
+      <li>Check once that vision timestamps and <code>Timer.getMonotonicTimestamp()</code> share a clock.</li>
+    </ul>
+  </div>
+</div>
