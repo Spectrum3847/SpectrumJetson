@@ -334,7 +334,7 @@
     showInUrl(m);
     document.querySelectorAll('[data-mode]').forEach((b) => b.classList.toggle('on', b.dataset.mode === m));
     showTimes();
-    if (anchor) scrollBy(0, anchor.getBoundingClientRect().top - top);
+    if (anchor) scrollBy({ top: anchor.getBoundingClientRect().top - top, behavior: 'instant' });
     dispatchEvent(new CustomEvent('site:mode', { detail: m }));
   };
   // Reading time per chapter and mode: visible words at ~220 wpm plus ~1 min per lab.
@@ -427,13 +427,13 @@
   }
   function applyAnchor(a) {
     if (!a) return;
-    if (a.top) { scrollTo(0, 0); return; }
+    if (a.top) { scrollTo({ top: 0, behavior: 'instant' }); return; }
     let el = a.el && a.el.isConnected ? a.el : null;
     if (!el) { const sec = tops()[a.sec]; el = sec && a.path ? fromPath(sec, a.path) : null; if (!el) el = sec; }
     if (!el || !el.getClientRects().length) return;
     const r = el.getBoundingClientRect();
     const d = r.top + (a.frac || 0) * r.height - LINE();
-    if (Math.abs(d) > 1) { pinning = true; scrollBy(0, d); pinning = false; }
+    if (Math.abs(d) > 1) { pinning = true; scrollBy({ top: d, behavior: 'instant' }); pinning = false; }
   }
   // Hold the anchor for a while (layout still settling); any input from the reader releases it.
   function pin(a, ms) { anchor = a; pinUntil = performance.now() + ms; applyAnchor(a); }
@@ -441,8 +441,41 @@
   ['wheel', 'touchstart', 'keydown', 'pointerdown'].forEach((t) => addEventListener(t, release, { passive: true }));
   new ResizeObserver(() => { if (performance.now() < pinUntil) applyAnchor(anchor); }).observe(document.body);
   addEventListener('scroll', () => { if (!pinning && performance.now() >= pinUntil) anchor = takeAnchor(); }, { passive: true });
-  // zoom or window resize: go back to the element you were reading
-  addEventListener('resize', () => { const a = anchor; if (a) { pin(a, 1500); requestAnimationFrame(() => applyAnchor(a)); } });
+  // zoom or window resize: go back to the element you were reading. Only when the width
+  // changes: phones resize the height every time the address bar shows or hides.
+  let lastW = innerWidth;
+  addEventListener('resize', () => {
+    if (innerWidth === lastW) return;
+    lastW = innerWidth;
+    const a = anchor; if (a) { pin(a, 1500); requestAnimationFrame(() => applyAnchor(a)); }
+  });
+  // In-page links (menu, course map, "chapter 14" in the text, the preview steps): jump there
+  // instantly and hold the target under the top bar while nearby chapters start up and resize.
+  Site.goTo = (id, push = true) => {
+    const t = id && document.getElementById(id);
+    if (!t || !t.getClientRects().length) return false;
+    if (push) {
+      // remember where you were, so Back returns there
+      const here = takeAnchor();
+      history.replaceState({ ...(history.state || {}), place: here && (here.top ? { top: true } : { sec: here.sec, path: here.path, frac: here.frac }) }, '');
+      history.pushState({}, '', location.search + '#' + id);
+    }
+    const a = { el: t, frac: 0 };
+    anchor = a; pinUntil = performance.now() + 3000;
+    applyAnchor(a);
+    return true;
+  };
+  document.addEventListener('click', (e) => {
+    const link = e.target.closest('a[href^="#"]');
+    if (!link || e.defaultPrevented || e.button || e.metaKey || e.ctrlKey || e.shiftKey) return;
+    const id = decodeURIComponent(link.getAttribute('href').slice(1));
+    if (id === 'top') { e.preventDefault(); history.pushState(history.state, '', location.search + '#top'); pin({ top: true }, 500); return; }
+    if (Site.goTo(id)) e.preventDefault();
+  });
+  addEventListener('popstate', (e) => {
+    if (e.state && e.state.place) { pin(e.state.place, 2500); return; }
+    const id = location.hash.slice(1); if (id) Site.goTo(id, false);
+  });
   const KEY = 'vt-place:' + location.pathname;
   addEventListener('pagehide', () => {
     const a = takeAnchor();
@@ -451,8 +484,12 @@
   function restorePlace() {
     let saved = null;
     try { saved = JSON.parse(sessionStorage.getItem(KEY) || 'null'); } catch (e) {}
-    if (saved) pin(saved, 6000);
-    else if (location.hash) { const t = document.querySelector(location.hash); if (t) { t.scrollIntoView(); pin(takeAnchor(), 4000); } }
+    // A reload (or Back) returns to where you were; a link you opened goes to its #target.
+    const nav = performance.getEntriesByType('navigation')[0];
+    const returning = nav && (nav.type === 'reload' || nav.type === 'back_forward');
+    const id = location.hash.slice(1);
+    if (returning && saved) pin(saved, 6000);
+    else if (id && Site.goTo(id, false)) pinUntil = performance.now() + 5000;
     anchor = anchor || takeAnchor();
   }
 

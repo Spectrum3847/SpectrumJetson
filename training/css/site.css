@@ -38,7 +38,7 @@
 @media (max-width: 640px) { :root { --shell: calc(100% - 2rem); } }
 
 *, *::before, *::after { box-sizing: border-box; }
-html { scroll-behavior: smooth; scroll-padding-top: calc(var(--nav-h) + 12px); }
+html { scroll-padding-top: calc(var(--nav-h) + 12px); } /* no smooth scroll: in-page links jump instantly (site.js goTo) so lazy chapters can't push the target away */
 body {
   margin: 0; font-family: var(--font); color: var(--ink); background: var(--surface);
   font-size: 17px; line-height: 1.65; -webkit-font-smoothing: antialiased; overflow-x: hidden;
@@ -278,7 +278,7 @@ table.data tr.hl td { background: #faf5ff; font-weight: 700; }
 /* reveal on scroll */
 .reveal { opacity: 0; transform: translateY(24px); transition: opacity .7s ease, transform .7s cubic-bezier(.2,.7,.2,1); }
 .reveal.in { opacity: 1; transform: none; }
-@media (prefers-reduced-motion: reduce) { .reveal { opacity: 1; transform: none; transition: none; } html { scroll-behavior: auto; } }
+@media (prefers-reduced-motion: reduce) { .reveal { opacity: 1; transform: none; transition: none; } }
 
 /* flow diagrams made of boxes */
 .flow { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; margin: 26px 0; }
