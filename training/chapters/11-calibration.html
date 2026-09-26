@@ -1,6 +1,17 @@
 <style>
   #calibration .duo { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 14px; }
-  @media (max-width: 700px) { #calibration .duo { grid-template-columns: 1fr; } }
+  #calibration .pin-tabs, #calibration .pin-hint { display: none; }
+  @media (max-width: 700px) {
+    #calibration .duo { grid-template-columns: 1fr; }
+    /* phones: one view at a time (tabs), pinned while you scroll the sliders; the equation goes below them */
+    #calibration .pin-tabs { display: inline-flex; margin-bottom: 8px; }
+    #calibration .pin-hint { display: inline; }
+    #calibration .duo[data-show="3d"] > div:nth-child(2), #calibration .duo[data-show="img"] > div:nth-child(1) { display: none; }
+    #calibration .pin-left { display: contents; }
+    #calibration .pin-view { position: sticky; top: calc(var(--nav-h) + 6px); z-index: 3; background: var(--lab-bg); padding: 6px 0 8px; order: 1; box-shadow: 0 12px 14px -10px rgba(0,0,0,.7); }
+    #calibration .pin-left + div { order: 2; }
+    #calibration .pin-left .eq { order: 3; margin-top: 4px; }
+  }
   #calibration .cap { font-size: .74rem; letter-spacing: .1em; text-transform: uppercase; color: var(--lab-muted); margin: 0 0 6px; font-weight: 700; }
   #calibration .eq { font-family: var(--mono); font-size: .86rem; background: rgba(255,255,255,.05); border: 1px solid var(--lab-line); border-radius: 10px; padding: 10px 14px; margin-top: 14px; color: var(--lab-ink); line-height: 1.8; overflow-x: auto; }
   #calibration .eq b { color: var(--accent-soft); font-weight: 500; }
@@ -82,12 +93,15 @@
 
   <div class="lab">
     <div class="lab-head"><span class="tag">Lab</span><h4>Project a point through a pinhole</h4></div>
-    <p class="todo">Drag the red dot in the image, turn the 3D view by dragging it, or move the sliders.</p>
+    <p class="todo">Drag the red dot in the image, turn the 3D view by dragging it, or move the sliders.<span class="pin-hint"> On a phone, switch between the two views with the tabs.</span></p>
     <div class="lab-grid">
-      <div>
-        <div class="duo">
-          <div><p class="cap">3D view (drag to turn)</p><canvas id="cal-pin3d" class="drag" aria-label="3D view of a pinhole camera, its image plane and a point in the world"></canvas></div>
-          <div><p class="cap">The image (drag the point)</p><canvas id="cal-pinimg" class="drag" aria-label="The 1280 by 800 image with the projected point"></canvas></div>
+      <div class="pin-left">
+        <div class="pin-view">
+          <div class="seg pin-tabs" id="cal-pintab" role="tablist" aria-label="Which view"><button data-v="3d" class="on">3D view</button><button data-v="img">The image</button></div>
+          <div class="duo" id="cal-duo" data-show="3d">
+            <div><p class="cap">3D view (drag to turn)</p><canvas id="cal-pin3d" class="drag" aria-label="3D view of a pinhole camera, its image plane and a point in the world"></canvas></div>
+            <div><p class="cap">The image (drag the point)</p><canvas id="cal-pinimg" class="drag" aria-label="The 1280 by 800 image with the projected point"></canvas></div>
+          </div>
         </div>
         <div class="eq" id="cal-eq"></div>
       </div>

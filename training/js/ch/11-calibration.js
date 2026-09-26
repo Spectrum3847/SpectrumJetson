@@ -224,6 +224,7 @@ Site.chapter('calibration', (root) => {
     $('#cal-ours').onclick = () => set({ fx: 737.0, fy: 737.2, cx: 597.9, cy: 371.6 });
     $('#cal-ideal').onclick = () => set({ fx: 737, fy: 737, cx: 640, cy: 400 });
     orbit(c3, vw, () => draw());
+    Site.seg($('#cal-pintab'), (v) => { $('#cal-duo').dataset.show = v; requestAnimationFrame(draw); });
     // drag the point in the image
     let dragI = false;
     const fromImg = (e) => {
@@ -236,10 +237,10 @@ Site.chapter('calibration', (root) => {
     ci.addEventListener('pointerup', endI); ci.addEventListener('pointercancel', endI);
 
     function draw() {
-      if (!s3.w || !si.w) return;
+      if (!s3.w && !si.w) return; // on phones only one view is shown at a time
       const u = (P.fx * P.X) / P.Z + P.cx, v = (P.fy * P.Y) / P.Z + P.cy;
       // 3D: camera frame (X right, Y down, Z fwd) -> world (fwd, left, up) = (Z, -X, -Y)
-      { const { ctx, w, h } = s3;
+      if (s3.w) { const { ctx, w, h } = s3;
         ctx.fillStyle = LAB; ctx.fillRect(0, 0, w, h);
         const V = viewer(vw.az, vw.el, w * 2.1, 7, w * 0.5, h * 0.5);
         const W3 = (x, y, z) => V([z - 1.1, -x, -y]);
@@ -281,7 +282,7 @@ Site.chapter('calibration', (root) => {
         const fl = W3(0, 0, zp / 2); ctx.fillStyle = MUTED; ctx.font = '11px JetBrains Mono'; ctx.fillText('f', fl[0] + 5, fl[1] - 4);
       }
       // image
-      { const { ctx, w, h } = si, s = w / 1280;
+      if (si.w) { const { ctx, w, h } = si, s = w / 1280;
         ctx.fillStyle = '#16092a'; ctx.fillRect(0, 0, w, h);
         ctx.strokeStyle = 'rgba(196,181,253,.12)';
         for (let x = 160; x < 1280; x += 160) line(ctx, [x * s, 0], [x * s, h]);

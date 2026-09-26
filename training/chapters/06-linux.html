@@ -115,6 +115,20 @@
   @media (max-width: 560px) { #linux .diff { font-size: .7rem; } }
   /* after the font shorthands above, which reset these: no "->" arrows in code */
   #linux .diff, #linux .diff div, #linux .conf, #linux .svc, #linux .kmsg, #linux code { font-variant-ligatures: none; font-feature-settings: "calt" 0, "liga" 0; }
+  /* phones: a compact stack (only the active layer shows its subtitle) so the lab fits a screen */
+  @media (max-width: 640px) {
+    #linux #l-os-seg { display: flex; flex-wrap: nowrap; }
+    #linux #l-os-seg button { flex: 1; padding: 8px 6px; font-size: .78rem; }
+    #linux .stack { gap: 5px; }
+    #linux .layer { padding: 7px 12px; gap: 10px; }
+    #linux .layer .ic { font-size: 1.1rem; width: 26px; }
+    #linux .layer b { font-size: .92rem; }
+    #linux .layer:not(.on) small { display: none; }
+    #linux .layer.on { transform: translateX(4px); }
+    #linux .os-cap { min-height: 0; padding: 10px 12px; }
+    #linux .os-cap p { font-size: .84rem; }
+    #linux .trip-bar { margin-bottom: 8px; }
+  }
 </style>
 <div class="shell">
   <div class="ch-head">
