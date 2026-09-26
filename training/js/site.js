@@ -60,22 +60,36 @@
   };
 
   // Scrollytelling: calls cb(index, stepEl) as each .step crosses the middle of the screen.
+  // The active step is the visible step whose text box is closest to the middle of the screen,
+  // recomputed on every scroll, so it can't get stuck in either direction (a thin
+  // IntersectionObserver band could miss a step entirely on a fast or reversed scroll).
   Site.scrolly = (root, cb) => {
     const steps = [...root.querySelectorAll('.step')];
     const prog = scrollyProgress(root, steps);
-    let cur = -1;
-    const io = new IntersectionObserver((es) => {
-      es.forEach((e) => {
-        if (!e.isIntersecting) return;
-        const i = steps.indexOf(e.target);
-        if (i === cur) return;
-        cur = i;
-        steps.forEach((s, j) => s.classList.toggle('active', j === i));
-        prog.set(i);
-        cb(i, e.target);
+    let cur = -1, on = false, queued = false;
+    const pick = () => {
+      queued = false;
+      const mid = innerHeight / 2;
+      let best = -1, bd = Infinity;
+      steps.forEach((s, j) => {
+        if (!s.getClientRects().length) return; // hidden in this mode
+        const r = (s.querySelector('.box') || s).getBoundingClientRect();
+        const d = Math.abs((r.top + r.bottom) / 2 - mid);
+        if (d < bd) { bd = d; best = j; }
       });
-    }, { rootMargin: '-45% 0px -45% 0px' });
-    steps.forEach((s) => io.observe(s));
+      if (best < 0 || best === cur) return;
+      cur = best;
+      steps.forEach((s, j) => s.classList.toggle('active', j === best));
+      prog.set(best);
+      cb(best, steps[best]);
+    };
+    const req = () => { if (on && !queued) { queued = true; requestAnimationFrame(pick); } };
+    // only track while the block is near the screen
+    new IntersectionObserver((es) => { on = es[0].isIntersecting; if (on) req(); }, { rootMargin: '50% 0px' }).observe(root);
+    addEventListener('scroll', req, { passive: true });
+    addEventListener('resize', req);
+    new ResizeObserver(req).observe(root); // the layout can shift without a scroll (a visual resizing)
+    addEventListener('site:mode', () => { cur = -1; req(); });
     return steps;
   };
 
