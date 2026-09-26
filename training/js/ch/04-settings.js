@@ -33,6 +33,39 @@ Site.chapter('settings', (root) => {
     const S = { exp: 5, gain: 1, bri: 0, con: 1, gam: 1, sharp: 5, spin: 3 };
     const s = new Float32Array(N), row = new Float64Array(W + 1), v = new Float32Array(N), sh = new Float32Array(N);
     let zoff = 0;
+    // Tuning goals: what we're balancing, each rated from the simulated frame.
+    // Thresholds are teaching rules of thumb, stated in each row's text.
+    const goals = (t) => {
+      const { exp, gain, sharp, spin } = S;
+      const side = Math.hypot(t.quad[1][0] - t.quad[0][0], t.quad[1][1] - t.quad[0][1]) * (1280 / W); // tag width at full res
+      const sq = side / 8, far = (737 * 0.1651) / 8 / 4; // one square here; one square of a tag 4 m away
+      const blur = (737 * spin * exp) / 1000, rb = blur / sq;
+      const row = (c, name, verdict, why) => `<div class="goal ${c}"><i></i><b>${name}</b><em>${verdict}</em><span>${why}</span></div>`;
+      let h = '';
+      // 1. found in this light, with headroom for dimmer lights or farther tags
+      if (t.wrong || t.m < 15) h += row('r', 'Tags are found', t.wrong ? 'misread' : 'dropped', `Margin ${Math.round(t.m)} is below our cutoff of 15, so PhotonVision throws the tag away. It needs more light or less blur.`);
+      else if (t.m < 30) h += row('a', 'Tags are found', 'just barely', `Found (margin ${Math.round(t.m)}), but with little headroom: dimmer event lights or a farther tag could drop it.`);
+      else h += row('g', 'Tags are found', `margin ${Math.round(t.m)}`, 'Found with headroom for dimmer lights and farther tags.');
+      // 2. sharp while the robot turns
+      const bt = spin ? `The tag smears ${blur.toFixed(0)} px while the shutter is open: ${rb.toFixed(1)} of one tag square here. A tag 4 m away has ${far.toFixed(0)} px squares, so it would smear across ${(blur / far).toFixed(1)}.` : 'The robot is still, so nothing smears. Turn up Robot spin to see what a real turn does.';
+      h += row(rb < 0.3 ? 'g' : rb < 0.8 ? 'a' : 'r', 'Sharp while moving', `${blur.toFixed(0)} px smear`, bt);
+      // 3. precise corners: clean, unclipped, low-noise edges
+      const issues = [];
+      if (t.crushed > 0.5) issues.push("the tag's black squares are crushed");
+      if (t.blown > 0.5) issues.push("the tag's white is clipped");
+      if (rb >= 0.5) issues.push('the edges are smeared');
+      if (gain > 2) issues.push('gain adds noise');
+      if (sharp > 7) issues.push('sharpening draws halos');
+      h += row(issues.length === 0 ? 'g' : issues.length === 1 ? 'a' : 'r', 'Precise corners', issues.length ? `${issues.length} problem${issues.length > 1 ? 's' : ''}` : 'clean edges',
+        issues.length ? `Corners set the pose. Here ${issues.join(', ')}, so each corner lands less precisely and the pose jitters, even if the tag is still found.` : 'Crisp, unclipped, low-noise edges: the detector can place each corner precisely, which makes a steady pose.');
+      // 4. full frame rate
+      const fps = Math.min(120, Math.floor(1000 / exp));
+      h += row(fps >= 120 ? 'g' : fps >= 60 ? 'a' : 'r', 'Full frame rate', `${fps} fps`, fps >= 120 ? 'The exposure fits inside the 8.3 ms frame, so the camera keeps 120 fps.' : `A ${exp.toFixed(1)} ms exposure doesn't fit in the 8.3 ms frame, so the camera slows to ${fps} fps: fewer and older answers for the robot.`);
+      // 5. the same result under the event's lights
+      const cyc = exp / (1000 / 120), whole = Math.abs(cyc - Math.round(cyc)) < 0.06 && Math.round(cyc) >= 1;
+      h += row(whole ? 'g' : 'a', 'Steady under any lights', whole ? 'flicker-safe' : 'check at event', whole ? `${exp.toFixed(1)} ms is a whole number of flicker cycles (8.3 ms each), so every frame gets the same light.` : `Mains lights flicker every 8.3 ms, and ${exp.toFixed(1)} ms isn't a whole number of cycles, so frames could pulse in brightness. We measured only 0.6% at 5 ms in our shop; re-check under the event's lights.`);
+      $('#s-goals').innerHTML = h;
+    };
     const render = () => {
       const { exp, gain, bri, con, gam, sharp, spin } = S;
       // 1. light collected: linear in exposure
@@ -83,7 +116,7 @@ Site.chapter('settings', (root) => {
         for (let yy = 0; yy < 6; yy++) for (let xx = 0; xx < 6; xx++) { const d = at((xx + 1.5) / 8, (yy + 1.5) / 8) - thr; if (d > 0) { ws += d; wc++; } else { bs -= d; bc++; } if ((d > 0 ? 1 : 0) !== t.truth[yy * 6 + xx]) wrong++; }
         // ponytail: one fixed factor. The library formula reads ~43 on this frame at 5 ms; our GPU detector reported 90.
         const m = 2.1 * Math.min(ws / wc, bs / bc), ok = !wrong && m >= 15;
-        t.ok = ok;
+        t.ok = ok; t.m = m; t.wrong = wrong;
         badges += `<span class="badge ${ok ? 'ok' : 'bad'}">Tag ${t.id}: ${wrong ? `${wrong} squares misread ✗` : `margin ${Math.round(m)} ${ok ? '✓' : '✗ below 15'}`}${ok && m < 35 ? ' (default 35 would drop it)' : ''}</span>`;
       });
       const hp = (100 * hiC) / N, lp = (100 * loC) / N;
@@ -94,6 +127,7 @@ Site.chapter('settings', (root) => {
         if (t.blown > 0.5) badges += `<span class="badge warn" title="The detector still reads the tag, but it places each corner using the gray gradient along the edges. Flattened edges mean slightly less precise corners, so the pose jitters more.">⚠ Tag ${t.id}'s white clipped${t.ok ? ': still found, corners less precise' : ''}</span>`;
       });
       $('#s-badges').innerHTML = badges;
+      goals(tags[0]);
       tags.forEach((t) => { vctx.strokeStyle = t.ok ? '#a3e635' : '#f43f5e'; vctx.lineWidth = 2; vctx.beginPath(); t.quad.forEach(([x, y], i) => (i ? vctx.lineTo(x, y) : vctx.moveTo(x, y))); vctx.closePath(); vctx.stroke(); });
       // histogram
       const { ctx, w, h } = hist, mx = Math.max(...hb.slice(1, 255));

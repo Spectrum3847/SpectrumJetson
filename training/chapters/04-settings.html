@@ -45,8 +45,22 @@
     #settings .sim .ctl input { order: 2; }
     #settings .sim input[type=range] { height: 30px; }
   }
-  #settings .margin-note { font-size: .74rem; color: var(--lab-muted); margin: 2px 0 8px; line-height: 1.4; }
-  @media (max-width: 900px) { #settings .sim .margin-note { order: 2; } }
+  #settings .goals { display: grid; gap: 6px; margin: 4px 0 10px; }
+  #settings .goal { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 2px 10px; align-items: baseline; background: rgba(255,255,255,.04); border: 1px solid var(--lab-line); border-radius: 10px; padding: 7px 12px; }
+  #settings .goal i { width: 10px; height: 10px; border-radius: 50%; align-self: center; }
+  #settings .goal.g i { background: #a3e635; box-shadow: 0 0 8px #a3e635; }
+  #settings .goal.a i { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; }
+  #settings .goal.r i { background: #f43f5e; box-shadow: 0 0 8px #f43f5e; }
+  #settings .goal b { font: 700 .86rem var(--font-heading); color: #fff; }
+  #settings .goal em { font: 600 .74rem var(--mono); font-style: normal; text-align: right; white-space: nowrap; }
+  #settings .goal.g em { color: #a3e635; } #settings .goal.a em { color: #fbbf24; } #settings .goal.r em { color: #fb7185; }
+  #settings .goal span { grid-column: 2 / 4; font-size: .76rem; color: var(--lab-muted); line-height: 1.4; }
+  #settings .tune-how { font-size: .82rem; color: var(--lab-muted); margin: 0 0 10px; }
+  #settings .tune-how summary { cursor: pointer; font-weight: 700; color: var(--accent-soft); padding: 4px 0; }
+  #settings .tune-how ol { margin: 4px 0 0; padding-left: 1.3em; }
+  #settings .tune-how li { margin: 3px 0; }
+  #settings .tune-how b { color: #fff; }
+  @media (max-width: 900px) { #settings .sim .goals, #settings .sim .tune-how { order: 2; } #settings .goal.g span { display: none; } #settings .goal { padding: 6px 10px; } #settings .goal span { font-size: .72rem; } }
 </style>
 <div class="shell">
   <div class="ch-head">
@@ -77,7 +91,7 @@
   </div>
   <div class="lab">
     <div class="lab-head"><span class="tag">Lab</span><h4>Tune the camera</h4></div>
-      <p class="how">Pick a starting point from the list, or drag any slider. Try raising Exposure while the robot spins, and watch the tag's badge.</p>
+      <p class="how">Tuning is a balance: find the tags in this light, keep them sharp while the robot turns, and keep the corners precise. The goals under the picture show how you're doing. Pick a starting point from the list, or drag any slider. Try raising Exposure while the robot spins, and watch the tag's badge.</p>
     <label class="preset-pick">Start from <select id="s-preset" aria-label="Camera settings preset">
       <option value="ours" selected>Default (5 ms, gain 1)</option>
       <option value="auto">Auto exposure (what the camera picks)</option>
@@ -91,7 +105,14 @@
       <div>
         <canvas class="view" id="s-view" aria-label="Simulated camera frame with tag 3, changing with the settings"></canvas>
         <div class="badges" id="s-badges"></div>
-        <p class="margin-note">A higher margin means the tag is read more confidently, not that the pose is better. Clipped or crushed tag edges can raise the margin while making the corners, and so the pose, less precise.</p>
+        <div class="goals" id="s-goals" aria-live="polite"></div>
+        <details class="tune-how"><summary>How to tune, in order</summary><ol>
+          <li><b>Robot spin</b>: set it to how fast your robot really turns. Then lower <b>Exposure</b> until <i>Sharp while moving</i> isn't red.</li>
+          <li>If <i>Tags are found</i> drops to amber or red, win back light with <b>Brightness</b> first, then <b>Gain</b>. Stop if <i>Precise corners</i> turns amber.</li>
+          <li>Leave <b>Contrast</b>, <b>Gamma</b> and <b>Sharpness</b> at their defaults unless a goal needs them.</li>
+          <li>Keep <i>Full frame rate</i> green: the exposure has to fit inside the 8.3 ms frame.</li>
+          <li>At the event, check again: their lights, a far tag, and the flicker test.</li>
+        </ol></details>
         <canvas class="hist" id="s-hist" aria-label="Brightness histogram"></canvas>
         <div class="readout">
           <div><small>UVC exposure value</small><b id="s-uvc"></b></div>
