@@ -40,6 +40,9 @@
     #settings .sim .readout { order: 5; grid-template-columns: 1fr 1fr; margin-top: 0; }
     #settings .sim .ctl { margin-bottom: 0; }
     #settings .sim .ctl label { margin-bottom: 0; font-size: .8rem; }
+    #settings .sim .ctl { display: flex; flex-direction: column; margin-bottom: 10px; }
+    #settings .sim .ctl .note { font-size: .72rem; margin: 0; order: 1; line-height: 1.35; }
+    #settings .sim .ctl input { order: 2; }
     #settings .sim input[type=range] { height: 30px; }
   }
 </style>
@@ -74,7 +77,7 @@
     <div class="lab-head"><span class="tag">Lab</span><h4>Tune the camera</h4></div>
       <p class="how">Pick a starting point from the list, or drag any slider. Try raising Exposure while the robot spins, and watch the tag's badge.</p>
     <label class="preset-pick">Start from <select id="s-preset" aria-label="Camera settings preset">
-      <option value="ours" selected>Our settings (5 ms, gain 1)</option>
+      <option value="ours" selected>Default (5 ms, gain 1)</option>
       <option value="auto">Auto exposure (what the camera picks)</option>
       <option value="cal">Calibration settings (long exposure)</option>
       <option value="dark">Too dark</option>
@@ -95,13 +98,13 @@
         </div>
       </div>
       <div>
-        <div class="ctl"><label>Exposure <output></output></label><input type="range" id="s-exp" min="0.5" max="30" step="0.1" value="5"></div>
-        <div class="ctl"><label>Gain <output></output></label><input type="range" id="s-gain" min="1" max="8" step="0.1" value="1"></div>
-        <div class="ctl"><label>Brightness (black level) <output></output></label><input type="range" id="s-bri" min="-60" max="60" step="1" value="0"></div>
-        <div class="ctl"><label>Contrast <output></output></label><input type="range" id="s-con" min="0.5" max="2" step="0.05" value="1"></div>
-        <div class="ctl"><label>Gamma <output></output></label><input type="range" id="s-gam" min="0.5" max="2.5" step="0.05" value="1"></div>
-        <div class="ctl"><label>Sharpness <output></output></label><input type="range" id="s-sharp" min="0" max="10" step="1" value="5"></div>
-        <div class="ctl"><label>Robot spin <output></output></label><input type="range" id="s-spin" min="0" max="6" step="0.1" value="3"><div class="note">3 rad/s ≈ 170°/s, a quick turn in place</div></div>
+        <div class="ctl"><label>Exposure <output></output></label><input type="range" id="s-exp" min="0.5" max="30" step="0.1" value="5"><div class="note">How long the shutter stays open each frame. Longer: brighter, but blurrier.</div></div>
+        <div class="ctl"><label>Gain <output></output></label><input type="range" id="s-gain" min="1" max="8" step="0.1" value="1"><div class="note">Amplifies the signal from the sensor. Brighter, but the noise grows too.</div></div>
+        <div class="ctl"><label>Brightness (black level) <output></output></label><input type="range" id="s-bri" min="-60" max="60" step="1" value="0"><div class="note">Shifts every pixel lighter or darker by the same amount.</div></div>
+        <div class="ctl"><label>Contrast <output></output></label><input type="range" id="s-con" min="0.5" max="2" step="0.05" value="1"><div class="note">Stretches the gap between darks and lights.</div></div>
+        <div class="ctl"><label>Gamma <output></output></label><input type="range" id="s-gam" min="0.5" max="2.5" step="0.05" value="1"><div class="note">Brightens or darkens the middle grays; black and white stay put.</div></div>
+        <div class="ctl"><label>Sharpness <output></output></label><input type="range" id="s-sharp" min="0" max="10" step="1" value="5"><div class="note">Boosts edges. Too much draws halos around the tag.</div></div>
+        <div class="ctl"><label>Robot spin <output></output></label><input type="range" id="s-spin" min="0" max="6" step="0.1" value="3"><div class="note">How fast the robot turns while the shutter is open. 3 rad/s ≈ 170°/s, a quick turn.</div></div>
       </div>
     </div>
     <p class="hint">Simplified model on a real frame from our TopLeft Thriftiest Cam (Sept 24, 2026).<span class="full"> Its exposure wasn't recorded; it was most likely our 5 ms, so at 5 ms with no spin the simulator shows the frame as shot, and our detector really did read this tag with a margin of 90. The badge uses our detector's scale: this page's copy of the AprilTag library formula reads about 43 on the same pixels, so it's multiplied by 2.1. Other settings scale its light, then add blur, noise, gain and the curves in that order, like a real camera. The blur uses the formula below.</span></p>
