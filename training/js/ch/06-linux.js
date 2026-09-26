@@ -45,27 +45,58 @@ function layers(root) {
       [0, 'The result goes to the robot over NetworkTables, and a small preview to your browser.'],
     ],
   };
-  // Auto-plays the chosen trip until you tap a layer; picking a trip plays it again.
+  // A trip plays step by step: the dot slides to the layer, a trail shows where the message
+  // has been, and the step's bar fills while you read, then it moves on. Pause, step with
+  // ◀ ▶, click a bar, or tap a layer to stop and explore it.
+  const trail = root.querySelector('#l-trail'), st = root.querySelector('#l-os-st');
+  const bars = root.querySelector('#l-os-steps'), nEl = root.querySelector('#l-os-n'), playBtn = root.querySelector('#l-os-play');
+  const DWELL = Site.reduced ? 9 : 6; // seconds per step, enough to read it
+  let trip = 'exp', i = 0, playing = true, exploring = false, elapsed = 0, fromL = null;
+  const mid = (l) => els[l].offsetTop + els[l].offsetHeight / 2;
   const show = (l, text) => {
     els.forEach((e, j) => e.classList.toggle('on', j === l));
-    const e = els[l];
-    pkt.style.top = e.offsetTop + e.offsetHeight / 2 - 7 + 'px';
+    pkt.style.top = mid(l) - 7 + 'px';
+    const a = fromL == null ? mid(l) : Math.min(mid(fromL), mid(l)), b2 = fromL == null ? mid(l) : Math.max(mid(fromL), mid(l));
+    trail.style.top = a + 'px'; trail.style.height = b2 - a + 'px';
     cap.innerHTML = `<h5>${INFO[l][0]}</h5>${text ? `<p><b>${text}</b></p>` : ''}<p>${INFO[l][1]}</p>`;
   };
-  const st = root.querySelector('#l-os-st');
-  let trip = 'exp', i = 0, auto = true, last = -99;
-  const status = () => { st.textContent = auto ? 'Playing the trip. Tap any layer to stop and explore.' : 'Exploring. Pick a trip above to play it again.'; };
-  Site.seg(root.querySelector('#l-os-seg'), (v) => { trip = v; i = 0; auto = true; last = -99; status(); });
-  els.forEach((e, j) => e.addEventListener('click', () => { auto = false; status(); show(j); }));
-  status();
-  Site.loop(stack, (t) => {
-    if (!auto) return;
-    if (t - last < (Site.reduced ? 6 : 3.4)) return;
-    last = t;
-    const steps = TRIPS[trip];
-    const [l, text] = steps[i % steps.length];
-    show(l, `${(i % steps.length) + 1}/${steps.length}: ${text}`);
-    i++;
+  const steps = () => TRIPS[trip];
+  const buildBars = () => { bars.innerHTML = steps().map((_, k) => `<button type="button" data-k="${k}" aria-label="Step ${k + 1}"><i></i></button>`).join(''); };
+  const paintBars = () => {
+    [...bars.children].forEach((b, k) => { b.classList.toggle('done', k < i); b.querySelector('i').style.width = k === i ? Math.min(100, (100 * elapsed) / DWELL) + '%' : ''; });
+    nEl.textContent = exploring ? '' : `${i + 1} / ${steps().length}`;
+  };
+  const status = () => {
+    st.textContent = exploring ? 'This layer is not a stop on this trip. Press ▶ Play, or use ◀ ▶, to follow the message.'
+      : playing ? `Step ${i + 1} of ${steps().length}: the green bar fills while you read, then the message moves on.` : `Paused on step ${i + 1} of ${steps().length}. Press ▶ Play or use ◀ ▶.`;
+    playBtn.textContent = playing && !exploring ? '⏸ Pause' : '▶ Play';
+    playBtn.setAttribute('aria-pressed', String(playing && !exploring));
+    pkt.classList.toggle('wait', !exploring);
+  };
+  const go = (k) => {
+    const n = steps().length; i = ((k % n) + n) % n; elapsed = 0; exploring = false;
+    const [l, text] = steps()[i];
+    fromL = i ? steps()[i - 1][0] : null;
+    show(l, `${i + 1}/${n}: ${text}`); paintBars(); status();
+  };
+  Site.seg(root.querySelector('#l-os-seg'), (v) => { trip = v; buildBars(); playing = true; go(0); });
+  playBtn.addEventListener('click', () => { if (exploring) { playing = true; go(i); return; } playing = !playing; status(); });
+  root.querySelector('#l-os-prev').addEventListener('click', () => { playing = false; go(i - 1); });
+  root.querySelector('#l-os-next').addEventListener('click', () => { playing = false; go(i + 1); });
+  bars.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { playing = false; go(+b.dataset.k); } });
+  // Tapping a layer shows its step in this trip (same text as during playback), paused there.
+  // A layer the trip doesn't stop at shows its description and says so.
+  els.forEach((e, j) => e.addEventListener('click', () => {
+    const k = steps().findIndex(([l]) => l === j);
+    playing = false;
+    if (k >= 0) { go(k); return; }
+    exploring = true; fromL = null;
+    show(j, `Not a stop on this trip. Press ▶ Play to follow the message again.`); paintBars(); status();
+  }));
+  Site.loop(stack, (t, dt) => {
+    if (!playing || exploring || !dt) return;
+    elapsed += dt;
+    if (elapsed >= DWELL) go(i + 1); else paintBars();
   });
 }
 
