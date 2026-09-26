@@ -74,8 +74,10 @@ Site.chapter('settings', (root) => {
       tags.forEach((t) => {
         const at = (u, w2) => samp(...Site._homog(t.quad, u, w2));
         let blk = 0, nb = 0, wht = 0, nw = 0;
-        for (let i = 0; i < 8; i++) for (const [u, w2] of [[(i + 0.5) / 8, 0.5 / 8], [(i + 0.5) / 8, 7.5 / 8], [0.5 / 8, (i + 0.5) / 8], [7.5 / 8, (i + 0.5) / 8]]) { blk += at(u, w2); nb++; }
-        for (let i = 0; i < 8; i++) for (const [u, w2] of [[(i + 0.5) / 8, -0.5 / 8], [(i + 0.5) / 8, 8.5 / 8], [-0.5 / 8, (i + 0.5) / 8], [8.5 / 8, (i + 0.5) / 8]]) { wht += at(u, w2); nw++; }
+        let bz = 0, wz = 0; // tag samples crushed to pure black / clipped to pure white
+        for (let i = 0; i < 8; i++) for (const [u, w2] of [[(i + 0.5) / 8, 0.5 / 8], [(i + 0.5) / 8, 7.5 / 8], [0.5 / 8, (i + 0.5) / 8], [7.5 / 8, (i + 0.5) / 8]]) { const q = at(u, w2); blk += q; nb++; if (q <= 1) bz++; }
+        for (let i = 0; i < 8; i++) for (const [u, w2] of [[(i + 0.5) / 8, -0.5 / 8], [(i + 0.5) / 8, 8.5 / 8], [-0.5 / 8, (i + 0.5) / 8], [8.5 / 8, (i + 0.5) / 8]]) { const q = at(u, w2); wht += q; nw++; if (q >= 254) wz++; }
+        t.crushed = bz / nb; t.blown = wz / nw;
         const thr = (blk / nb + wht / nw) / 2;
         let ws = 0, wc = 1, bs = 0, bc = 1, wrong = 0;
         for (let yy = 0; yy < 6; yy++) for (let xx = 0; xx < 6; xx++) { const d = at((xx + 1.5) / 8, (yy + 1.5) / 8) - thr; if (d > 0) { ws += d; wc++; } else { bs -= d; bc++; } if ((d > 0 ? 1 : 0) !== t.truth[yy * 6 + xx]) wrong++; }
@@ -85,8 +87,12 @@ Site.chapter('settings', (root) => {
         badges += `<span class="badge ${ok ? 'ok' : 'bad'}">Tag ${t.id}: ${wrong ? `${wrong} squares misread ✗` : `margin ${Math.round(m)} ${ok ? '✓' : '✗ below 15'}`}${ok && m < 35 ? ' (default 35 would drop it)' : ''}</span>`;
       });
       const hp = (100 * hiC) / N, lp = (100 * loC) / N;
-      if (hp > 1) badges += `<span class="badge warn">⚠ ${hp.toFixed(1)}% clipped white</span>`;
-      if (lp > 5) badges += `<span class="badge warn">⚠ ${lp.toFixed(1)}% crushed black</span>`;
+      // Only the tag's own pixels matter here: clipping elsewhere in the picture doesn't affect detection.
+      // Clipping on the tag still decodes, but flattens the edge gradient the detector uses to place corners.
+      tags.forEach((t) => {
+        if (t.crushed > 0.5) badges += `<span class="badge warn" title="The detector still reads the tag, but it places each corner using the gray gradient along the edges. Flattened edges mean slightly less precise corners, so the pose jitters more.">⚠ Tag ${t.id}'s black squares crushed${t.ok ? ': still found, corners less precise' : ''}</span>`;
+        if (t.blown > 0.5) badges += `<span class="badge warn" title="The detector still reads the tag, but it places each corner using the gray gradient along the edges. Flattened edges mean slightly less precise corners, so the pose jitters more.">⚠ Tag ${t.id}'s white clipped${t.ok ? ': still found, corners less precise' : ''}</span>`;
+      });
       $('#s-badges').innerHTML = badges;
       tags.forEach((t) => { vctx.strokeStyle = t.ok ? '#a3e635' : '#f43f5e'; vctx.lineWidth = 2; vctx.beginPath(); t.quad.forEach(([x, y], i) => (i ? vctx.lineTo(x, y) : vctx.moveTo(x, y))); vctx.closePath(); vctx.stroke(); });
       // histogram

@@ -45,6 +45,8 @@
     #settings .sim .ctl input { order: 2; }
     #settings .sim input[type=range] { height: 30px; }
   }
+  #settings .margin-note { font-size: .74rem; color: var(--lab-muted); margin: 2px 0 8px; line-height: 1.4; }
+  @media (max-width: 900px) { #settings .sim .margin-note { order: 2; } }
 </style>
 <div class="shell">
   <div class="ch-head">
@@ -89,6 +91,7 @@
       <div>
         <canvas class="view" id="s-view" aria-label="Simulated camera frame with tag 3, changing with the settings"></canvas>
         <div class="badges" id="s-badges"></div>
+        <p class="margin-note">A higher margin means the tag is read more confidently, not that the pose is better. Clipped or crushed tag edges can raise the margin while making the corners, and so the pose, less precise.</p>
         <canvas class="hist" id="s-hist" aria-label="Brightness histogram"></canvas>
         <div class="readout">
           <div><small>UVC exposure value</small><b id="s-uvc"></b></div>
