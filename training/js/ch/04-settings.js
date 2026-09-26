@@ -101,7 +101,8 @@ Site.chapter('settings', (root) => {
     };
     // a preset stays highlighted only until you move a slider yourself
     let applying = false;
-    const clearPreset = () => { if (!applying) $('#s-preset').querySelectorAll('button').forEach((b) => b.classList.remove('on')); };
+    const pick = $('#s-preset'), customOpt = pick.querySelector('[value="custom"]');
+    const clearPreset = () => { if (!applying) { customOpt.hidden = false; pick.value = 'custom'; } };
     const bind = (id, key, fmt) => Site.range($(id), (val) => { S[key] = val; if (key !== 'spin') clearPreset(); later(); }, fmt);
     bind('#s-exp', 'exp', (x) => `${x.toFixed(1)} ms`);
     bind('#s-gain', 'gain', (x) => `${x.toFixed(1)}×`);
@@ -119,7 +120,9 @@ Site.chapter('settings', (root) => {
       sharp: { exp: 5, gain: 1, bri: 0, con: 1, gam: 1, sharp: 10 },
     };
     const ids = { exp: '#s-exp', gain: '#s-gain', bri: '#s-bri', con: '#s-con', gam: '#s-gam', sharp: '#s-sharp' };
-    Site.seg($('#s-preset'), (p) => { applying = true; Object.entries(P[p]).forEach(([k2, val]) => setRange(ids[k2], val)); applying = false; });
+    const applyPreset = (p) => { if (!P[p]) return; applying = true; Object.entries(P[p]).forEach(([k2, val]) => setRange(ids[k2], val)); applying = false; customOpt.hidden = true; };
+    pick.addEventListener('change', () => applyPreset(pick.value));
+    applyPreset(pick.value);
     // live sensor noise, a few times a second while visible
     let last = 0;
     Site.loop(view, (t) => { if (Site.reduced || t - last < 0.12) return; last = t; zoff = Math.floor(Math.random() * 4096); render(); });

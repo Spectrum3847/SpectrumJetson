@@ -179,7 +179,7 @@ strong { font-weight: 700; }
 .lab {
   background: radial-gradient(ellipse at top right, var(--lab-bg2), var(--lab-bg) 70%);
   color: var(--lab-ink); border-radius: 20px; padding: 26px; margin: 48px 0;
-  box-shadow: 0 30px 60px -20px rgba(42,0,68,.55); position: relative; overflow: hidden;
+  box-shadow: 0 30px 60px -20px rgba(42,0,68,.55); position: relative; overflow: hidden; overflow: clip; /* clip (not hidden) so sticky visuals inside a lab still work */
 }
 .lab::before { content: ""; position: absolute; inset: 0; background-image: linear-gradient(var(--lab-line) 1px, transparent 1px), linear-gradient(90deg, var(--lab-line) 1px, transparent 1px); background-size: 32px 32px; opacity: .25; pointer-events: none; mask-image: radial-gradient(ellipse at center, #000, transparent 75%); }
 .lab > * { position: relative; }
@@ -260,8 +260,8 @@ table.data tr.hl td { background: #faf5ff; font-weight: 700; }
 
 /* ── Scrollytelling ──────────────────────────────────────── */
 .scrolly { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.2fr); gap: 64px; margin: 50px 0; }
-.scrolly .steps { padding: 10vh 0 30vh; }
-.scrolly .step { min-height: 55vh; display: flex; flex-direction: column; justify-content: center; opacity: .3; transition: opacity .4s; }
+.scrolly .steps { padding: 4vh 0 22vh; }
+.scrolly .step { min-height: 32vh; display: flex; flex-direction: column; justify-content: center; opacity: .3; transition: opacity .4s; }
 .scrolly .step.active { opacity: 1; }
 .scrolly .step .box { background: #fff; border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 12px; padding: 18px 22px; box-shadow: var(--shadow-md); }
 .scrolly .step h4 { margin-bottom: 6px; }
@@ -272,7 +272,11 @@ table.data tr.hl td { background: #faf5ff; font-weight: 700; }
   .scrolly { grid-template-columns: 1fr; }
   .scrolly .vis { order: -1; top: var(--nav-h); height: auto; z-index: 2; background: var(--surface); padding: 8px 0; }
   .chapter:nth-of-type(even) .scrolly .vis { background: var(--surface-alt); }
-  .scrolly .step { min-height: 70vh; }
+  /* phones: each step is about one open area tall (the screen below the pinned visual),
+     and step boxes snap into the middle of that open area. --vis-h is set by Site.scrolly. */
+  .scrolly .steps { padding: 2vh 0 18vh; }
+  .scrolly .step { min-height: max(34vh, calc((100svh - var(--nav-h) - var(--vis-h, 300px)) * .8)); }
+  .scrolly .step .box { scroll-snap-align: center; scroll-margin-top: calc(var(--nav-h) + var(--vis-h, 300px)); }
 }
 
 /* reveal on scroll */
@@ -376,3 +380,12 @@ body.mode-full .short { display: none !important; }
    (pre, monospace blocks) keep normal spacing so their columns stay aligned. */
 body { word-spacing: .07em; }
 pre, code, kbd, samp, .json, .code, .diff, .conf, .svc, .log, .tout, .term-line, .tb, .tg, .kmsg, #f-term, #l-log, #n-log, .now .data, .info .ex { word-spacing: normal; }
+
+/* snapping only on phones, and only 'proximity' so it never fights normal scrolling */
+@media (max-width: 900px) { html { scroll-snap-type: y proximity; } }
+
+/* Phones: a lab's picture stays pinned under the top bar while you scroll its controls
+   (site.js adds .stick-vis only when the picture is under half the screen tall). */
+@media (max-width: 860px) {
+  .lab-grid.stick-vis > :first-child { position: sticky; top: calc(var(--nav-h) + 6px); z-index: 3; background: var(--lab-bg); border-radius: 12px; box-shadow: 0 10px 18px -8px rgba(0,0,0,.7); }
+}

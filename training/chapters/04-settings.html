@@ -25,6 +25,23 @@
   #settings .setcards .card h4 i { font-style: normal; font-size: 1.2rem; }
   #settings table.data td:first-child { font-weight: 600; white-space: nowrap; }
   #settings .snap { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 12px; }
+  #settings .preset-pick { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font: 600 .85rem var(--font); color: var(--lab-ink); margin-bottom: 14px; }
+  #settings .preset-pick select { font: 600 .9rem var(--font); color: #fff; background: rgba(255,255,255,.08) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%23c4b5fd' stroke-width='2'/%3E%3C/svg%3E") no-repeat right 12px center; border: 1px solid var(--lab-line); border-radius: 9px; padding: 9px 36px 9px 12px; min-height: 42px; appearance: none; cursor: pointer; max-width: 100%; }
+  #settings .preset-pick select:hover, #settings .preset-pick select:focus { border-color: var(--accent); outline: none; }
+  #settings .preset-pick option { color: #1f1b23; }
+  /* phones: keep the camera image pinned while you scroll the sliders; histogram and readouts go below them */
+  @media (max-width: 900px) {
+    #settings .sim { gap: 10px; }
+    #settings .sim > div:first-child { display: contents; }
+    #settings .sim canvas.view { position: sticky; top: calc(var(--nav-h) + 6px); z-index: 3; order: 1; box-shadow: 0 8px 20px rgba(0,0,0,.5); }
+    #settings .sim .badges { order: 2; }
+    #settings .sim > div:last-child { order: 3; }
+    #settings .sim canvas.hist { order: 4; }
+    #settings .sim .readout { order: 5; grid-template-columns: 1fr 1fr; margin-top: 0; }
+    #settings .sim .ctl { margin-bottom: 0; }
+    #settings .sim .ctl label { margin-bottom: 0; font-size: .8rem; }
+    #settings .sim input[type=range] { height: 30px; }
+  }
 </style>
 <div class="shell">
   <div class="ch-head">
@@ -55,15 +72,16 @@
   </div>
   <div class="lab">
     <div class="lab-head"><span class="tag">Lab</span><h4>Tune the camera</h4></div>
-      <p class="how">Pick a preset or drag any slider. Try raising Exposure while the robot spins, and watch the tag's badge.</p>
-    <div class="seg presets" id="s-preset">
-      <button data-v="ours" class="on">Our settings</button>
-      <button data-v="auto">Auto exposure</button>
-      <button data-v="cal">Calibration settings</button>
-      <button data-v="dark">Too dark</button>
-      <button data-v="wash">Washed out</button>
-      <button data-v="sharp">Over-sharpened</button>
-    </div>
+      <p class="how">Pick a starting point from the list, or drag any slider. Try raising Exposure while the robot spins, and watch the tag's badge.</p>
+    <label class="preset-pick">Start from <select id="s-preset" aria-label="Camera settings preset">
+      <option value="ours" selected>Our settings (5 ms, gain 1)</option>
+      <option value="auto">Auto exposure (what the camera picks)</option>
+      <option value="cal">Calibration settings (long exposure)</option>
+      <option value="dark">Too dark</option>
+      <option value="wash">Washed out</option>
+      <option value="sharp">Over-sharpened</option>
+      <option value="custom" disabled hidden>Custom (you moved a slider)</option>
+    </select></label>
     <div class="sim">
       <div>
         <canvas class="view" id="s-view" aria-label="Simulated camera frame with tag 3, changing with the settings"></canvas>

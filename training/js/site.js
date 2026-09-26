@@ -67,9 +67,17 @@
     const steps = [...root.querySelectorAll('.step')];
     const prog = scrollyProgress(root, steps);
     let cur = -1, on = false, queued = false;
+    const vis = root.querySelector('.vis');
     const pick = () => {
       queued = false;
-      const mid = innerHeight / 2;
+      // Desktop: the middle of the screen. Phones (visual pinned above the steps): the middle
+      // of the open area below the visual, where the step boxes snap.
+      let mid = innerHeight / 2;
+      if (vis) {
+        const v = vis.getBoundingClientRect();
+        root.style.setProperty('--vis-h', Math.round(v.height) + 'px');
+        if (v.width > root.clientWidth * .7) mid = (Math.max(0, v.bottom) + innerHeight) / 2;
+      }
       let best = -1, bd = Infinity;
       steps.forEach((s, j) => {
         if (!s.getClientRects().length) return; // hidden in this mode
@@ -507,5 +515,21 @@
     anchor = anchor || takeAnchor();
   }
 
-  document.addEventListener('DOMContentLoaded', () => { chrome(); load(); });
+  /* ── Phones: pin a lab's picture while you scroll its controls ──────────────
+     In a .lab-grid whose first column is a visual (no controls) and whose second column has
+     the controls, keep the visual stuck under the top bar on narrow screens, but only when it
+     takes less than half the screen, so the controls always have room. */
+  function stickVisuals() {
+    document.querySelectorAll('.lab-grid').forEach((g) => {
+      const [a, b] = g.children;
+      const ok = innerWidth <= 860 && a && b && !a.querySelector('input, select, button') && b.querySelector('input, select, button') && a.offsetHeight > 60 && a.offsetHeight < innerHeight * 0.5;
+      g.classList.toggle('stick-vis', !!ok);
+      if (!g._ro) { g._ro = new ResizeObserver(() => requestAnimationFrame(stickVisuals)); g._ro.observe(a || g); }
+    });
+  }
+  addEventListener('resize', () => requestAnimationFrame(stickVisuals));
+  addEventListener('site:mode', () => requestAnimationFrame(stickVisuals));
+  Site.stickVisuals = stickVisuals;
+
+  document.addEventListener('DOMContentLoaded', () => { chrome(); load().then(stickVisuals); });
 })();
