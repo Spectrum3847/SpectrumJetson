@@ -411,7 +411,7 @@ Full write-up in [VISION-RESEARCH.md](VISION-RESEARCH.md).
 
   UI latency went from ~23 ms to **13 ms**.
 - **GPU load, 2 cameras at 122 fps** (`tegrastats` every 0.5 s for 30 s, GPU locked at 1020 MHz, capped camera driver, measured after the backup reboot): mean 12%, median 14%, p90 22%, max 24%. Detect 1.95 / 2.16 ms, PhotonVision CPU 145% with one stream open.
-- **GPU load, 4 cameras** (2026-09-26: TopLeft/TopRight Thriftiest Cams at 122 fps 1280x800, 2 global-shutter cameras at 61 fps 1280x720; `tegrastats` every 0.5 s for 2 min, 271 samples; GPU locked at 1020 MHz; hardware JPEG decode on; no tags in view, no dashboard streams, 30 fps × 0 open). Raw files in `logs/gpu-4cam-20260926/` on the laptop (git-ignored).
+- **GPU load, 4 cameras** (2026-09-26: TopLeft/TopRight Thriftiest Cams at 122 fps 1280x800, 2 global-shutter cameras at 61 fps 1280x720; `tegrastats` every 0.5 s for 2 min, 271 samples; GPU locked at 1020 MHz; hardware JPEG decode on; no tags in view, no dashboard streams open). Raw files in `logs/gpu-4cam-20260926/` on the laptop (git-ignored).
 
   | | mean | median | p90 | max |
   |---|---|---|---|---|
