@@ -411,6 +411,17 @@ Full write-up in [VISION-RESEARCH.md](VISION-RESEARCH.md).
 
   UI latency went from ~23 ms to **13 ms**.
 - **GPU load, 2 cameras at 122 fps** (`tegrastats` every 0.5 s for 30 s, GPU locked at 1020 MHz, capped camera driver, measured after the backup reboot): mean 12%, median 14%, p90 22%, max 24%. Detect 1.95 / 2.16 ms, PhotonVision CPU 145% with one stream open.
+- **GPU load, 4 cameras** (2026-09-26: TopLeft/TopRight Thriftiest Cams at 122 fps 1280x800, 2 global-shutter cameras at 61 fps 1280x720; `tegrastats` every 0.5 s for 2 min, 271 samples; GPU locked at 1020 MHz; hardware JPEG decode on; no tags in view, no dashboard streams, 30 fps × 0 open). Raw files in `logs/gpu-4cam-20260926/` on the laptop (git-ignored).
+
+  | | mean | median | p90 | max |
+  |---|---|---|---|---|
+  | GPU (GR3D) | 16.7% | 16% | 19% | 21% |
+  | NVJPG / NVJPG1 (JPEG decoders) | 37% / 36% | 37% / 36% | 42% / 41% | 47% / 45% |
+  | Memory bandwidth (EMC) | 11% | 11% | 11% | 12% |
+  | CPU, all 6 cores | 0.8 cores | 0.9 | 1.3 | 1.9 |
+  | Board power (VDD_IN) | 9.6 W | 9.6 | 9.7 | 9.8 |
+
+  PhotonVision itself used 0.73 cores. Detect time avg / worst: 0.98 / 2.03 and 0.95 / 3.06 ms (Thriftiest Cams), 1.21 / 2.25 and 0.85 / 1.87 ms (global-shutter). GPU and tj at 55.6 °C (fan on NVIDIA's quiet profile). About 368 frames/s in total cost ~17% GPU against ~12% for 2 cameras (244 frames/s), so the GPU has plenty of headroom; the two NVJPG engines, at ~37% each, are the busiest hardware. With tags in view the detector does more work per frame (quad fitting, refinement), so expect somewhat more GPU than this empty-scene figure.
 - **CUDA wait mode** (`SPECTRUM_971_CUDA_SYNC` or `/tmp/spectrum-971-cuda-sync`), measured with the decode fix:
 
   | Mode | CPU | Detect time |
