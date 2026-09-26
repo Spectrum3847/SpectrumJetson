@@ -370,3 +370,9 @@ body.mode-full .short { display: none !important; }
   .topnav .modesw button { min-height: 36px; padding: 6px 12px; }
   .topnav .menu { min-height: 40px; }
 }
+
+/* Plus Jakarta Sans draws a narrow word space (~0.17em), so a space before a bold word
+   almost disappears. Widen it a little for running text only; code and terminal output
+   (pre, monospace blocks) keep normal spacing so their columns stay aligned. */
+body { word-spacing: .07em; }
+pre, code, kbd, samp, .json, .code, .diff, .conf, .svc, .log, .tout, .term-line, .tb, .tg, .kmsg, #f-term, #l-log, #n-log, .now .data, .info .ex { word-spacing: normal; }
