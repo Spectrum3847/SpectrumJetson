@@ -566,7 +566,7 @@ This setup stands on other people's work. We link to or patch their code rather 
 **Models:**
 
 - **FUEL YOLO11n by [Team 2826 Wave Robotics](https://www.chiefdelphi.com/t/introducing-wave-robotics-yolov11-model-for-rebuilt/512701).** It's the model PhotonVision ships for 2026; Wave gave PhotonVision permission to include it.
-- **FUEL YOLO26n by [Project516](https://huggingface.co/project516/rebuilt-fuel-model)** (AGPL-3.0), downloaded for comparison.
+- **FUEL YOLO26n by [Project516](https://huggingface.co/project516/rebuilt-fuel-model)** (AGPL-3.0). `tools/fuelmodel` exports it and compares it with Team 2826's.
 
 We don't redistribute either; see [docs/GAME-PIECE-MODELS.md](docs/GAME-PIECE-MODELS.md).
 

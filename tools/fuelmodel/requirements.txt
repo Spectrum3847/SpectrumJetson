@@ -1,0 +1,8 @@
+ultralytics==8.4.161
+onnx>=1.17
+onnxslim>=0.1.50
+onnxruntime>=1.20
+huggingface_hub>=0.30
+scikit-learn>=1.5
+ai-edge-litert>=1.2
+opencv-python-headless>=4.8
