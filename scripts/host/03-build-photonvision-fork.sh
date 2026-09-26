@@ -59,6 +59,11 @@ done
 # (built by tools/fieldmodel from FIRST's field CAD): served by PhotonVision at fieldmodels/.
 mkdir -p photon-client/public/fieldmodels
 cp "$REPO_ROOT"/assets/field-models/*.glb photon-client/public/fieldmodels/
+# The training site (training/) is the sidebar's Documentation page: DocsView frames docs/index.html.
+# Upstream CI fills docs/ with its Sphinx manual; we ship our course instead (works offline).
+mkdir -p photon-client/public/docs
+tar -C "$REPO_ROOT/training" --exclude=tools --exclude=README.md --exclude=.nojekyll -cf - . \
+  | tar -C photon-client/public/docs -xf -
 # Upstream tags give the jar a sane version string (e.g. v2026.1.1-27-gd8c9e8e1).
 git fetch -q --tags https://github.com/PhotonVision/photonvision.git || true
 
