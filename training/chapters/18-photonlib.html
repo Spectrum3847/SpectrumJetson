@@ -232,6 +232,20 @@ double meters = PhotonUtils.calculateDistanceToTargetMeters(
   </div>
   <p class="prose full">These numbers are starting points, not tuned values. PhotonVision computes ambiguity differently from Limelight, so thresholds carried over from old Limelight code need retesting (<code>docs/LIMELIGHT-COMPARISON.md</code>). Rewind recordings replayed through the robot code are the way to tune them.</p>
 
+  <details class="deep">
+    <summary>Lessons from AOS's localizer (FRC 971's system, fixes merged July 2026)</summary>
+    <div>
+      <p>AOS fuses vision on the coprocessor, but the bugs its maintainers fixed this summer apply to any pose estimator, including ours on the SystemCore:</p>
+      <ul>
+        <li><b>Be stricter about heading resets in auto.</b> Their localizer snapped its heading to vision during autonomous and landed badly. The fix: demand a much bigger heading disagreement before resetting in auto, and when it does reset, keep the current x and y instead of jumping to a delayed or noisy tag reading. For us: don't let vision reseed the pose in the middle of an auto path.</li>
+        <li><b>Don't blindly trust the controller's angular velocity.</b> A bad turn-rate reading disagreed with the camera poses and kept triggering heading resets. Check the gyro against vision before letting either override the other.</li>
+        <li><b>Integrate odometry in the right order.</b> They were applying newly received chassis speeds backwards over the interval before them. WPILib's estimators do this for you, but custom odometry threads can make the same mistake.</li>
+        <li><b>Watch for detections stopping.</b> They added an "accepted tag count" so the robot notices when vision quietly stops contributing. Our robot code can count accepted measurements per camera itself, and our health topics (<a href="#networktables">chapter 15</a>) show fps and problems from the Jetson.</li>
+        <li><b>Gates that behave differently when disabled.</b> A yaw-error gate that was too tight rejected good readings in auto-disabled but not teleop-disabled. Test every gate in every robot mode.</li>
+      </ul>
+    </div>
+  </details>
+
   <h3>A complete vision subsystem</h3>
   <div class="prose"><p>Here it all is for our four cameras: one camera and one estimator each, every unread result, multi-tag first, the three filters, then the drivetrain. It's about 60 lines. The mount numbers are made up; yours come from CAD or <a href="#coords">chapter 19</a>.</p></div>
 <pre class="java" aria-label="Java: a vision subsystem for four cameras">public class Vision extends SubsystemBase {
