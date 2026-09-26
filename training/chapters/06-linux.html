@@ -24,6 +24,8 @@
   #linux .trip-steps button { flex: 1; height: 10px; min-height: 0; padding: 0; border: 0; border-radius: 5px; background: rgba(255,255,255,.12); cursor: pointer; position: relative; overflow: hidden; }
   #linux .trip-steps button i { position: absolute; inset: 0 auto 0 0; width: 0; background: #a3e635; }
   #linux .trip-steps button.done i { width: 100%; background: rgba(163,230,53,.55); }
+  #linux .trip-steps button.cur { box-shadow: 0 0 0 2px #a3e635, 0 0 10px rgba(163,230,53,.45); background: rgba(163,230,53,.18); }
+  #linux .trip-steps button:hover { background: rgba(255,255,255,.22); }
   @media (pointer: coarse) { #linux .trip-steps button { height: 18px; } }
   #linux .trip-n { font: 600 .75rem var(--mono); color: var(--lab-muted); min-width: 3.2em; text-align: right; }
   #linux .os-cap { background: rgba(255,255,255,.05); border: 1px solid var(--lab-line); border-radius: 12px; padding: 14px 16px; min-height: 150px; }

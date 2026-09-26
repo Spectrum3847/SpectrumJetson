@@ -63,7 +63,7 @@ function layers(root) {
   const steps = () => TRIPS[trip];
   const buildBars = () => { bars.innerHTML = steps().map((_, k) => `<button type="button" data-k="${k}" aria-label="Step ${k + 1}"><i></i></button>`).join(''); };
   const paintBars = () => {
-    [...bars.children].forEach((b, k) => { b.classList.toggle('done', k < i); b.querySelector('i').style.width = k === i ? Math.min(100, (100 * elapsed) / DWELL) + '%' : ''; });
+    [...bars.children].forEach((b, k) => { b.classList.toggle('done', k < i); b.classList.toggle('cur', k === i && !exploring); b.setAttribute('aria-current', k === i && !exploring ? 'step' : 'false'); b.querySelector('i').style.width = k === i ? Math.min(100, (100 * elapsed) / DWELL) + '%' : ''; });
     nEl.textContent = exploring ? '' : `${i + 1} / ${steps().length}`;
   };
   const status = () => {
