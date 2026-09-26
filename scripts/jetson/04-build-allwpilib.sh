@@ -3,9 +3,9 @@
 # Run ON THE JETSON, ideally inside tmux (this takes hours):
 #   tmux new -s build ~/SpectrumJetson/scripts/jetson/04-build-allwpilib.sh
 #
-# The tag must match the wpilibVersion of the PhotonVision build that loads
-# lib971apriltag.so. The FRC-Team-4143/photonvision fork (d8c9e8e) uses 2026.2.1.
-# allwpilib main does NOT work: wpi/jni_util.h has moved there.
+# The tag must match the WPILib version of the PhotonVision build that loads
+# lib971apriltag.so. The current FRC-Team-4143 fork uses 2026.2.1. The
+# 2027 alpha-7 CUDA port is a separate change and needs a real Jetson build.
 # Usage: 04-build-allwpilib.sh [tag]
 set -euo pipefail
 

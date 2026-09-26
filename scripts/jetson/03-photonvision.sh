@@ -2,8 +2,11 @@
 # Install upstream PhotonVision (CPU AprilTag detection) as a boot-time systemd service.
 # Run ON THE JETSON. Needs internet.
 #
-# The version must match the photonlib vendordep in the robot code
-# (Spectrum3847/2026-FM-SystemCore: photonlib-v2027.0.0-alpha-2.json).
+# Current released installer pin. This CPU-only install provides the boot-time
+# service before the custom CUDA fork jar replaces it. The robot uses WPILib
+# 2027.0.0-alpha-6 and PhotonLib v2027.0.0-alpha-2. The alpha-7 migration target
+# is documented in docs/WPILIB-2027-ALPHA-7.md. Do not point this script at a
+# development asset.
 # Usage: scripts/jetson/03-photonvision.sh [version]
 set -euo pipefail
 

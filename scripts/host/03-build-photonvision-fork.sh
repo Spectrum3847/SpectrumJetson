@@ -3,10 +3,10 @@
 # on the x86-64 host. No sudo: Node 22, pnpm 10 and Temurin 17 go in ~/build/tools,
 # matching upstream CI for this commit.
 #
-# Why a 2026 build against 2027 alpha-6 robot code: the serde message hashes
-# (PhotonPipelineResult 4b2ff16a...), NT4 protocol and time-sync packets are identical,
-# so stock photonlib v2027.0.0-alpha-2 on the robot accepts it. Robot photonlib must NOT
-# move past the alpha-6 era (main after alpha-7 changed the hashes).
+# The current fork is a bench-tested 2026-era build. Its serde hashes and time-sync
+# packets match the alpha-2 robot vendordep. The alpha-7 CUDA port must rebase
+# the fork and requires Jetson and robot-network testing. See
+# docs/WPILIB-2027-ALPHA-7.md.
 set -euo pipefail
 
 FORK_URL=https://github.com/FRC-Team-4143/photonvision.git
