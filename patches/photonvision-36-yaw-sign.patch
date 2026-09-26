@@ -1,0 +1,62 @@
+Target yaw is positive RIGHT: fix the comments and doc that say left, and label the dashboard columns.
+PhotonVision computes yaw = atan((u - cx) / fx) (TargetCalculations.calculateYawPitch) and
+TargetCalculationsTest asserts it's positive for a target right of centre; PhotonUtils and
+PhotonCameraSim agree. The PhotonTrackedTarget comments (Java, C++) and getting-target-data.md
+said positive left. Comments and docs only: no behaviour changes.
+
+--- a/photon-targeting/src/main/java/org/photonvision/targeting/PhotonTrackedTarget.java
++++ b/photon-targeting/src/main/java/org/photonvision/targeting/PhotonTrackedTarget.java
+@@ -30,7 +30,12 @@
+         implements ProtobufSerializable, PhotonStructSerializable<PhotonTrackedTarget> {
+     private static final int MAX_CORNERS = 8;
+ 
+-    /** The yaw of the target in degrees, with left being the positive direction. */
++    /**
++     * The yaw of the target in degrees, with RIGHT being the positive direction (clockwise, the
++     * opposite of WPILib's counter-clockwise angles). PhotonVision computes it as atan((u - cx) /
++     * fx) in TargetCalculations.calculateYawPitch, and TargetCalculationsTest asserts it's positive
++     * for a target right of centre.
++     */
+     public double yaw;
+ 
+     /** The pitch of the target in degrees, with up being the positive direction. */
+--- a/photon-targeting/src/main/native/include/photon/targeting/PhotonTrackedTarget.h
++++ b/photon-targeting/src/main/native/include/photon/targeting/PhotonTrackedTarget.h
+@@ -41,7 +41,8 @@
+       : Base{std::forward<Args>(args)...} {}
+ 
+   /**
+-   * Returns the target yaw (positive-left).
++   * Returns the target yaw in degrees (positive-right, i.e. clockwise: the
++   * opposite of WPILib's counter-clockwise angles).
+    * @return The target yaw.
+    */
+   double GetYaw() const { return yaw; }
+--- a/docs/source/docs/programming/photonlib/getting-target-data.md
++++ b/docs/source/docs/programming/photonlib/getting-target-data.md
+@@ -140,7 +140,7 @@
+ 
+ ## Getting Data From A Target
+ 
+-- double `getYaw()`/`GetYaw()`: The yaw of the target in degrees (positive left).
++- double `getYaw()`/`GetYaw()`: The yaw of the target in degrees (positive right). This is the opposite of WPILib's counter-clockwise-positive angles, so turning toward a target is `-kP * getYaw()`.
+ - double `getPitch()`/`GetPitch()`: The pitch of the target in degrees (positive up).
+ - double `getArea()`/`GetArea()`: The area (how much of the camera feed the bounding box takes up) as a percent (0-100).
+ - double `getSkew()`/`GetSkew()`: The skew of the target in degrees (counter-clockwise positive).
+--- a/photon-client/src/components/dashboard/tabs/TargetsTab.vue
++++ b/photon-client/src/components/dashboard/tabs/TargetsTab.vue
+@@ -73,8 +73,12 @@
+                 <th class="text-center text-white">Confidence</th>
+               </template>
+               <template v-if="!useCameraSettingsStore().currentPipelineSettings.solvePNPEnabled">
+-                <th class="text-center text-white">Pitch &theta;&deg;</th>
+-                <th class="text-center text-white">Yaw &theta;&deg;</th>
++                <th class="text-center text-white" title="Positive = the target is above the image centre">
++                  Pitch &theta;&deg; <span class="text-caption">(+ up)</span>
++                </th>
++                <th class="text-center text-white" title="Positive = the target is right of the image centre (the opposite of WPILib's counter-clockwise angles)">
++                  Yaw &theta;&deg; <span class="text-caption">(+ right)</span>
++                </th>
+                 <th class="text-center text-white">Skew &theta;&deg;</th>
+                 <th class="text-center text-white">Area %</th>
+               </template>
