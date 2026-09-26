@@ -249,7 +249,7 @@ literal 0
 HcmV?d00001
 
 diff --git a/photon-client/src/assets/styles/variables.scss b/photon-client/src/assets/styles/variables.scss
-index 77850717..832fdf17 100644
+index 77850717..80ba538b 100644
 --- a/photon-client/src/assets/styles/variables.scss
 +++ b/photon-client/src/assets/styles/variables.scss
 @@ -14,7 +14,7 @@ html {
@@ -261,12 +261,61 @@ index 77850717..832fdf17 100644
  }
  .v-table
    > .v-table__wrapper
+@@ -72,3 +72,44 @@ html {
+ .rounded-12 {
+   border-radius: 12px;
+ }
++
++// Light theme: white cards. Many components hard-code white text for the old blue cards, so
++// inside cards and dialogs that text follows the theme's text colour instead.
++.v-theme--LightTheme {
++  .v-card,
++  &.v-card {
++    .text-white,
++    [style*="color: white"],
++    .v-table th,
++    .v-table td,
++    .metric-item {
++      color: rgb(var(--v-theme-on-surface)) !important;
++    }
++    .v-icon[style*="rgb(197, 197, 197)"] {
++      color: rgba(var(--v-theme-on-surface), 0.6) !important;
++    }
++    // Camera Matching's status words and stream links (bright green / yellow)
++    .active-status {
++      color: #2e7d32 !important;
++    }
++    .stream-link {
++      color: rgb(var(--v-theme-primary)) !important;
++    }
++    .mismatch-status {
++      color: #b26a00 !important;
++    }
++    .v-btn.v-btn--disabled {
++      background-color: #e6e1f0 !important;
++    }
++    .v-divider,
++    .metrics-table {
++      border-color: rgba(var(--v-theme-on-surface), 0.25) !important;
++    }
++  }
++  .v-row-group__header {
++    color: white;
++  }
++  .v-table > .v-table__wrapper > table > tbody > tr:hover {
++    background: rgba(107, 82, 181, 0.1) !important;
++  }
++}
 diff --git a/photon-client/src/components/app/photon-sidebar.vue b/photon-client/src/components/app/photon-sidebar.vue
-index 5af91ef1..6c531cea 100644
+index 5af91ef1..a55bd747 100644
 --- a/photon-client/src/components/app/photon-sidebar.vue
 +++ b/photon-client/src/components/app/photon-sidebar.vue
-@@ -27,7 +27,10 @@ const renderCompact = computed<boolean>(() => compact.value || !mdAndUp.value);
-     <v-list nav color="primary">
+@@ -24,10 +24,13 @@ const renderCompact = computed<boolean>(() => compact.value || !mdAndUp.value);
+ 
+ <template>
+   <v-navigation-drawer permanent :rail="renderCompact" color="sidebar">
+-    <v-list nav color="primary">
++    <v-list nav color="accent">
        <v-list-item class="pr-0 pl-0" style="display: flex; justify-content: center">
          <template #prepend>
 -          <img v-if="!renderCompact" class="logo" src="@/assets/images/logoLarge.svg" alt="large logo" />
@@ -277,7 +326,7 @@ index 5af91ef1..6c531cea 100644
            <img v-else class="logo" src="@/assets/images/logoSmallTransparent.svg" alt="small logo" />
          </template>
        </v-list-item>
-@@ -156,6 +159,23 @@ const renderCompact = computed<boolean>(() => compact.value || !mdAndUp.value);
+@@ -156,6 +159,25 @@ const renderCompact = computed<boolean>(() => compact.value || !mdAndUp.value);
    object-fit: contain;
  }
  
@@ -296,6 +345,8 @@ index 5af91ef1..6c531cea 100644
 +.dino {
 +  height: 56px;
 +  flex-shrink: 0;
++  /* mirrored so the dino faces the PhotonVision logo */
++  transform: scaleX(-1);
 +}
 +
  .cameraicon {
@@ -389,11 +440,63 @@ index e1d81c18..02ec511b 100644
              <animateTransform
                repeatCount="indefinite"
                dur="0.9345794392523364s"
+diff --git a/photon-client/src/components/settings/MetricsChart.vue b/photon-client/src/components/settings/MetricsChart.vue
+index d2a572d5..561b3230 100644
+--- a/photon-client/src/components/settings/MetricsChart.vue
++++ b/photon-client/src/components/settings/MetricsChart.vue
+@@ -76,7 +76,7 @@ const getOptions = (data: ChartData[] = []) => {
+       splitLine: {
+         show: true,
+         lineStyle: {
+-          color: "#ffffff18"
++          color: theme.global.name.value === "LightTheme" ? "#00000018" : "#ffffff18"
+         }
+       },
+       splitNumber: 4,
+@@ -88,7 +88,7 @@ const getOptions = (data: ChartData[] = []) => {
+       },
+       axisLabel: {
+         align: "left",
+-        color: theme.global.name.value === "LightTheme" ? "#fff" : "#ddd",
++        color: theme.global.name.value === "LightTheme" ? "#444" : "#ddd",
+         formatter: (value: number) => {
+           const date = new Date(value);
+           return date.toLocaleTimeString([], {
+@@ -117,11 +117,11 @@ const getOptions = (data: ChartData[] = []) => {
+       splitLine: {
+         show: true,
+         lineStyle: {
+-          color: "#ffffff18"
++          color: theme.global.name.value === "LightTheme" ? "#00000018" : "#ffffff18"
+         }
+       },
+       axisLabel: {
+-        color: theme.global.name.value === "LightTheme" ? "#fff" : "#ddd"
++        color: theme.global.name.value === "LightTheme" ? "#444" : "#ddd"
+       }
+     },
+     series: getSeries(data),
+diff --git a/photon-client/src/lib/ThemeManager.ts b/photon-client/src/lib/ThemeManager.ts
+index 038ac5a0..1c60e74a 100644
+--- a/photon-client/src/lib/ThemeManager.ts
++++ b/photon-client/src/lib/ThemeManager.ts
+@@ -26,8 +26,9 @@ export const setThemeColor = (theme: ThemeInstance, color: string, value: string
+ };
+ 
+ export const toggleTheme = (theme: ThemeInstance) => {
+-  const currentTheme = localStorage.getItem("theme");
+-  localStorage.setItem("theme", currentTheme === "LightTheme" ? "DarkTheme" : "LightTheme");
++  // From the theme showing, not localStorage: before the first toggle nothing is stored, and the
++  // first click used to store "LightTheme" (the default) and change nothing.
++  localStorage.setItem("theme", theme.global.name.value === "LightTheme" ? "DarkTheme" : "LightTheme");
+ 
+   restoreThemeConfig(theme);
+ };
 diff --git a/photon-client/src/plugins/vuetify.ts b/photon-client/src/plugins/vuetify.ts
-index 6da0a196..42de0a42 100644
+index 6da0a196..55368372 100644
 --- a/photon-client/src/plugins/vuetify.ts
 +++ b/photon-client/src/plugins/vuetify.ts
-@@ -3,13 +3,15 @@ import("@mdi/font/css/materialdesignicons.css");
+@@ -3,13 +3,16 @@ import("@mdi/font/css/materialdesignicons.css");
  import type { ThemeDefinition } from "vuetify/lib/composables/theme";
  import { createVuetify } from "vuetify";
  
@@ -411,11 +514,12 @@ index 6da0a196..42de0a42 100644
 +  deepPurple: "#4E3A8C",
 +  darkGray: "#151219",
 +  gray: "#221C2E",
-+  lightGray: "#1F1A2B"
++  paleLavender: "#F4F0FF",
++  white: "#FFFFFF"
  };
  
  export const DarkTheme: ThemeDefinition = {
-@@ -19,17 +21,17 @@ export const DarkTheme: ThemeDefinition = {
+@@ -19,17 +22,17 @@ export const DarkTheme: ThemeDefinition = {
      sidebar: CommonColors.darkGray,
  
      surface: CommonColors.gray,
@@ -440,30 +544,45 @@ index 6da0a196..42de0a42 100644
      "on-surface-variant": "#f0f0f0",
  
      error: "#ff2e2e",
-@@ -43,18 +45,18 @@ export const LightTheme: ThemeDefinition = {
+@@ -42,28 +45,28 @@ export const DarkTheme: ThemeDefinition = {
+ export const LightTheme: ThemeDefinition = {
    dark: false,
    colors: {
-     background: CommonColors.lightGray,
+-    background: CommonColors.lightGray,
 -    sidebar: CommonColors.photonBlue,
++    background: CommonColors.paleLavender,
 +    sidebar: CommonColors.deepPurple,
  
 -    surface: CommonColors.photonBlue,
 -    primary: CommonColors.photonYellow,
 -    secondary: CommonColors.lightBlue,
 -    accent: CommonColors.photonYellow,
-+    surface: CommonColors.purple,
-+    primary: CommonColors.pastelPurple,
++    surface: CommonColors.white,
++    primary: CommonColors.purple,
 +    secondary: CommonColors.bowPurple,
 +    accent: CommonColors.pastelPurple,
  
 -    toggle: CommonColors.lightBlue,
+-    logsBackground: CommonColors.lightGray,
 +    toggle: CommonColors.bowPurple,
-     logsBackground: CommonColors.lightGray,
++    logsBackground: CommonColors.white,
  
 -    buttonActive: CommonColors.photonYellow,
 -    buttonPassive: CommonColors.lightBlue,
-+    buttonActive: CommonColors.pastelPurple,
-+    buttonPassive: CommonColors.bowPurple,
++    buttonActive: CommonColors.purple,
++    buttonPassive: CommonColors.pastelPurple,
  
-     "surface-variant": "#8f8f8fff",
+-    "surface-variant": "#8f8f8fff",
++    "surface-variant": "#5a4a7a",
++    "on-surface-variant": "#f0f0f0",
  
+     error: "#b80000",
+     info: "#2196F3",
+     success: "#4CAF50",
+     warning: "#FFC107"
+-  },
+-  variables: { "medium-emphasis-opacity": 1, "high-emphasis-opacity": 1 }
++  }
+ };
+ 
+ export default createVuetify({
