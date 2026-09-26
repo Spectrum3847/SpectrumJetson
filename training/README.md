@@ -4,8 +4,9 @@ A scrollable, visual course that teaches students how this Jetson vision system 
 camera, AprilTags, the Jetson hardware, Linux, CUDA, PhotonVision and our patches, calibration,
 pose, latency and the match-day failsafes.
 
-Plain HTML, CSS and JavaScript with no build step. three.js is vendored in `vendor/`, so the site
-works offline except for the Google Fonts (it falls back to system fonts).
+Plain HTML, CSS and JavaScript with no build step. three.js is vendored in `vendor/` and the fonts
+in `fonts/`, so the site works fully offline. The PhotonVision build bundles it as the dashboard's
+Documentation page.
 
 ## View it locally
 
@@ -28,6 +29,7 @@ Then open http://localhost:8347/.
 | `js/site.js` | Loader, navigation, and shared helpers (canvas, animation loops, AprilTag drawing) |
 | `js/glossary.js` | Definitions for the hover-to-define words |
 | `css/site.css` | Design system, using spectrum3847.org's colours and fonts |
+| `fonts/` | Outfit, Plus Jakarta Sans and JetBrains Mono (latin, variable woff2; SIL OFL in `fonts/OFL.txt`) |
 | `assets/models/` | 3D models built from NVIDIA's and The Thrifty Bot's STEP files by `tools/build_models.py` |
 | `assets/photos/` | Our bench photos and screenshots |
 
