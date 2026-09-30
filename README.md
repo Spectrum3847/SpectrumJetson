@@ -511,7 +511,7 @@ The detailed technical reference, with exact versions, commits and measurements,
 | `tools/fieldcal/` | Field calibration: tag positions and camera mounts from a recording of the robot pushed to still spots ([README](tools/fieldcal/README.md)) |
 | `tools/fieldmodel/`, `assets/field-models/` | The 3D field model for the Field Calibration page, converted from *FIRST*'s field CAD ([README](tools/fieldmodel/README.md)) |
 | `kernel/` | Our patch to Linux's USB camera driver (bandwidth cap), built by `11-uvcvideo-payload-cap.sh` |
-| `tests/` | Dashboard browser tests (`tests/ui`), a fake robot for robot-state features (`tests/fake-robot`), detector stress test, live A/B and fault-injection test, ChArUco board checker, calibration checker, JVM memory check, Rewind on/off test, power-cut test, camera unplug test, USB hub reset test, robot clock test, flicker check, CPU profiler, performance snapshot, telemetry and mount-estimate check |
+| `tests/` | Dashboard browser tests (`tests/ui`), a fake robot for robot-state features (`tests/fake-robot`), garbage-collection measurement (`tests/jvm-gc`), detector stress test, live A/B and fault-injection test, ChArUco board checker, calibration checker, JVM memory check, Rewind on/off test, power-cut test, camera unplug test, USB hub reset test, robot clock test, flicker check, CPU profiler, performance snapshot, telemetry and mount-estimate check |
 | `docs/` | The technical reference, Rewind, the Limelight 4 comparison, vision research, the upstream PhotonVision port, the game-piece models, and the original handoff document that started the project |
 
 **Still to do before the October event:**

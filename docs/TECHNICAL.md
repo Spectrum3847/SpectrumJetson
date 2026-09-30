@@ -1382,6 +1382,34 @@ hid mismatches such as TopRight's pipeline 1 being "Fuel Test". Test: the dropdo
 `uiState`'s `pipelineNicknames` numbered from 0. The test helpers read and pick pipelines by name
 inside "N: name". Suite: 5 tests, 1.5 min, all passing.
 
+#### Garbage collection and the worst-case detects (2026-09-30)
+
+The 4-7 ms worst-case detects seen earlier came with dashboards streaming or tests running; a clean
+2-minute run had none over 1.8 ms. Garbage collection does cause the remaining ones: with the
+default setting (G1, `-Xmx512m`), 3 of the 4 seconds with a detect over 3 ms contained a young
+collection, against 12% of seconds overall. `tests/jvm-gc/probe.sh` switches the GC log on live
+(`jcmd VM.log`, no restart) next to the per-second worst detects; `compare.sh` restarts with other
+flags. 5 cameras, ceiling scene:
+
+| JVM | Collections | Pause | Seconds with a detect over 3 ms | Worst | CPU | RSS |
+|---|---|---|---|---|---|---|
+| **G1 `-Xmx512m` (kept)** | every ~8 s | 6-10 ms | 4 in 2 min | 4.9 ms | 0.98 | 2.29 GB |
+| G1 `-Xms1g -Xmx1g -Xmn512m` | every ~3 min | **274-278 ms** | 3 in 8 min | 30.6 ms | 0.97 | 2.96 GB |
+| same + `-XX:+AlwaysPreTouch` | every ~3 min | **276-287 ms** | 7 in 6 min | 7.8 ms | 0.95 | 3.33 GB |
+| ZGC `-Xmx1g` | concurrent | < 0.2 ms | 21 in 6 min | 22.5 ms | 1.07 | 2.74 GB |
+
+- **Kept the default.** A 512 MB young generation turns the 7 ms pauses every 8 s into a
+  quarter-second freeze of every camera every 3 minutes. The first 2-minute test of it ended before
+  its young generation filled and looked perfect; the longer run showed the pause. Pre-touching the
+  heap didn't change it, so it isn't page faults: G1 copies more survivors from a young generation
+  that lives 3 minutes instead of 8 seconds. ZGC's pauses are tiny, but its concurrent work and
+  barriers gave more slow seconds and 0.1 core more.
+- **Averages don't move.** A collection delays about one frame per camera in ~976, by up to ~7 ms:
+  about 0.007 ms on the average latency. Frame rates stay at 122. Results keep their capture
+  timestamps, so the pose estimator places a late one correctly; only its arrival is late.
+- The GC on disable (`photonvision-49`, 27 ms while disabled) stays.
+- PhotonVision allocates about 2.6 MB/s (young 37 MB -> 19 MB every ~7 s).
+
 #### Event pipeline when the field connects (`photonvision-51`)
 
 - Settings `eventProfileOnFms` (default off) and `eventPipeline` join idle mode's in
