@@ -6,6 +6,20 @@ Scoping notes for running the detector on an Intel GPU, such as the Arc 140V in 
 Source surveyed: frc971/bos `62e93b4` `third_party/971apriltag`, with our `patches/bos-*.patch`
 applied (all apply cleanly), plus our `detector/` directory.
 
+## Target
+
+It has to match the Jetson: at least 4 AprilTag cameras, and 5 is the goal. At 1280x800 and
+120 fps, 5 cameras is 600 frames/s to decode and detect.
+- **GPU:** the Jetson's GPU is about 12% busy for 240 frames/s, so roughly 30% for 600.
+  The Arc 140V has more compute, so this should fit.
+- **Decode:** use the hardware JPEG decoder. libjpeg-turbo at 600 frames/s would take about
+  2 of the performance cores.
+- **USB:** check how the mini PC's ports connect inside (`lsusb -t`). Cameras on separate
+  USB controllers each get their own USB 2.0 bandwidth; cameras behind one internal hub share
+  one. This decides whether 5 cameras fit at full rate.
+- **Processor-only fallback:** stock PhotonVision on the processor won't manage 5 cameras at
+  120 fps, so the GPU port is required for this PC to beat the Jetson.
+
 ## Size
 
 About 6,100 lines in total. The GPU code is in 5 files:
