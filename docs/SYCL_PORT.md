@@ -130,10 +130,78 @@ and the `WarpMergeSort` in `DoFitQuads` is the known one.
   libjpeg-turbo (already a dependency via `decodeMjpegGray`) is the fallback, and on this
   processor it's likely fast enough for a couple of cameras.
 - **`fault_kernel.cu`:** a test hook. Rewrite it trivially or drop it.
-- **`TensorRtYoloJNI.cu`:** object detection is out of scope here. On Intel that would be
-  OpenVINO on the NPU or GPU, as a separate project.
+- **`TensorRtYoloJNI.cu`:** object detection becomes an OpenVINO library; see
+  [Object detection with OpenVINO](#object-detection-with-openvino) below.
 - **`CMakeLists.txt`:** a new build using `icpx -fsycl`. It also has to drop
   `-march=armv8-a+simd` and the NEON threshold flag, since this is an x86 chip.
+
+## Object detection with OpenVINO
+
+Replaces the TensorRT YOLO library (`detector/TensorRtYoloJNI.cu`, Java side in
+`photonvision-14`) on Lunar Lake. Target machine: GMKtec K13 (Core Ultra 7 256V).
+
+### Why the NPU
+
+Lunar Lake has two devices that can run the model:
+- **the NPU:** Intel quotes about 47 TOPS for the 256V
+- **the Arc 140V GPU**
+
+On the Jetson, object detection shares the GPU with the AprilTag detector. Uncapped FUEL (76 fps)
+pushed an AprilTag camera's worst detect time from 3.75 to 28 ms, which is why
+`SPECTRUM_OD_FPS_LIMIT` caps it at 30 fps. On Lunar Lake the model runs on the NPU and AprilTags
+on the GPU, so they shouldn't compete. That's the main thing to confirm on the hardware.
+
+### Plan
+
+1. **Model:** export the same YOLO model with `yolo export format=openvino` (FP16 IR), then an
+   INT8 version with `int8=True` and a calibration set of our own FUEL frames. Keep the input
+   size the same as the TensorRT engine.
+2. **Library:** write `detector/OpenVinoYoloJNI.cc` → `libspectrumov.so`.
+   - Keep the exact JNI surface of `TensorRtJNI`: `create(path)`, `inputSize(ptr)`,
+     `detect(ptr, mat_ptr, box_thresh, nms_thresh, num_classes)`, `destroy(ptr)`.
+   - Use the same output layout, so the Java side and `photonvision-14` change as little as
+     possible. Either keep the `TensorRtJNI` class name and swap the library underneath, or add
+     a small `OpenVinoJNI` twin, whichever makes the smaller patch.
+   - Inside:
+     - `ov::Core::compile_model(model, "NPU")`, falling back to `"GPU"`, then `"CPU"`
+     - pick the device with `SPECTRUM_OV_DEVICE`, and log which one loaded
+     - letterbox and normalise with `ov::preprocess::PrePostProcessor`, so it runs in the
+       compiled graph and not on the processor
+     - reuse the existing YOLO decode and NMS code from `TensorRtYoloJNI.cu`, which is plain
+       C++ once the CUDA pieces are removed
+     - one `ov::InferRequest` per camera, run asynchronously so a camera thread doesn't block
+       the others
+3. **Frames:** colour cameras use the same VA-API hardware JPEG decode as the AprilTag path.
+   Start by copying the decoded frame into the model's input buffer, and add zero-copy only if
+   the copy shows up in the timing.
+4. **Build:** a CMake option next to the SYCL build that finds OpenVINO (`find_package(OpenVINO)`)
+   and builds `libspectrumov.so` only if it's installed, like the TensorRT library today.
+5. **Set-up script:** Ubuntu 24.04 needs `intel-npu-driver` (the NPU runtime and firmware), the
+   OpenVINO runtime (apt or pip), and the user added to the `render` group for `/dev/accel`.
+
+### Tests
+
+- **Correct results:** replay recorded FUEL frames through TensorRT on the Jetson and OpenVINO on
+  the K13, then compare boxes, classes and confidences (INT8 will differ slightly; boxes
+  should overlap by an IoU of 0.9 or more).
+- **Whole model on the NPU:** check no layers fell back to the processor
+  (`ov::CompiledModel::get_runtime_model()` shows where each layer runs). A fallback is silent
+  and slow.
+- **Speed:** time each frame on NPU vs GPU, and the fps with no cap.
+- **The main test:** run 5 AprilTag cameras at 122 fps with object detection uncapped, and
+  compare the AprilTag worst-case detect time with the Jetson's 28 ms. If it stays near the
+  no-detection worst case, the 30 fps cap can be raised on this PC.
+- **Power:** measure the draw with the NPU busy, to stay within the 50 W budget.
+
+### Risks
+
+- **NPU latency:** for small models, a few milliseconds per frame is fine at 30 fps but could
+  limit the uncapped rate. Compare with the GPU.
+- **Unsupported layers:** some YOLO versions have layers the NPU compiler doesn't support. Pick a
+  YOLO version that compiles fully for the NPU (check before training a new model).
+- **INT8 accuracy:** INT8 can lose accuracy on our mono or colour frames, so calibrate on real
+  field images. FP16 on the NPU is the fallback.
+- **Upkeep:** the NPU driver and OpenVINO versions have to match; pin both in the set-up script.
 
 ## Suggested order
 
