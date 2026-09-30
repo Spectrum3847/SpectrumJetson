@@ -8,17 +8,38 @@ applied (all apply cleanly), plus our `detector/` directory.
 
 ## Target
 
-It has to match the Jetson: at least 4 AprilTag cameras, and 5 is the goal. At 1280x800 and
-120 fps, 5 cameras is 600 frames/s to decode and detect.
-- **GPU:** the Jetson's GPU is about 12% busy for 240 frames/s, so roughly 30% for 600.
-  The Arc 140V has more compute, so this should fit.
-- **Decode:** use the hardware JPEG decoder. libjpeg-turbo at 600 frames/s would take about
-  2 of the performance cores.
-- **USB:** check how the mini PC's ports connect inside (`lsusb -t`). Cameras on separate
-  USB controllers each get their own USB 2.0 bandwidth; cameras behind one internal hub share
-  one. This decides whether 5 cameras fit at full rate.
+The bar is the Jetson's measured numbers (README, Performance, 2026-09-29), with Thriftiest
+Cams at 1280x800:
+
+| Cameras | fps each | Detect time | GPU | CPU | Power |
+| --- | --- | --- | --- | --- | --- |
+| 4 | 122 | 1.2 ms | 25.7% | 1.14 cores | – |
+| 5 | 122 | 2.1 ms | 44% | 1.9 cores | 11.1 W |
+
+End-to-end latency is about 14.5 ms from mid-exposure. Of that, 8.1 ms is the camera sending
+the frame, 2.8 ms is JPEG decode and 1.2 ms is detection, so a faster GPU can only win back a
+few milliseconds; the decode path matters as much. What these numbers mean for the port:
+
+- **GPU:** 5 cameras at 44% on the Orin leaves room, and the Arc 140V has about twice the
+  compute, so the detector itself should fit. With 4 cameras, the Jetson's slowest frames take
+  6-12 ms because cameras queue for one GPU. Expect the same on Arc, and compare slowest
+  frames, not just averages.
+- **Keep frames on the GPU:** on the Jetson, passing the hardware-decoded frame straight to the
+  detector took detection from 1.9 to 1.3 ms. So the VA-API → Level Zero zero-copy path is
+  needed to match it, not optional.
+- **Graphs:** the CUDA graph (`bos-05`) was worth only about 0.1 ms, so leaving SYCL graphs out
+  of the first port is fine.
+- **CPU:** the Jetson uses 1.9 cores for 5 cameras, mostly inside NVIDIA's libraries. The Intel
+  processor should do better, but it has to decode in hardware: libjpeg-turbo at 610 frames/s
+  would take about 2 performance cores.
+- **Power:** the Jetson draws 11.1 W with 5 cameras. The mini PC will likely draw 2-3x that and
+  needs a higher-voltage supply.
+- **USB:** the Jetson is full at 5 capped cameras (6,400 of ~6,720 bytes of its shared USB 2.0
+  budget). Check the mini PC's internal wiring with `lsusb -t`. Cameras on separate USB
+  controllers each get their own budget, which could allow a 6th camera. Our capped camera
+  driver (`11-uvcvideo-payload-cap.sh`) works on x86 too.
 - **Processor-only fallback:** stock PhotonVision on the processor won't manage 5 cameras at
-  120 fps, so the GPU port is required for this PC to beat the Jetson.
+  122 fps, so the GPU port is required for this PC to match the Jetson.
 
 ## Size
 
