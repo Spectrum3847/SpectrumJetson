@@ -85,8 +85,15 @@ and the `WarpMergeSort` in `DoFitQuads` is the known one.
 - **`GpuDetectorJNI.cc`:** only light CUDA use (device setup, error checks, `cudaFree`,
   and the `cuda_capture_lock` for graph capture). Straightforward to port.
 - **`NvJpgDecoder.cc` / `nvjpg_bgr.cu`:** Jetson hardware JPEG decode, which won't carry over.
-  Replace it with libjpeg-turbo (already a dependency via `decodeMjpegGray`), or VA-API /
-  oneVPL for hardware decode later.
+  The Intel equivalent is the Lunar Lake media engine's hardware JPEG decoder, reached through
+  VA-API (`intel-media-driver`, iHD) or oneVPL. It decodes into NV12 or Y800, and the Y
+  (brightness) plane is the gray image the detector wants, so there's no colour conversion step.
+  The decoded surface can also be handed to SYCL without a copy (VA-API → dma-buf →
+  Level Zero external memory). Check two things on the real hardware:
+  - that the iHD driver decodes the Thriftiest Cam's MJPEG sampling format (4:2:0 or 4:0:0)
+  - the decode latency per frame compared with libjpeg-turbo
+  libjpeg-turbo (already a dependency via `decodeMjpegGray`) is the fallback, and on this
+  processor it's likely fast enough for a couple of cameras.
 - **`fault_kernel.cu`:** a test hook. Rewrite it trivially or drop it.
 - **`TensorRtYoloJNI.cu`:** object detection is out of scope here. On Intel that would be
   OpenVINO on the NPU or GPU, as a separate project.
