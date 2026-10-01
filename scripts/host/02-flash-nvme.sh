@@ -9,6 +9,9 @@
 #
 # Run as your normal user (not with sudo); it calls sudo where needed.
 #
+# It erases the whole SSD (--erase-all), the settings and Rewind partitions too, so it asks you to
+# type ERASE first. YES=1 skips the question (for when nobody is at the keyboard).
+#
 # The system partition (APP, /dev/nvme0n1p1) is ROOTFS_SIZE, 64GiB by default; the rest of the
 # SSD stays free for the /data partition that scripts/jetson/10-data-partition.sh creates, where
 # everything the Jetson writes while running lives. ROOTFS_SIZE=full gives the system the whole
@@ -32,6 +35,14 @@ if ! lsusb -d "$RCM_USB_ID" >/dev/null; then
   echo "No Jetson in Force Recovery Mode (USB $RCM_USB_ID) found." >&2
   echo "Power off, jumper FC REC to GND (button header J14, pins 9-10), power on, remove jumper." >&2
   exit 1
+fi
+
+if [[ ${YES:-} != 1 ]]; then
+  echo "This erases the Jetson's whole SSD: the system, the settings partition (pipelines, calibrations,"
+  echo "field calibration, snapshots) and the scratch partition (Rewind recordings). To keep them, stop"
+  echo "here and back up first: scripts/host/04-backup-ssd.sh, scripts/host/rewind-pull.sh."
+  read -r -p "Type ERASE to flash: " answer || answer=""
+  [[ $answer == ERASE ]] || { echo "Not flashing." >&2; exit 1; }
 fi
 
 sudo -n true 2>/dev/null || sudo -v   # ask for the password only if sudo needs one
@@ -97,6 +108,13 @@ LATE_INIT=$L4T_DIR/rootfs/etc/systemd/nv-late-init.sh
 if [[ $ROOTFS_SIZE != full ]] && ! sudo grep -q "spectrum-no-resizefs" "$LATE_INIT"; then
   sudo sed -i 's|^\(\s*\)if \[ -e "${nvresizefs_script}" \]; then|\1# spectrum-no-resizefs: 02-flash-nvme.sh keeps the system partition at ROOTFS_SIZE\n\1if [ -e "${nvresizefs_script}" ] \&\& [ ! -e /etc/nv/spectrum-no-resizefs ]; then|' "$LATE_INIT"
   sudo touch "$L4T_DIR/rootfs/etc/nv/spectrum-no-resizefs"
+fi
+# A different L4T can word that line differently, and then sed changes nothing: the first boot
+# would grow the system partition over the space 10-data-partition.sh needs. Stop instead.
+if [[ $ROOTFS_SIZE != full ]] && ! sudo grep -qF '[ ! -e /etc/nv/spectrum-no-resizefs ]' "$LATE_INIT"; then
+  echo "STOP: couldn't find nvresizefs's call in $LATE_INIT (a new L4T?). Edit it by hand so the" >&2
+  echo "      call is skipped while /etc/nv/spectrum-no-resizefs exists, or flash with ROOTFS_SIZE=full." >&2
+  exit 1
 fi
 if [[ $ROOTFS_SIZE == full ]]; then sudo rm -f "$L4T_DIR/rootfs/etc/nv/spectrum-no-resizefs"; fi
 

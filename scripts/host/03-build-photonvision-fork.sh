@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the FRC-Team-4143 PhotonVision fork (CUDA AprilTag pipeline) as a linuxarm64 jar,
-# on the x86-64 host. No sudo: Node 22, pnpm 10 and Temurin 17 go in ~/build/tools,
+# on the x86-64 host. No sudo: Node 22, pnpm 10 and Temurin 17 (pinned below) go in ~/build/tools,
 # matching upstream CI for this commit.
 #
 # Why a 2026 build against 2027 alpha-6 robot code: the serde message hashes
@@ -19,18 +19,25 @@ OUT=$REPO_ROOT/out
 
 mkdir -p "$T" "$OUT"
 
+# Pinned, with their published SHA-256s, so a rebuild months later gets the same tools: the
+# versions that built the 2026-10-01 jars. (Moving one: change the version and the hash together.)
+NODE_VERSION=v22.23.3
+NODE_SHA256=df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de
+JDK_VERSION=17.0.20.1+1
+JDK_SHA256=3808d1d15e3ec6bd5b84057fb5d84c33d8a1536a258146bcea2e603fc726e08e
+PNPM_VERSION=10.34.5
 if [[ ! -x $T/node/bin/node ]]; then
-  echo "==> Installing Node 22 LTS to $T"
-  sums=$(curl -fsSL https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt)
-  tarball=$(grep -oE 'node-v22\.[0-9.]+-linux-x64\.tar\.xz' <<<"$sums" | head -1)
-  (cd "$T" && curl -fsSLO "https://nodejs.org/dist/latest-v22.x/$tarball" \
-    && grep " $tarball\$" <<<"$sums" | sha256sum -c - \
+  echo "==> Installing Node $NODE_VERSION to $T"
+  tarball=node-$NODE_VERSION-linux-x64.tar.xz
+  (cd "$T" && curl -fsSLO "https://nodejs.org/dist/$NODE_VERSION/$tarball" \
+    && echo "$NODE_SHA256  $tarball" | sha256sum -c - \
     && tar xf "$tarball" && ln -sfn "${tarball%.tar.xz}" node)
 fi
 if [[ ! -x $T/jdk17/bin/java ]]; then
-  echo "==> Installing Temurin JDK 17 to $T"
+  echo "==> Installing Temurin JDK $JDK_VERSION to $T"
   curl -fsSL -o "$T/jdk17.tar.gz" \
-    "https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jdk/hotspot/normal/eclipse"
+    "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-${JDK_VERSION/+/%2B}/OpenJDK17U-jdk_x64_linux_hotspot_${JDK_VERSION/+/_}.tar.gz"
+  echo "$JDK_SHA256  $T/jdk17.tar.gz" | sha256sum -c -
   mkdir -p "$T/jdk17" && tar xf "$T/jdk17.tar.gz" -C "$T/jdk17" --strip-components=1
 fi
 
@@ -38,7 +45,7 @@ export PATH=$T/node/bin:$T/jdk17/bin:$PATH
 export JAVA_HOME=$T/jdk17
 export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 corepack enable --install-directory "$T/node/bin"
-corepack prepare pnpm@10 --activate
+corepack prepare "pnpm@$PNPM_VERSION" --activate
 echo "node $(node --version), pnpm $(pnpm --version), $(java -version 2>&1 | head -1)"
 
 if [[ ! -d $SRC/.git ]]; then

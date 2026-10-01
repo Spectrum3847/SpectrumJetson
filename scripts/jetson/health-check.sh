@@ -215,6 +215,9 @@ if [[ $cams -lt $EXPECT ]]; then fail "$cams camera(s) found, expected $EXPECT";
 # USB-A ports; our capped driver (11-uvcvideo-payload-cap.sh) fits 4.
 cap=$(cat /sys/module/uvcvideo/parameters/payload_cap 2>/dev/null || true)
 if [[ -n $cap && $cap != "(null)" ]]; then pass "camera driver: bandwidth cap $cap"
+elif [[ -f /etc/modprobe.d/90-spectrum-uvcvideo.conf && ! -f /lib/modules/$(uname -r)/updates/uvcvideo.ko ]]; then
+  # Installed, but for another kernel: a kernel package update brings a new stock driver.
+  fail "the capped camera driver was built for another kernel, not $(uname -r) (a kernel update?): re-run 11-uvcvideo-payload-cap.sh --install"
 elif [[ $cams -gt 2 ]]; then warn "stock camera driver: only 2 cameras fit on USB 2.0, on any ports (run 11-uvcvideo-payload-cap.sh --install)"
 else pass "stock camera driver (fine for 2 cameras; more need 11-uvcvideo-payload-cap.sh)"; fi
 # The USB controller watchdog (14-usb-watchdog.sh) and the 1 s USB retries (09-robot-tuning.sh).

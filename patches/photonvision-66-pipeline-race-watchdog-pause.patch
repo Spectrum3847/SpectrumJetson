@@ -1,0 +1,205 @@
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/StuckCameraWatchdog.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/StuckCameraWatchdog.java
+index 43ce5fa0..fe4c7f0b 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/StuckCameraWatchdog.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/StuckCameraWatchdog.java
+@@ -38,7 +38,11 @@ import java.util.function.LongSupplier;
+  * </ul>
+  *
+  * A camera that's unplugged, or disabled by robot code, isn't stuck: the caller only reports frames
+- * while the camera is connected and being read.
++ * while the camera is connected and being read. photonvision-66: and a gap of over {@link
++ * #NOT_READ_NS} between reports means nobody was reading it, so the clock restarts. Before, the
++ * first failed grab after such a pause (robot code re-enabling the camera, or the vision thread held
++ * up by a pipeline switch or the shared CUDA lock) counted the pause as 3 s without frames, and the
++ * camera was reconnected for nothing: a 0.5-1 s blackout.
+  */
+ final class StuckCameraWatchdog {
+     enum Action {
+@@ -55,8 +59,15 @@ final class StuckCameraWatchdog {
+     // another camera has gone and freed some.
+     static final long BANDWIDTH_RETRY_NS = 60_000_000_000L;
+ 
++    /**
++     * While the camera is being read, reports come at least every grab timeout (250 ms) plus any
++     * frame-rate limit's sleep, so a longer gap is a pause in reading, not the camera.
++     */
++    static final long NOT_READ_NS = 2_000_000_000L;
++
+     private final LongSupplier clockNs;
+     private long lastGoodNs;
++    private long lastReportNs;
+     private long lastReconnectNs = Long.MIN_VALUE / 2;
+     private long lastUsbResetNs = Long.MIN_VALUE / 2;
+     private int stage = 0; // 0: fine, 1: reconnected, 2: USB reset
+@@ -65,11 +76,20 @@ final class StuckCameraWatchdog {
+     StuckCameraWatchdog(LongSupplier clockNs) {
+         this.clockNs = clockNs;
+         this.lastGoodNs = clockNs.getAsLong();
++        this.lastReportNs = lastGoodNs;
++    }
++
++    /** The time of this report; after a pause in reading, the stuck clock starts again from it. */
++    private long report() {
++        long now = clockNs.getAsLong();
++        if (now - lastReportNs > NOT_READ_NS) lastGoodNs = now;
++        lastReportNs = now;
++        return now;
+     }
+ 
+     /** A usable frame arrived. Returns what fixed it, if the camera was stuck ("" otherwise). */
+     String good() {
+-        lastGoodNs = clockNs.getAsLong();
++        lastGoodNs = report();
+         String fixedBy = stage == 1 ? "a reconnect" : stage == 2 ? "a USB reset" : "";
+         stage = 0;
+         return fixedBy;
+@@ -77,7 +97,7 @@ final class StuckCameraWatchdog {
+ 
+     /** The camera isn't connected (unplugged, or mid-reconnect): not stuck, and the clock restarts. */
+     void notConnected() {
+-        lastGoodNs = clockNs.getAsLong();
++        lastGoodNs = report();
+     }
+ 
+     /** Someone else reconnected the camera (photonvision-27's mode fix): share the throttle. */
+@@ -87,7 +107,7 @@ final class StuckCameraWatchdog {
+ 
+     /** No usable frame this time, and the kernel is refusing the camera USB bandwidth. */
+     Action noFrameNoBandwidth() {
+-        long now = clockNs.getAsLong();
++        long now = report();
+         if (now - lastGoodNs < STUCK_NS) return Action.NONE;
+         if (now - lastReconnectNs < BANDWIDTH_RETRY_NS) return Action.NONE;
+         lastReconnectNs = now;
+@@ -97,7 +117,7 @@ final class StuckCameraWatchdog {
+ 
+     /** No usable frame this time. What to do now. */
+     Action noFrame() {
+-        long now = clockNs.getAsLong();
++        long now = report();
+         if (now - lastGoodNs < STUCK_NS) return Action.NONE;
+         if (now - lastReconnectNs < AFTER_RECONNECT_NS) return Action.NONE;
+         if (stage == 0) {
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagDetectionCudaPipe.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagDetectionCudaPipe.java
+index 66bb9396..b27f8792 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagDetectionCudaPipe.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagDetectionCudaPipe.java
+@@ -74,10 +74,24 @@ public class AprilTagDetectionCudaPipe
+         return List.of(ret);
+     }
+ 
++    // SpectrumJetson (photonvision-66): the intrinsics last sent, for clearing the distortion.
++    private double[] sentIntrinsics = null;
++
+     @Override
+     public void setParams(AprilTagDetectionCudaPipeParams newParams) {
+         if (this.params == null || !this.params.equals(newParams)) {
+-		if( newParams.cameraCalibrationCoefficients == null ) return;
++		if( newParams.cameraCalibrationCoefficients == null ) {
++		    // SpectrumJetson (photonvision-66): no calibration now (deleted, or none at this
++		    // resolution). The detector kept straightening tag edges with the old lens model;
++		    // zero distortion makes that a no-op (the intrinsics then don't matter).
++		    if (sentIntrinsics != null) {
++			var k = sentIntrinsics;
++			m_cudadetector.setparams(handle, k[0], k[1], k[2], k[3], 0, 0, 0, 0, 0);
++			sentIntrinsics = null;
++		    }
++		    super.setParams(newParams);
++		    return;
++		}
+ 
+ 		final Mat cameraMatrix = newParams.cameraCalibrationCoefficients.getCameraIntrinsicsMat();
+ 		final Mat distCoeffs = newParams.cameraCalibrationCoefficients.getDistCoeffsMat();
+@@ -86,6 +100,7 @@ public class AprilTagDetectionCudaPipe
+ 		var cy = cameraMatrix.get(1, 2)[0];
+ 		var fx = cameraMatrix.get(0, 0)[0];
+ 		var fy = cameraMatrix.get(1, 1)[0];
++		sentIntrinsics = new double[] {fx, cx, fy, cy};
+ 		// OpenCV order: k1 k2 p1 p2 k3 [k4 k5 k6]. Read as a flat array so a 1x8 or 8x1
+ 		// Mat both work.
+ 		double[] d = new double[(int) distCoeffs.total()];
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/PipelineManager.java b/photon-core/src/main/java/org/photonvision/vision/processes/PipelineManager.java
+index d5588b6a..57a469be 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/PipelineManager.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/PipelineManager.java
+@@ -158,6 +158,9 @@ public class PipelineManager {
+     /**
+      * Get the currently active pipeline.
+      *
++     * <p>SpectrumJetson (photonvision-66): the vision thread's only. It applies a pending switch,
++     * releasing the old pipeline's native resources; anywhere else, use getCurrentPipelineSettings().
++     *
+      * @return The currently active pipeline.
+      */
+     public CVPipeline getCurrentPipeline() {
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
+index 35c99f22..3481d6dc 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
+@@ -1157,7 +1157,8 @@ public class VisionModule {
+     }
+ 
+     public void setTargetModel(TargetModel targetModel) {
+-        var pipelineSettings = pipelineManager.getCurrentPipeline().getSettings();
++        // photonvision-66: not getCurrentPipeline(), which switches pipelines off the vision thread.
++        var pipelineSettings = pipelineManager.getCurrentPipelineSettings();
+         if (pipelineSettings instanceof ReflectivePipelineSettings settings) {
+             settings.targetModel = targetModel;
+             saveAndBroadcastAll();
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionModuleChangeSubscriber.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionModuleChangeSubscriber.java
+index 416e7b45..26c0593d 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionModuleChangeSubscriber.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionModuleChangeSubscriber.java
+@@ -67,12 +67,15 @@ public class VisionModuleChangeSubscriber extends DataChangeSubscriber {
+             logger.trace("Got PSC event - propName: " + wsEvent.propertyName);
+             changeListLock.lock();
+             try {
++                // SpectrumJetson (photonvision-66): the settings only. getCurrentPipeline() also applies
++                // a pending pipeline switch, which on this (websocket) thread released the running
++                // pipeline, and its native detector, while the vision thread could be using it.
+                 getSettingChanges()
+                         .add(
+                                 new VisionModuleChange(
+                                         wsEvent.propertyName,
+                                         wsEvent.data,
+-                                        parentModule.pipelineManager.getCurrentPipeline().getSettings(),
++                                        parentModule.pipelineManager.getCurrentPipelineSettings(),
+                                         wsEvent.originContext));
+             } finally {
+                 changeListLock.unlock();
+diff --git a/photon-core/src/test/java/org/photonvision/vision/frame/provider/StuckCameraWatchdogTest.java b/photon-core/src/test/java/org/photonvision/vision/frame/provider/StuckCameraWatchdogTest.java
+index cae270e0..974b5a3d 100644
+--- a/photon-core/src/test/java/org/photonvision/vision/frame/provider/StuckCameraWatchdogTest.java
++++ b/photon-core/src/test/java/org/photonvision/vision/frame/provider/StuckCameraWatchdogTest.java
+@@ -79,6 +79,31 @@ public class StuckCameraWatchdogTest {
+         assertEquals(java.util.List.of("RECONNECT@5"), stuckFor(w, 5.5));
+     }
+ 
++    @Test
++    public void aPauseInReadingIsNotStuck() {
++        // photonvision-66: frames, then nobody reads the camera for 10 s (robot code disabled it),
++        // then the first grabs fail. That's 3 s of failures from here, not 10 s already.
++        var w = make();
++        nowNs += 250_000_000L;
++        assertEquals("", w.good());
++        nowNs += 10_000_000_000L;
++        assertEquals(0, stuckFor(w, 2.5).size());
++        assertEquals(java.util.List.of("RECONNECT@1"), stuckFor(w, 1));
++    }
++
++    @Test
++    public void slowReadsStillCount() {
++        // A camera with a low frame-rate limit is read every 1.25 s (the limit's sleep and the grab
++        // timeout): below NOT_READ_NS, so a stuck one is still found at 3 s.
++        var w = make();
++        var actions = new ArrayList<String>();
++        for (int i = 1; i <= 4; i++) {
++            nowNs += 1_250_000_000L;
++            if (w.noFrame() != Action.NONE) actions.add("at " + i * 1.25 + " s");
++        }
++        assertEquals(java.util.List.of("at 3.75 s"), actions);
++    }
++
+     @Test
+     public void disconnectedIsNotStuck() {
+         var w = make();

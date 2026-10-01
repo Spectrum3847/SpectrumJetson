@@ -184,6 +184,11 @@ def cmd_solve(a) -> int:
         k, x, y, yaw = _parse_anchor(a.anchor_camera)
         T_robot_rig = solver.anchor_camera(res, k, x, y, yaw)
         note = f"Anchored by {k}'s x, y and yaw from CAD ({x}, {y}, {yaw}°)."
+    if not res.converged:
+        # The numbers are wherever the solver stopped: usually close, but not checked.
+        warnings.append("The solver stopped at its evaluation limit before it converged: the tag positions and "
+                        "mounts may be off. Check each camera's fit (px RMS) below; record again with longer still spots.")
+        print(f"WARNING: {warnings[-1]}", file=sys.stderr)
     report.write(res, layout_json, layout, out, T_robot_rig, note, notes=warnings, cams=cams, cad=cad)
     print(f"Wrote {out}/report.md, corrected-layout.json, mounts.json", file=sys.stderr)
     return 0

@@ -1,0 +1,144 @@
+diff --git a/photon-client/src/components/settings/ApriltagControlCard.vue b/photon-client/src/components/settings/ApriltagControlCard.vue
+index b1089b6a..8302439a 100644
+--- a/photon-client/src/components/settings/ApriltagControlCard.vue
++++ b/photon-client/src/components/settings/ApriltagControlCard.vue
+@@ -4,6 +4,7 @@ import type { Quaternion } from "@/types/PhotonTrackingTypes";
+ import { toDeg } from "@/lib/MathUtils";
+ import { onBeforeUnmount, onMounted, ref } from "vue";
+ import axios from "axios";
++import { oneAtATime, POLL_TIMEOUT_MS } from "@/lib/Poll";
+ import { useStateStore } from "@/stores/StateStore";
+ import { useTheme } from "vuetify";
+ const { Euler, Quaternion: ThreeQuat } = await import("three");
+@@ -15,14 +16,14 @@ const excluded = ref<ExcludedTags | null>(null);
+ const excludedText = ref("");
+ const excludedBusy = ref(false);
+ const excludedTextValid = (text: string) => /^[\d,\s]*$/.test(text);
+-const loadExcluded = async (updateText = false) => {
++const loadExcluded = oneAtATime(async (updateText: boolean = false) => {
+   try {
+-    excluded.value = (await axios.get("/excludedTags")).data;
++    excluded.value = (await axios.get("/excludedTags", { timeout: POLL_TIMEOUT_MS })).data;
+     if (updateText && excluded.value) excludedText.value = excluded.value.saved.join(", ");
+   } catch {
+     excluded.value = null;
+   }
+-};
++});
+ const saveExcluded = async () => {
+   excludedBusy.value = true;
+   try {
+diff --git a/photon-client/src/components/settings/RewindCard.vue b/photon-client/src/components/settings/RewindCard.vue
+index 9fd9ee91..3285c8f1 100644
+--- a/photon-client/src/components/settings/RewindCard.vue
++++ b/photon-client/src/components/settings/RewindCard.vue
+@@ -3,6 +3,7 @@
+ // /photonvision/rewind/record (or "Record now" here, for bench tests). See docs/REWIND.md.
+ import { onBeforeUnmount, onMounted, ref } from "vue";
+ import axios from "axios";
++import { oneAtATime, POLL_TIMEOUT_MS } from "@/lib/Poll";
+ import PvSwitch from "@/components/common/pv-switch.vue";
+ import { useStateStore } from "@/stores/StateStore";
+ import { useTheme } from "vuetify";
+@@ -32,13 +33,13 @@ const status = ref<RewindStatus | null>(null);
+ const busy = ref(false);
+ let timer: ReturnType<typeof setInterval> | undefined;
+ 
+-const load = async () => {
++const load = oneAtATime(async () => {
+   try {
+-    status.value = (await axios.get("/rewind")).data;
++    status.value = (await axios.get("/rewind", { timeout: POLL_TIMEOUT_MS })).data;
+   } catch {
+     status.value = null;
+   }
+-};
++});
+ const post = async (body: object, message: string) => {
+   busy.value = true;
+   try {
+diff --git a/photon-client/src/lib/Poll.ts b/photon-client/src/lib/Poll.ts
+new file mode 100644
+index 00000000..84f19235
+--- /dev/null
++++ b/photon-client/src/lib/Poll.ts
+@@ -0,0 +1,20 @@
++// SpectrumJetson (photonvision-67): the dashboard's pollers (robot state, Rewind, tag contrast, the
++// excluded tags) ran every second or two with no timeout. On a slow or dropped link each tick
++// started another request while the last ones were still out, piling up on the Jetson.
++
++/** Requests from a poller give up after this long, so a dropped link doesn't leave one hanging. */
++export const POLL_TIMEOUT_MS = 10_000;
++
++/** fn, skipped while its last call is still running (one request in flight, however many callers). */
++export const oneAtATime = <A extends unknown[]>(fn: (...args: A) => Promise<void>) => {
++  let running = false;
++  return async (...args: A) => {
++    if (running) return;
++    running = true;
++    try {
++      await fn(...args);
++    } finally {
++      running = false;
++    }
++  };
++};
+diff --git a/photon-client/src/lib/RobotState.ts b/photon-client/src/lib/RobotState.ts
+index 72c1b074..4811bb87 100644
+--- a/photon-client/src/lib/RobotState.ts
++++ b/photon-client/src/lib/RobotState.ts
+@@ -2,6 +2,7 @@
+ // dashboard's idle notice.
+ import { ref } from "vue";
+ import axios from "axios";
++import { oneAtATime, POLL_TIMEOUT_MS } from "@/lib/Poll";
+ 
+ export interface RobotState {
+   idleWhileDisabled: boolean;
+@@ -51,13 +52,14 @@ export interface RobotStateChange {
+ 
+ export const robotState = ref<RobotState | null>(null);
+ 
+-export const loadRobotState = async () => {
++// Polled by several cards at once: one request at a time between them (photonvision-67).
++export const loadRobotState = oneAtATime(async () => {
+   try {
+-    robotState.value = (await axios.get<RobotState>("/robotState")).data;
++    robotState.value = (await axios.get<RobotState>("/robotState", { timeout: POLL_TIMEOUT_MS })).data;
+   } catch {
+     robotState.value = null;
+   }
+-};
++});
+ 
+ export const setRobotState = async (change: RobotStateChange) => {
+   robotState.value = (await axios.post<RobotState>("/robotState", change)).data;
+diff --git a/photon-client/src/lib/TagContrast.ts b/photon-client/src/lib/TagContrast.ts
+index 4f59b86e..4569580f 100644
+--- a/photon-client/src/lib/TagContrast.ts
++++ b/photon-client/src/lib/TagContrast.ts
+@@ -2,6 +2,7 @@
+ // and black border): shared by the Input tab and the Match Ready page.
+ import axios from "axios";
+ import { ref } from "vue";
++import { oneAtATime, POLL_TIMEOUT_MS } from "@/lib/Poll";
+ 
+ export interface TagContrast {
+   verdict: "good" | "whites clipping" | "low contrast" | "blacks lifted" | "no tags";
+@@ -15,13 +16,13 @@ export interface TagContrast {
+ 
+ export const tagContrast = ref<Record<string, TagContrast>>({});
+ 
+-export const loadTagContrast = async () => {
++export const loadTagContrast = oneAtATime(async () => {
+   try {
+-    tagContrast.value = (await axios.get<Record<string, TagContrast>>("/tagContrast")).data;
++    tagContrast.value = (await axios.get<Record<string, TagContrast>>("/tagContrast", { timeout: POLL_TIMEOUT_MS })).data;
+   } catch {
+     tagContrast.value = {};
+   }
+-};
++});
+ 
+ export const describeTagContrast = (t?: TagContrast): string => {
+   if (!t || t.verdict === "no tags") return "no tag close enough to measure";

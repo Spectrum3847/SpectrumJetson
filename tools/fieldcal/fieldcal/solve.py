@@ -64,6 +64,7 @@ class Result:
     obs_by_tag: Counter = field(default_factory=Counter)
     obs_rms: list[float] = field(default_factory=list)  # per observation in ``used``, px
     alignment: dict = field(default_factory=dict)  # how the map was lined up with the layout
+    converged: bool = True  # False: the final solve stopped at its evaluation limit
 
 
 def _pnp(cam: Camera, obs: list[Observation], layout: dict[int, np.ndarray], model: np.ndarray):
@@ -478,6 +479,8 @@ def solve(cams: dict[str, Camera], obs: list[Observation], layout: dict[int, np.
         rms_by_tag=q(by_tag),
         obs_by_tag=Counter(o.tag for o in p.obs),
         obs_rms=[float(e) for e in rms],
+        # least_squares status 0: it stopped at max_nfev, still improving. (Negative: bad input.)
+        converged=sol.status > 0,
     )
     G, info = align_to_layout(result.tags, layout, result.obs_by_tag)
     _apply_alignment(result, G)
