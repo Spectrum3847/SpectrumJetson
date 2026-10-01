@@ -23,6 +23,10 @@ export default async function globalSetup() {
   mkdirSync(".state", { recursive: true });
   writeFileSync(".state/start-pipelines.json", JSON.stringify(start, null, 2));
   const rewind = await (await fetch(`${base}/api/rewind`)).json();
+  // Quiet mode (photonvision-56): the fake robot's disabled phases can start it, and with no robot
+  // left it stays on, so global-teardown ends it if it wasn't on before.
+  const robot = await (await fetch(`${base}/api/robotState`)).json();
+  writeFileSync(".state/start-quiet.json", JSON.stringify({ quietNow: !!robot.quietNow }));
   // Which cameras are streaming. Tests run on those; the ones that touch every camera skip if any
   // isn't (PhotonVision changes an unplugged camera's saved setup too, and nothing can put it back
   // until it's plugged in: a run on 2026-10-01 left test pipelines in three cameras' settings).

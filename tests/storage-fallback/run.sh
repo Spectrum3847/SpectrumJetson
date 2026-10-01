@@ -15,7 +15,8 @@ WHICH=${1:?usage: $0 scratch|settings}
 [[ $WHICH == scratch || $WHICH == settings ]] || { echo "usage: $0 scratch|settings" >&2; exit 2; }
 JETSON=${JETSON:-192.168.55.1}
 KEY=${KEY:-$HOME/.ssh/jetson_ed25519}
-SSH=(ssh -i "$KEY" -o ConnectTimeout=5 -o BatchMode=yes "spectrum3847@$JETSON")
+JETSON_USER=${JETSON_USER:-spectrum3847}
+SSH=(ssh -i "$KEY" -o ConnectTimeout=5 -o BatchMode=yes "$JETSON_USER@$JETSON")
 PARTLABEL=$([[ $WHICH == scratch ]] && echo SPECTRUM_SCRATCH || echo SPECTRUM_SETTINGS)
 fails=0
 check() { if eval "$2"; then echo "  PASS  $1"; else echo "  FAIL  $1"; fails=$((fails + 1)); fi; }

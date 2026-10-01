@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Lets WPILib 2027's desktop (simulation) libraries load on Ubuntu 22.04 (glibc 2.35).
 
-WPILib 2027 alpha's linuxx86-64 libraries were built against glibc 2.38, but use only five functions
-that need it: fmod and fmodf (re-versioned in 2.38) and the C23 variants of strtol, sscanf and
-fscanf (__isoc23_*: the same as the classic ones apart from C23 additions such as 0b literals).
-glibc 2.35 has all five under their older names. This rewrites a copy of each library so those
-references bind to the older names:
+WPILib 2027 alpha's linuxx86-64 libraries were built against glibc 2.38, but use only a few functions
+that need it: fmod and fmodf (re-versioned in 2.38) and the C23 variants of strtol, strtoll,
+strtoul, strtoull, sscanf and fscanf (__isoc23_*: the same as the classic ones apart from C23
+additions such as 0b literals). glibc 2.35 has all of them under their older names. This rewrites a
+copy of each library so those references bind to the older names:
 
   - each __isoc23_NAME symbol is renamed NAME (its string ends in NAME: only the offset changes),
   - their symbol versions become "any" (the default version libc provides),
@@ -93,23 +93,13 @@ def patch(path, check=False):
     if not (dynsym and versym and verneed):
         return []
     dynstr = secs[dynsym["link"]]["off"]
-    # Version indexes that mean GLIBC_2.38 (in libc.so.6 or libm.so.6), and their vernaux entries.
-    targets, aux_offsets = {}, []
-    off = verneed["off"]
-    while True:
-        vn_version, vn_cnt, vn_file, vn_aux, vn_next = struct.unpack_from("<HHIII", data, off)
-        a = off + vn_aux
-        for _ in range(vn_cnt):
-            vna_hash, vna_flags, vna_other, vna_name, vna_next = struct.unpack_from("<IHHII", data, a)
-            if cstr(data, dynstr + vna_name) == b"GLIBC_2.38":
-                targets[vna_other] = cstr(data, dynstr + vn_file).decode()
-                aux_offsets.append(a)
-            if not vna_next:
-                break
-            a += vna_next
-        if not vn_next:
-            break
-        off += vn_next
+    # Version indexes that mean GLIBC_2.38, and the library each is in (libc.so.6, libm.so.6).
+    targets = {}
+    for off, _, a in auxes(data, verneed["off"]):
+        if is_238(data, dynstr, a):
+            vn_file, = struct.unpack_from("<I", data, off + 4)
+            vna_other, = struct.unpack_from("<H", data, a + 6)
+            targets[vna_other] = cstr(data, dynstr + vn_file).decode()
     if not targets:
         return []
     changes, edits, missing = [], [], []
@@ -137,8 +127,8 @@ def patch(path, check=False):
             struct.pack_into("<H", data, vo, 1)  # VER_NDX_GLOBAL: the library's default version
         while unlink_one(data, verneed["off"], dynstr):
             pass
-        for a in aux_offsets:  # the ones still listed
-            if cstr(data, dynstr + struct.unpack_from("<I", data, a + 8)[0]) == b"GLIBC_2.38" and listed(data, verneed["off"], a):
+        for _, _, a in auxes(data, verneed["off"]):  # the ones left: a library's only entry
+            if is_238(data, dynstr, a):
                 flags, = struct.unpack_from("<H", data, a + 4)
                 struct.pack_into("<H", data, a + 4, flags | VER_FLG_WEAK)
         if data != original:
@@ -147,7 +137,10 @@ def patch(path, check=False):
 
 
 def auxes(data, verneed_off):
-    """(verneed entry offset, previous aux offset or None, aux offset) for every required version."""
+    """(verneed entry offset, previous aux offset or None, aux offset) for every required version.
+
+    Elf64_Verneed: vn_version, vn_cnt (H), vn_file, vn_aux, vn_next (I). Elf64_Vernaux: vna_hash (I),
+    vna_flags, vna_other (H), vna_name, vna_next (I). The offsets are relative."""
     off = verneed_off
     while True:
         _, vn_cnt, _, vn_aux, vn_next = struct.unpack_from("<HHIII", data, off)
@@ -163,14 +156,15 @@ def auxes(data, verneed_off):
         off += vn_next
 
 
-def listed(data, verneed_off, aux):
-    return any(a == aux for _, _, a in auxes(data, verneed_off))
+def is_238(data, dynstr, aux):
+    vna_name, = struct.unpack_from("<I", data, aux + 8)
+    return cstr(data, dynstr + vna_name) == b"GLIBC_2.38"
 
 
 def unlink_one(data, verneed_off, dynstr):
     """Takes one GLIBC_2.38 entry out of its library's list (if it isn't the only one). True if it did."""
     for off, prev, a in auxes(data, verneed_off):
-        if cstr(data, dynstr + struct.unpack_from("<I", data, a + 8)[0]) != b"GLIBC_2.38":
+        if not is_238(data, dynstr, a):
             continue
         vn_cnt, = struct.unpack_from("<H", data, off + 2)
         if vn_cnt < 2:

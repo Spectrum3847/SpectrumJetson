@@ -6,6 +6,8 @@
 # (Spectrum3847/2026-FM-SystemCore: photonlib-v2027.0.0-alpha-2.json).
 # Usage: scripts/jetson/03-photonvision.sh [version]
 set -euo pipefail
+# Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
+[[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 
 PV_VERSION=${1:-v2027.0.0-alpha-2}
 # photon-image-modifier install.sh, pinned (reviewed 2026-09-23).

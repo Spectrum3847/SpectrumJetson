@@ -66,9 +66,13 @@ tests/ui/run.sh
 - **`far-search`:** Settings > Robot state's far-tag search: its status, and no full-size searches
   while it's switched off.
 
-**Limits:** 10 s per click, 2 min per test, 8 min per run; `run.sh` stops anything past 10 min. The
-run fails if a camera ends on a different pipeline than it started on, or a `zz-uitest` pipeline is
-left behind (or a `zz-uitest` snapshot), and says which.
+**Limits:** 10 s per click, 2 min per test (6 for the round trip, ~2.6 min over the Jetson's
+Wi-Fi), 8 min per run; `run.sh` stops anything past 10 min. A test's clean-up starts from a fresh
+page, so a test that died half way can't leave a menu open in its way. The run fails if a camera
+ends on a different pipeline than it started on, or a `zz-uitest` pipeline is left behind (or a
+`zz-uitest` snapshot), and says which. Quiet mode that the fake robot's disabled phases started
+(the scratch partition read-only, and it stays so with the robot gone) is ended with a 2 s fake
+enable; the run fails only if that doesn't work.
 
 ## Writing a test
 

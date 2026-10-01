@@ -153,9 +153,12 @@ test("the Pipeline dropdown numbers pipelines as PhotonVision does", async ({ da
   const state = await cameraState(request, camera);
   const select = dash.control("select", "Pipeline");
   await select.locator(".v-field").click();
-  const options = (await dash.page.locator(".v-overlay--active .v-list-item").allInnerTexts()).map((t) => t.trim());
+  // A retrying check: the menu's items are there before their text is (read at once, they were
+  // all "" on a slow link).
+  await expect(dash.page.locator(".v-overlay--active .v-list-item")).toHaveText(
+    state.pipelineNicknames.map((name, index) => `${index}: ${name}`)
+  );
   await dash.page.keyboard.press("Escape");
-  expect(options).toEqual(state.pipelineNicknames.map((name, index) => `${index}: ${name}`));
   expect(await dash.currentPipeline()).toEqual({ index: state.currentPipelineIndex, name: "zz-uitest" });
   void pipeline;
 });

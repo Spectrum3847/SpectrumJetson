@@ -3,6 +3,8 @@
 # lib971apriltag.so, which the 4143 PhotonVision fork loads via System.loadLibrary.
 # Run ON THE JETSON after 04-build-allwpilib.sh has installed allwpilib v2026.2.1.
 set -euo pipefail
+# Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
+[[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 
 REPO=https://github.com/FRC-Team-4143/GpuDetectorJNI.git
 SHA=ef9fc1ec7e43116849e71fef1ab335ba630274a7

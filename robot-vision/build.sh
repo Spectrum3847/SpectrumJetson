@@ -26,10 +26,11 @@ tools/ubuntu2204-sim/get-libstdcxx.sh || echo "WARNING: couldn't get a newer lib
 # Gradle itself runs on the first JDK found (17 or newer).
 export JAVA_HOME=${JAVA_HOME:-${paths[0]}}
 csv=$(IFS=,; echo "${paths[*]}")
-projects=("${@:-wpilib2026 wpilib2027}")
+projects=("$@")
+[[ ${#projects[@]} -gt 0 ]] || projects=(wpilib2026 wpilib2027)
 tasks=()
-for p in ${projects[*]}; do tasks+=(":$p:test" ":$p:sourceDrop"); done
+for p in "${projects[@]}"; do tasks+=(":$p:test" ":$p:sourceDrop"); done
 # The end-to-end simulation tests run on this machine's desktop libraries. On Ubuntu 22.04, the
 # 2027 copies get tools/ubuntu2204-sim/glibc238_compat.py; on 24.04 and newer it changes nothing.
-for p in ${projects[*]}; do tasks+=(":$p:simTest"); done
-exec ./gradlew --console=plain -Porg.gradle.java.installations.paths="$csv" -Porg.gradle.java.installations.auto-download=false "${tasks[@]}"
+for p in "${projects[@]}"; do tasks+=(":$p:simTest"); done
+exec ./gradlew --console=plain -Dorg.gradle.java.installations.paths="$csv" -Dorg.gradle.java.installations.auto-download=false "${tasks[@]}"

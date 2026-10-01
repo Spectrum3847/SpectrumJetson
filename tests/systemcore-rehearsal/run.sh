@@ -46,7 +46,8 @@ done
 ROBOT_IP=10.85.15.2
 JETSON=${1:-$([[ -n $wired ]] && echo 10.85.15.15 || echo 10.100.0.194)}
 PHASES=${REHEARSAL_PHASES:-disabled:20,teleop:20,fms-auto:15,fms-teleop:15,fms-disabled:10,teleop:8}
-SSH=(ssh -i "$HOME/.ssh/jetson_ed25519" -o ConnectTimeout=6 -o BatchMode=yes "spectrum3847@$JETSON")
+KEY=${KEY:-$HOME/.ssh/jetson_ed25519}
+SSH=(ssh -i "$KEY" -o ConnectTimeout=6 -o BatchMode=yes "${JETSON_USER:-spectrum3847}@$JETSON")
 
 if [[ -z ${REHEARSAL_UNDER_TIMEOUT:-} && $cleanup_only == 0 ]]; then
   total=$(python3 -c 'import sys; print(int(sum(float(p.split(":")[1]) for p in sys.argv[1].split(","))) + 300 + 240 * int(sys.argv[2]))' "$PHASES" "$tags")
@@ -127,17 +128,17 @@ else
     || { echo "Couldn't set up the redirect on the Jetson" >&2; exit 2; }
 fi
 
-cd "$ROOT/robot-vision"
+cd "$ROOT/robot-vision" || exit 2
 paths=()
 for j in "${JAVA17_HOME:-}" "${JAVA25_HOME:-}" "$HOME/wpilib/2026/jdk" "$HOME/wpilib/2027/jdk" "$HOME/build/tools/jdk17"; do
   [[ -n $j && -x $j/bin/java ]] && paths+=("$j")
 done
 export JAVA_HOME=${JAVA_HOME:-${paths[0]}}
 out=$(mktemp)
-./gradlew -q --console=plain -Porg.gradle.java.installations.paths="$(IFS=,; echo "${paths[*]}")" \
-  -Porg.gradle.java.installations.auto-download=false \
+./gradlew -q --console=plain -Dorg.gradle.java.installations.paths="$(IFS=,; echo "${paths[*]}")" \
+  -Dorg.gradle.java.installations.auto-download=false \
   -Prehearsal.jetson="$JETSON" -Prehearsal.link="$link" -Prehearsal.phases="$PHASES" :wpilib2027:rehearsal 2>&1 \
-  | grep --line-buffered -v -E "^(NT: |WARNING: (A terminally|sun\.misc|Please consider))|sim-natives/.*: changed " | tee "$out"
+  | grep --line-buffered -v -E "^NT: |sim-natives/.*: changed " | tee "$out"
 rc=${PIPESTATUS[0]}
 # The robot program's own verdict: WPILib exits 0 even when robot code throws.
 grep -q "^rehearsal: PASS" "$out" || rc=1

@@ -3,6 +3,8 @@
 # flash leaves out, and set up the shell environment the vision stack build needs.
 # Run ON THE JETSON. Needs internet (e.g. Wi-Fi: sudo nmcli --ask dev wifi connect <SSID>).
 set -euo pipefail
+# Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
+[[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 
 sudo apt update
 sudo apt install -y nvidia-jetpack

@@ -17,6 +17,8 @@
 #   12-install-yolo-model.sh ~/models/wave2826_yolo11n_fuel_raw.onnx "Fuel (Wave 2826)" Fuel
 # Then pick the model in the camera's Object Detection pipeline in the web UI.
 set -euo pipefail
+# Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
+[[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 SRC=${1:?usage: $0 <model.onnx|model.engine> <nickname> <labels> [width height] [version]}
 NICK=${2:?nickname}
 LABELS=${3:?labels, comma-separated}

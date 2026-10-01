@@ -29,6 +29,8 @@
 # Per-camera caps ("port:bytes", e.g. 1-2.4:944) are set on PhotonVision's Camera Matching page
 # (the driver's payload_cap is writable at run time); reinstalling keeps them.
 set -euo pipefail
+# Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
+[[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 KVER=$(uname -r)
 BASE=v${KVER%%-*}   # 5.15.199-tegra -> v5.15.199

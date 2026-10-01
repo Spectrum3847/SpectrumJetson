@@ -107,6 +107,9 @@ def patchNatives = tasks.register('patchSimNatives', Exec) {
         commandLine(['python3', "${rootDir}/tools/ubuntu2204-sim/glibc238_compat.py"] + lib)
     }
 }
+// Java 25 warns, at length, about WPILib loading its native libraries and about quickbuf (its
+// protobuf library) using sun.misc.Unsafe. Both are expected here.
+def jdk25Quiet = ['--enable-native-access=ALL-UNNAMED', '--sun-misc-unsafe-memory-access=allow']
 tasks.register('simTest', Test) {
     description = 'End-to-end in WPILib simulation: PhotonLib VisionSystemSim -> PhotonCamera -> VisionSystem -> estimator'
     testClassesDirs = sourceSets.simTest.output.classesDirs
@@ -114,6 +117,7 @@ tasks.register('simTest', Test) {
     dependsOn patchNatives
     systemProperty 'java.library.path', natives.get().asFile.path
     environment 'LD_LIBRARY_PATH', natives.get().asFile.path
+    jvmArgs jdk25Quiet
     testLogging { showStandardStreams = true }
 }
 
@@ -128,7 +132,7 @@ tasks.register('rehearsal', JavaExec) {
     doFirst { workingDir.mkdirs() }
     systemProperty 'java.library.path', natives.get().asFile.path
     environment 'LD_LIBRARY_PATH', natives.get().asFile.path
-    jvmArgs '--enable-native-access=ALL-UNNAMED'
+    jvmArgs jdk25Quiet
     ['rehearsal.jetson', 'rehearsal.link', 'rehearsal.phases'].each { k ->
         if (project.hasProperty(k)) systemProperty k, project.property(k)
     }

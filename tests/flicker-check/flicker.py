@@ -1,5 +1,5 @@
 # Frame-to-frame brightness of the newest Rewind recording, per camera (see run.sh).
-import csv, glob, os, sys
+import csv, glob, os
 import cv2, numpy as np
 sess = sorted(glob.glob("/opt/photonvision/rewind/sessions/*"))[-1]
 print(os.path.basename(sess))

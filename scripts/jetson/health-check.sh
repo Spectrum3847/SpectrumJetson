@@ -369,12 +369,17 @@ if [[ -f /run/spectrum-thermal-limit ]]; then
   fail "thermal limit: cameras capped ($(cat /run/spectrum-thermal-limit)); it lifts below 88 C"
 fi
 # Quiet mode (photonvision-56): the SSD isn't being written after a match.
-pvquiet=$(timeout 5 python3 -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://localhost:5800/api/robotState", timeout=3)).get("quietNow"))' 2>/dev/null || true)
+IFS=$'\t' read -r pvquiet pvquiet_err < <(timeout 5 python3 -c 'import json,urllib.request; s=json.load(urllib.request.urlopen("http://localhost:5800/api/robotState", timeout=3)); print(s.get("quietNow"), s.get("quietError") or "", sep="\t")' 2>/dev/null || true)
 scratch_ro=$(findmnt -n -o OPTIONS /data/scratch 2>/dev/null | tr ',' '\n' | grep -qx ro && echo yes)
 if [[ ($scratch_ro == yes || -f /run/spectrum-quiet) && $pvquiet == False ]]; then
   # Quiet mode, then a PhotonVision restart: before photonvision-64 the new process didn't know,
   # so no enable made the partition writable again and Rewind couldn't record.
   fail "scratch partition read-only, but PhotonVision isn't in quiet mode (left from before a restart): Rewind can't record. sudo spectrum-quiet off"
+elif [[ $pvquiet == True && -n $pvquiet_err ]]; then
+  # photonvision-65: leaving quiet mode failed; PhotonVision stays quiet and retries every 5 s.
+  fail "quiet mode can't end: $pvquiet_err (retried every 5 s; Rewind can't record until it works)"
+elif [[ -n $pvquiet_err ]]; then
+  warn "quiet mode couldn't start last time: $pvquiet_err (the SSD was written after that match)"
 elif [[ -f /run/spectrum-quiet ]]; then
   pass "quiet mode: scratch partition read-only ($(cat /run/spectrum-quiet)); any enable ends it"
 elif grep -q x-spectrum-data /etc/fstab 2>/dev/null && [[ ! -x /usr/local/bin/spectrum-quiet ]]; then

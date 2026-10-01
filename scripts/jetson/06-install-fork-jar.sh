@@ -4,6 +4,8 @@
 # made Java 25 the system default).
 # Run ON THE JETSON. Usage: 06-install-fork-jar.sh <path/to/photonvision-...-linuxarm64.jar>
 set -euo pipefail
+# Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
+[[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 
 JAR=${1:?usage: $0 <photonvision-linuxarm64.jar>}
 JAVA17=/usr/lib/jvm/java-17-openjdk-arm64/bin/java

@@ -1,5 +1,6 @@
 package org.spectrum3847.vision.rehearsal;
 
+import io.avaje.jsonb.Jsonb;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -40,7 +41,7 @@ import org.wpilib.vision.apriltag.AprilTagFields;
  * <ul>
  *   <li><b>The control word:</b> PhotonVision decodes WPILib 2027's real /FMSInfo/ControlWord
  *       (enabled, autonomous, FMS attached) and idles while disabled. Read from the Jetson's
- *       /api/robotState in every phase.
+ *       /api/robotState once a second in every phase.
  *   <li><b>Match data:</b> robot code asks Rewind to record during the match, and the session is
  *       named from WPILib 2027's /FMSInfo MatchType and MatchNumber (Q42 here).
  *   <li><b>Results:</b> every camera's results reach PhotonLib 2027 alpha-2 and decode (the
@@ -123,8 +124,13 @@ public class Rehearsal extends TimedRobot {
     final String link = System.getProperty("rehearsal.link", "wifi");
     final boolean judgeTiming = !link.equals("wifi");
     final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
-    volatile String robotState = "", rewind = "";
-    volatile double ntBytes = Double.NaN, ntBytesTime;
+
+    /** One poll of the Jetson: its web API's answers (empty if it didn't answer) and our NT bytes. */
+    record Poll(long n, Map<String, Object> robotState, Map<String, Object> rewind, double ntBytes, double time) {}
+
+    volatile Poll latest = new Poll(0, Map.of(), Map.of(), Double.NaN, 0);
+    long lastPollChecked = 0; // the robot loop checks each poll once
+    static final Pattern BYTES_RECEIVED = Pattern.compile("bytes_received:(\\d+)");
     final BooleanPublisher recordRequest =
             NetworkTableInstance.getDefault().getTable("photonvision").getSubTable("rewind").getBooleanTopic("record").publish();
 
@@ -154,23 +160,22 @@ public class Rehearsal extends TimedRobot {
 
     /** The Jetson's web API and this connection's byte count, once a second (off the robot loop). */
     void poll() {
-        while (true) {
-            robotState = get("/api/robotState");
-            rewind = get("/api/rewind");
+        for (long n = 1; ; n++) {
+            var state = get("/api/robotState");
+            var rw = get("/api/rewind");
+            double bytes = Double.NaN;
             try {
                 var p = new ProcessBuilder("ss", "-tinH", "state", "established", "dst", jetson, "( sport = :5810 )")
                         .redirectErrorStream(true)
                         .start();
                 String out = new String(p.getInputStream().readAllBytes());
                 p.waitFor();
-                Matcher m = Pattern.compile("bytes_received:(\\d+)").matcher(out);
-                double total = Double.NaN;
-                while (m.find()) total = (Double.isNaN(total) ? 0 : total) + Double.parseDouble(m.group(1));
-                ntBytes = total;
-                ntBytesTime = Timer.getTimestamp();
+                Matcher m = BYTES_RECEIVED.matcher(out);
+                while (m.find()) bytes = (Double.isNaN(bytes) ? 0 : bytes) + Double.parseDouble(m.group(1));
             } catch (Exception e) {
-                ntBytes = Double.NaN;
+                // no count this time
             }
+            latest = new Poll(n, state, rw, bytes, Timer.getTimestamp());
             try {
                 Thread.sleep(1000);
             } catch (InterruptedException e) {
@@ -179,25 +184,27 @@ public class Rehearsal extends TimedRobot {
         }
     }
 
-    String get(String path) {
+    @SuppressWarnings("unchecked")
+    Map<String, Object> get(String path) {
         try {
             var r = http.send(HttpRequest.newBuilder(URI.create("http://" + jetson + ":5800" + path))
                             .timeout(Duration.ofSeconds(2)).build(),
                     HttpResponse.BodyHandlers.ofString());
-            return r.statusCode() == 200 ? r.body() : "";
+            if (r.statusCode() == 200 && Jsonb.instance().type(Object.class).fromJson(r.body()) instanceof Map<?, ?> m) {
+                return (Map<String, Object>) m;
+            }
         } catch (Exception e) {
-            return "";
+            // the Jetson didn't answer (or not with JSON): an empty poll
         }
+        return Map.of();
     }
 
-    static Boolean flag(String json, String key) {
-        Matcher m = Pattern.compile("\"" + key + "\":(true|false)").matcher(json);
-        return m.find() ? Boolean.parseBoolean(m.group(1)) : null;
+    static Boolean flag(Map<String, Object> json, String key) {
+        return json.get(key) instanceof Boolean b ? b : null;
     }
 
-    static String text(String json, String key) {
-        Matcher m = Pattern.compile("\"" + key + "\":\"([^\"]*)\"").matcher(json);
-        return m.find() ? m.group(1) : "";
+    static String text(Map<String, Object> json, String key) {
+        return json.get(key) instanceof String t ? t : "";
     }
 
     /** PhotonVision cameras publishing results: /photonvision subtables with a rawBytes topic. */
@@ -251,8 +258,10 @@ public class Rehearsal extends TimedRobot {
                 cs.maxPongMicros = Math.max(cs.maxPongMicros, md.timeSinceLastPong);
             }
         }
-        if (settled) {
-            String s = robotState;
+        var poll = latest;
+        if (settled && poll.n() != lastPollChecked) {
+            lastPollChecked = poll.n();
+            var s = poll.robotState();
             if (!s.isEmpty()) {
                 ps.stateSamples++;
                 var p = ps.phase;
@@ -276,7 +285,7 @@ public class Rehearsal extends TimedRobot {
                 }
                 if (!ok) ps.stateMismatches++;
             }
-            String rw = rewind;
+            var rw = poll.rewind();
             if (!rw.isEmpty()) {
                 ps.recordingSamples++;
                 if (Boolean.TRUE.equals(flag(rw, "recording"))) {
@@ -284,13 +293,13 @@ public class Rehearsal extends TimedRobot {
                     ps.session = text(rw, "session");
                 }
             }
-            if (!Double.isNaN(ntBytes)) {
+            if (!Double.isNaN(poll.ntBytes())) {
                 if (Double.isNaN(ps.ntBytesStart)) {
-                    ps.ntBytesStart = ntBytes;
-                    ps.ntTimeStart = ntBytesTime;
+                    ps.ntBytesStart = poll.ntBytes();
+                    ps.ntTimeStart = poll.time();
                 }
-                ps.ntBytesEnd = ntBytes;
-                ps.ntTimeEnd = ntBytesTime;
+                ps.ntBytesEnd = poll.ntBytes();
+                ps.ntTimeEnd = poll.time();
             }
         }
         if (now - phaseStart >= ps.phase.seconds()) {
@@ -305,11 +314,12 @@ public class Rehearsal extends TimedRobot {
 
     void waitForJetson(double now) {
         var names = discoverCameras();
-        Boolean connected = flag(robotState, "robotConnected");
+        var state = latest.robotState();
+        Boolean connected = flag(state, "robotConnected");
         if (Boolean.TRUE.equals(connected) && !names.isEmpty()) {
-            Boolean idle = flag(robotState, "idleWhileDisabled");
+            Boolean idle = flag(state, "idleWhileDisabled");
             idleWhileDisabled = idle == null || idle;
-            quietAfterMatch = Boolean.TRUE.equals(flag(robotState, "quietAfterMatch"));
+            quietAfterMatch = Boolean.TRUE.equals(flag(state, "quietAfterMatch"));
             System.out.printf("rehearsal: Jetson connected after %.1f s; cameras %s; idle while disabled %s; quiet after a match %s%n",
                     now - start, names, idleWhileDisabled, quietAfterMatch);
             var field = AprilTagFieldLayout.loadField(AprilTagFields.kDefaultField);

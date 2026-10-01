@@ -19,6 +19,8 @@
 # Options not given go back to their defaults.
 # (Fault injection for testing: echo N > /tmp/spectrum-971-fault-every; rm it to stop.)
 set -euo pipefail
+# Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
+[[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 
 which=${1:?usage: $0 4143|bos [--mwbd N] [--jpeg nvjpg|turbo] [--mse N] [--gpu-connections N] [--no-restart]}
 shift

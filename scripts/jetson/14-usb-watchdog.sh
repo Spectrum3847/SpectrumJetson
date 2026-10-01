@@ -10,6 +10,8 @@
 #                                  This resets every USB device, and can leave a Thriftiest Cam
 #                                  stuck until its power is cut (the known issue in the README).
 set -euo pipefail
+# Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot (--test writes nothing).
+[[ ${1:-} == --test || $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 HERE=$(cd "$(dirname "$0")" && pwd)
 BIN=/opt/spectrum/usb-watchdog.py
 UNIT=/etc/systemd/system/usb-watchdog.service

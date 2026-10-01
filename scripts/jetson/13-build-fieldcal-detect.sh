@@ -10,6 +10,8 @@
 #               where PhotonVision's Field Calibration page runs them (photonvision-30). Rerun after
 #               updating tools/fieldcal.
 set -euo pipefail
+# Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
+[[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 INSTALL=0
 [[ ${1:-} == --install ]] && INSTALL=1
 DEST=/opt/spectrum/fieldcal

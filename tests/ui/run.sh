@@ -11,6 +11,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export PATH=$HOME/build/tools/node/bin:$PATH
 KEY=${JETSON_KEY:-$HOME/.ssh/jetson_ed25519}
+# The fake-robot tests SSH to the Jetson as well (lib/fake-robot.ts).
+export PV_UI_JETSON_USER=${JETSON_USER:-spectrum3847} PV_UI_JETSON_KEY=$KEY
 HOSTS=${JETSON_HOSTS:-"192.168.55.1 10.100.0.194"}
 
 command -v node >/dev/null || { echo "No Node: run scripts/host/03-build-photonvision-fork.sh once" >&2; exit 1; }
@@ -26,7 +28,7 @@ trap cleanup EXIT
 if ! (exec 3<>/dev/tcp/127.0.0.1/5800) 2>/dev/null; then
   for host in $HOSTS; do
     ssh -q -N -o ExitOnForwardFailure=yes -o ConnectTimeout=4 -o ServerAliveInterval=15 -o BatchMode=yes \
-      -i "$KEY" "${FORWARDS[@]}" "spectrum3847@$host" &
+      -i "$KEY" "${FORWARDS[@]}" "$PV_UI_JETSON_USER@$host" &
     tunnel_pid=$!
     for _ in $(seq 20); do
       (exec 3<>/dev/tcp/127.0.0.1/5800) 2>/dev/null && break 2
@@ -44,7 +46,7 @@ fi
 # Tests that run something on the Jetson (the fake robot) need its address.
 if [[ -z ${PV_UI_JETSON:-} ]]; then
   for host in $HOSTS; do
-    ssh -o ConnectTimeout=4 -o BatchMode=yes -i "$KEY" "spectrum3847@$host" true 2>/dev/null && { export PV_UI_JETSON=$host; break; }
+    ssh -o ConnectTimeout=4 -o BatchMode=yes -i "$KEY" "$PV_UI_JETSON_USER@$host" true 2>/dev/null && { export PV_UI_JETSON=$host; break; }
   done
 fi
 

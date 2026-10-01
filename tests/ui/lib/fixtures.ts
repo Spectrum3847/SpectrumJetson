@@ -141,8 +141,9 @@ export const test = base.extend<{ dash: Dashboard; camera: string; pipeline: Tes
     try {
       await use(pipeline);
     } finally {
-      // Back to the dashboard in a known state before cleaning up.
-      await dash.page.keyboard.press("Escape");
+      // A fresh page before cleaning up: a test that failed or timed out half way can leave a menu
+      // or dialog open, and then the delete's own clicks time out (zz-uitest left behind).
+      await dash.open();
       await removeTestPipeline(dash, request, pipeline);
     }
   }

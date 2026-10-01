@@ -13,6 +13,8 @@
 #   sudo systemctl restart photonvision
 #   (rollback: rerun 05-build-gpudetector.sh, which installs the 4143 build)
 set -euo pipefail
+# Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
+[[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 
 BOS_REPO=https://github.com/frc971/bos.git
 BOS_SHA=62e93b4   # 2026-09-07; third_party/971apriltag last changed in 1dbdf51 (2026-05-19)

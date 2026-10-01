@@ -6,12 +6,15 @@ import { spawn, type ChildProcess } from "child_process";
 
 export const JETSON = process.env.PV_UI_JETSON;
 
+/** ssh's arguments to run `command` on the Jetson (run.sh exports the user and key). */
+export function sshArgs(command: string): string[] {
+  const key = process.env.PV_UI_JETSON_KEY ?? `${process.env.HOME}/.ssh/jetson_ed25519`;
+  const user = process.env.PV_UI_JETSON_USER ?? "spectrum3847";
+  return ["-o", "BatchMode=yes", "-i", key, `${user}@${JETSON}`, command];
+}
+
 function ssh(command: string): ChildProcess {
-  return spawn(
-    "ssh",
-    ["-o", "BatchMode=yes", "-i", `${process.env.HOME}/.ssh/jetson_ed25519`, `spectrum3847@${JETSON}`, command],
-    { stdio: "ignore" }
-  );
+  return spawn("ssh", sshArgs(command), { stdio: "ignore" });
 }
 
 export interface RobotState {

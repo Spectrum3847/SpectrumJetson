@@ -9,7 +9,7 @@
 #   LIB=<path> tests an uninstalled build (default ~/build/bos-detector/libspectrumnvjpg.so,
 #   else /usr/lib/libspectrumnvjpg.so).
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit
 lib=${LIB:-$HOME/build/bos-detector/libspectrumnvjpg.so}
 [[ -f $lib ]] || lib=/usr/lib/libspectrumnvjpg.so
 [[ -f $lib ]] || { echo "No libspectrumnvjpg.so; build it with scripts/jetson/07-build-bos-detector.sh" >&2; exit 1; }

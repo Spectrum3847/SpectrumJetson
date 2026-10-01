@@ -15,9 +15,10 @@ set -euo pipefail
 JETSON=${JETSON:-192.168.55.1}
 DEST=${DEST:-$HOME/rewind}
 KEY=${KEY:-$HOME/.ssh/jetson_ed25519}
+JETSON_USER=${JETSON_USER:-spectrum3847}
 REMOTE=/opt/photonvision/rewind/sessions
 HERE=$(cd "$(dirname "$0")" && pwd)
-SSH=(ssh -i "$KEY" -o ConnectTimeout=5 "spectrum3847@$JETSON")
+SSH=(ssh -i "$KEY" -o ConnectTimeout=5 "$JETSON_USER@$JETSON")
 
 mp4=() all=0 list=0 want=()
 for a in "$@"; do
@@ -50,7 +51,7 @@ fi
 mkdir -p "$DEST"
 for s in "${pick[@]}"; do
   echo "==> $s"
-  rsync -a --info=progress2 -e "ssh -i $KEY" "spectrum3847@$JETSON:$REMOTE/$s" "$DEST/"
+  rsync -a --info=progress2 -e "ssh -i $KEY" "$JETSON_USER@$JETSON:$REMOTE/$s" "$DEST/"
   python3 "$HERE/rewind-export.py" "$DEST/$s" "${mp4[@]}"
 done
 echo

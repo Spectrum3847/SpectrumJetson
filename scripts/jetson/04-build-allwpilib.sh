@@ -8,6 +8,8 @@
 # allwpilib main does NOT work: wpi/jni_util.h has moved there.
 # Usage: 04-build-allwpilib.sh [tag]
 set -euo pipefail
+# Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
+[[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 
 TAG=${1:-v2026.2.1}
 SRC=$HOME/build/allwpilib-$TAG

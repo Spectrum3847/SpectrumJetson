@@ -45,6 +45,8 @@ test("every control round-trips: page, backend and a second dashboard", async ({
   camera,
   pipeline
 }) => {
+  // About 30 controls, each up to six 4 s checks: 2.6 min over the Jetson's Wi-Fi (USB is faster).
+  test.setTimeout(6 * 60_000);
   const rows: Row[] = [];
   const other = await secondDashboard(browser, dash.page);
   await other.selectCamera(camera);

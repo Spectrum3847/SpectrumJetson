@@ -12,6 +12,7 @@ import argparse
 import collections
 import json
 import math
+import os
 import statistics
 import subprocess
 import urllib.error
@@ -20,8 +21,9 @@ import urllib.request
 
 def camera_names(host):
     """Unique names of configured cameras, via the Jetson's config DB over SSH."""
-    cmd = ["ssh", "-i", f"{__import__('os').path.expanduser('~')}/.ssh/jetson_ed25519",
-           "-o", "BatchMode=yes", f"spectrum3847@{host}",
+    key = os.environ.get("KEY", os.path.expanduser("~/.ssh/jetson_ed25519"))
+    user = os.environ.get("JETSON_USER", "spectrum3847")
+    cmd = ["ssh", "-i", key, "-o", "BatchMode=yes", f"{user}@{host}",
            "sqlite3 /opt/photonvision/photonvision_config/photon.sqlite "
            "'select unique_name from cameras;'"]
     out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout

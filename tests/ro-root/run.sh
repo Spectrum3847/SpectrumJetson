@@ -6,7 +6,8 @@
 set -uo pipefail
 JETSON=${JETSON:-192.168.55.1}
 KEY=${KEY:-$HOME/.ssh/jetson_ed25519}
-SSH=(ssh -i "$KEY" -o ConnectTimeout=5 -o BatchMode=yes "spectrum3847@$JETSON")
+JETSON_USER=${JETSON_USER:-spectrum3847}
+SSH=(ssh -i "$KEY" -o ConnectTimeout=5 -o BatchMode=yes "$JETSON_USER@$JETSON")
 RO=SpectrumJetson/scripts/jetson/ro-root.sh
 fails=0
 check() { if eval "$2"; then echo "  PASS  $1"; else echo "  FAIL  $1"; fails=$((fails + 1)); fi; }

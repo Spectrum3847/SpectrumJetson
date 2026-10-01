@@ -15,7 +15,6 @@ import csv
 import fcntl
 import os
 import struct
-import sys
 import threading
 import time
 
@@ -85,12 +84,9 @@ def play(device, frames, stop, stats, name):
     try:
         setup(fd, width, height, fps, max_size)
         print(f"{name} -> {device}: {len(frames)} frames, {width}x{height}, {fps:.0f} fps, looping", flush=True)
-        start = time.monotonic()
-        played = 0
         while not stop.is_set():
             base_us = frames[0][1]
-            loop_start = start + played * 0  # timing is per loop below
-            t0 = time.monotonic()
+            t0 = time.monotonic()  # each loop is timed from its own start
             for jpeg, us, _, _ in frames:
                 if stop.is_set():
                     break
@@ -102,7 +98,6 @@ def play(device, frames, stop, stats, name):
                 stats[name] = stats.get(name, 0) + 1
             # The next loop starts one frame period after this loop's last frame.
             time.sleep(period_us / 1e6)
-            played += 1
     finally:
         os.close(fd)
 

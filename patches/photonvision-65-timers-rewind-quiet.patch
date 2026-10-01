@@ -1,0 +1,494 @@
+diff --git a/photon-core/src/main/java/org/photonvision/common/configuration/ConfigManager.java b/photon-core/src/main/java/org/photonvision/common/configuration/ConfigManager.java
+index 4883f230..03851a13 100644
+--- a/photon-core/src/main/java/org/photonvision/common/configuration/ConfigManager.java
++++ b/photon-core/src/main/java/org/photonvision/common/configuration/ConfigManager.java
+@@ -329,7 +329,9 @@ public class ConfigManager {
+ 
+     public void requestSave() {
+         logger.trace("Requesting save...");
+-        saveRequestTimestamp = System.currentTimeMillis();
++        // SpectrumJetson (photonvision-65): monotonic. On the date, a jump back (RobotClockSync)
++        // held a settings change unsaved for as long as the jump.
++        saveRequestTimestamp = System.nanoTime() / 1_000_000;
+     }
+ 
+     public void unloadCameraConfigs() {
+@@ -350,7 +352,7 @@ public class ConfigManager {
+         // Only save if 1 second has past since the request was made
+         while (!Thread.currentThread().isInterrupted()) {
+             if (saveRequestTimestamp > 0
+-                    && (System.currentTimeMillis() - saveRequestTimestamp) > 1000L
++                    && (System.nanoTime() / 1_000_000 - saveRequestTimestamp) > 1000L
+                     && allowWriteTask) {
+                 saveRequestTimestamp = -1;
+                 logger.debug("Saving to disk...");
+diff --git a/photon-core/src/main/java/org/photonvision/common/configuration/SettingsSnapshots.java b/photon-core/src/main/java/org/photonvision/common/configuration/SettingsSnapshots.java
+index 9523daba..3c0ce7b7 100644
+--- a/photon-core/src/main/java/org/photonvision/common/configuration/SettingsSnapshots.java
++++ b/photon-core/src/main/java/org/photonvision/common/configuration/SettingsSnapshots.java
+@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
+ import com.fasterxml.jackson.databind.ObjectMapper;
+ import java.io.File;
+ import java.io.IOException;
++import java.io.OutputStream;
+ import java.nio.file.Files;
+ import java.nio.file.Path;
+ import java.nio.file.StandardCopyOption;
+@@ -32,11 +33,12 @@ import java.util.ArrayList;
+ import java.util.Comparator;
+ import java.util.List;
+ import java.util.stream.Stream;
++import java.util.zip.ZipEntry;
++import java.util.zip.ZipOutputStream;
+ import org.photonvision.PhotonVersion;
+ import org.photonvision.common.logging.LogGroup;
+ import org.photonvision.common.logging.Logger;
+ import org.photonvision.common.util.ShellExec;
+-import org.zeroturnaround.zip.ZipUtil;
+ 
+ /**
+  * SpectrumJetson (photonvision-53): named settings snapshots, kept on the Jetson in
+@@ -163,11 +165,21 @@ public final class SettingsSnapshots {
+         logger.info("Settings snapshot " + id + " deleted");
+     }
+ 
+-    public static File zip(String id) throws IOException {
++    /**
++     * Writes snapshot {@code id} as a zip to {@code os}. photonvision-65: streamed. It used to be built
++     * in /tmp, which on the Jetson is the system partition, and never deleted.
++     */
++    public static void writeZip(String id, OutputStream os) throws IOException {
+         Path dir = dirOf(id);
+-        File out = Path.of(System.getProperty("java.io.tmpdir"), "photonvision-snapshot-" + id + ".zip").toFile();
+-        ZipUtil.pack(dir.toFile(), out);
+-        return out;
++        var zos = new ZipOutputStream(os);
++        try (Stream<Path> st = Files.walk(dir)) {
++            for (Path f : (Iterable<Path>) st.filter(Files::isRegularFile).sorted()::iterator) {
++                zos.putNextEntry(new ZipEntry(dir.relativize(f).toString()));
++                Files.copy(f, zos);
++                zos.closeEntry();
++            }
++        }
++        zos.finish();
+     }
+ 
+     /**
+diff --git a/photon-core/src/main/java/org/photonvision/common/dataflow/websocket/UIDataPublisher.java b/photon-core/src/main/java/org/photonvision/common/dataflow/websocket/UIDataPublisher.java
+index 76ce2999..ee2a944c 100644
+--- a/photon-core/src/main/java/org/photonvision/common/dataflow/websocket/UIDataPublisher.java
++++ b/photon-core/src/main/java/org/photonvision/common/dataflow/websocket/UIDataPublisher.java
+@@ -41,7 +41,7 @@ public class UIDataPublisher implements CVPipelineResultConsumer {
+ 
+     @Override
+     public void accept(CVPipelineResult result) {
+-        long now = System.currentTimeMillis();
++        long now = System.nanoTime() / 1_000_000; // SpectrumJetson (photonvision-65): monotonic
+ 
+         // only update the UI at 10hz
+         if (lastUIResultUpdateTime + 1000.0 / 10.0 > now) return;
+diff --git a/photon-core/src/main/java/org/photonvision/common/hardware/metrics/SystemMonitor.java b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/SystemMonitor.java
+index cbe07144..44f94326 100644
+--- a/photon-core/src/main/java/org/photonvision/common/hardware/metrics/SystemMonitor.java
++++ b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/SystemMonitor.java
+@@ -72,6 +72,8 @@ public class SystemMonitor {
+     private double totalMemory = -1.0;
+ 
+     private double lastCpuLoad = 0;
++    // SpectrumJetson (photonvision-65): these two are monotonic ms (System.nanoTime): the date can
++    // jump (RobotClockSync).
+     private long lastCpuUpdate = 0;
+     private long[] oldTicks;
+ 
+@@ -245,7 +247,7 @@ public class SystemMonitor {
+     private void resetNetworkTraffic() {
+         lastBytesSent = monitoredIFace.getBytesSent();
+         lastBytesRecv = monitoredIFace.getBytesRecv();
+-        lastTrafficUpdate = System.currentTimeMillis();
++        lastTrafficUpdate = System.nanoTime() / 1_000_000;
+     }
+ 
+     private NetworkIF selectNetworkIfByName(String name) {
+@@ -419,7 +421,7 @@ public class SystemMonitor {
+      * @return load on the cpu in %.
+      */
+     public synchronized double getCpuUsage() {
+-        long now = System.currentTimeMillis();
++        long now = System.nanoTime() / 1_000_000;
+         double dTime = (now - lastCpuUpdate) / 1000.0;
+         if (dTime > minimumDeltaTime) {
+             var newTicks = cpu.getSystemCpuLoadTicks();
+@@ -509,7 +511,7 @@ public class SystemMonitor {
+         if (iFace == null) {
+             return new NetworkTraffic(-1, -1);
+         }
+-        long now = System.currentTimeMillis();
++        long now = System.nanoTime() / 1_000_000;
+         double dTime = (now - lastTrafficUpdate) / 1000.0;
+         if (dTime > minimumDeltaTime) {
+             // only update if it's been long enough since the last update
+diff --git a/photon-core/src/main/java/org/photonvision/common/networking/NetworkUtils.java b/photon-core/src/main/java/org/photonvision/common/networking/NetworkUtils.java
+index 584c4be5..d5f89d1e 100644
+--- a/photon-core/src/main/java/org/photonvision/common/networking/NetworkUtils.java
++++ b/photon-core/src/main/java/org/photonvision/common/networking/NetworkUtils.java
+@@ -81,12 +81,13 @@ public class NetworkUtils {
+     }
+ 
+     private static List<NMDeviceInfo> allInterfaces = null;
++    // SpectrumJetson (photonvision-65): monotonic ms (System.nanoTime); the date can jump.
+     private static long lastReadTimestamp = 0;
+     private static long timeout = 5000; // milliseconds
+     private static long retry = 500; // milliseconds
+ 
+     public static synchronized List<NMDeviceInfo> getAllInterfaces() {
+-        var start = System.currentTimeMillis();
++        var start = System.nanoTime() / 1_000_000;
+         if (start - lastReadTimestamp < 5000) {
+             return allInterfaces;
+         }
+@@ -104,7 +105,7 @@ public class NetworkUtils {
+                             "nmcli -t -f GENERAL.CONNECTION,GENERAL.DEVICE,GENERAL.TYPE device show", true, true);
+                     // nmcli returns an error of 8 if NetworkManager isn't running
+                     networkManagerRunning = shell.getExitCode() != 8;
+-                    tryagain = System.currentTimeMillis() - start < timeout;
++                    tryagain = System.nanoTime() / 1_000_000 - start < timeout;
+                     if (!networkManagerRunning && tryagain) {
+                         logger.debug("NetworkManager not running, retrying in " + (retry) + " milliseconds");
+                         Thread.sleep(retry);
+@@ -145,7 +146,7 @@ public class NetworkUtils {
+             }
+             allInterfaces = ret;
+         }
+-        lastReadTimestamp = System.currentTimeMillis();
++        lastReadTimestamp = System.nanoTime() / 1_000_000;
+ 
+         return ret;
+     }
+diff --git a/photon-core/src/main/java/org/photonvision/common/util/RobotClockSync.java b/photon-core/src/main/java/org/photonvision/common/util/RobotClockSync.java
+index c34b9f79..cfb99190 100644
+--- a/photon-core/src/main/java/org/photonvision/common/util/RobotClockSync.java
++++ b/photon-core/src/main/java/org/photonvision/common/util/RobotClockSync.java
+@@ -35,7 +35,9 @@ import org.photonvision.common.logging.Logger;
+  *
+  * <p>This only fixes human-facing times: Rewind recording names, the system log, file dates.
+  * Vision doesn't use the date: frame timestamps, PhotonVision's time sync with the robot and
+- * Rewind's frame times all use a monotonic clock that setting the date doesn't touch.
++ * Rewind's frame times all use a monotonic clock that setting the date doesn't touch. So do the
++ * timers (frame-rate limits, quiet mode, settings saves: photonvision-65). The jump here happens
++ * at every boot at an event, usually forward by about as long as the Jetson was off.
+  *
+  * <p>Checked once a second. The clock is set when it's more than {@link #MAX_ERROR_MS} off, from
+  * a value received within the last few seconds that looks like a real date, and only if the Jetson
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
+index 7dbdb8db..a94514a7 100644
+--- a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
++++ b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
+@@ -229,13 +229,18 @@ public class RewindManager {
+         lastDiskCheckUs = 0; // re-check the quota now
+     }
+ 
+-    public synchronized boolean deleteSession(String name) {
+-        if (current != null && current.name().equals(name)) return false;
++    /** Deletes a recording: null when it's gone, else why not. */
++    public synchronized String deleteSession(String name) {
++        if (current != null && current.name().equals(name)) return "it's still recording";
+         Path p = SESSIONS.resolve(safeName(name));
+-        if (!p.getParent().equals(SESSIONS) || !Files.isDirectory(p)) return false;
+-        deleteTree(p);
++        if (!p.getParent().equals(SESSIONS) || !Files.isDirectory(p)) return "no such recording";
++        // photonvision-65: deleting in quiet mode (the partition read-only after a match) used to
++        // fail file by file in silence and report success.
++        if (org.photonvision.vision.processes.QuietMode.quiet()) {
++            return "the SSD is in quiet mode after the match (read-only); it's writable again at the next enable";
++        }
+         lastDiskCheckUs = 0;
+-        return true;
++        return deleteTree(p) ? null : "some files couldn't be deleted (see the log)";
+     }
+ 
+     /**
+@@ -394,6 +399,18 @@ public class RewindManager {
+         } catch (Exception e) {
+             n = 1;
+         }
++        // photonvision-65: never below the newest recording on disk. This file is on the scratch
++        // partition, which takes power cuts; lost or rolled back, the numbering started again, and
++        // since name order is age order (listSessions), the quota then deleted the newest first.
++        for (Path p : listSessions()) {
++            String f = p.getFileName().toString();
++            int end = f.indexOf('_');
++            try {
++                n = Math.max(n, Integer.parseInt(end > 0 ? f.substring(0, end) : f) + 1);
++            } catch (NumberFormatException e) {
++                // not one of ours
++            }
++        }
+         try {
+             Files.writeString(SEQ_FILE, Integer.toString(n + 1));
+         } catch (IOException e) {
+@@ -433,8 +450,7 @@ public class RewindManager {
+                             + " GB, free "
+                             + freeBytes() / 1_000_000_000
+                             + " GB)");
+-            deleteTree(p);
+-            total -= sizes.get(p);
++            if (deleteTree(p)) total -= sizes.get(p);
+         }
+         sessionsBytes = total;
+         sessionCount = listSessions().size();
+@@ -460,12 +476,18 @@ public class RewindManager {
+         }
+     }
+ 
+-    private static void deleteTree(Path p) {
++    /** True when p is gone afterwards. */
++    private static boolean deleteTree(Path p) {
+         try (Stream<Path> st = Files.walk(p)) {
+             st.sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(File::delete);
+         } catch (IOException e) {
+             logger.error("Rewind: cannot delete " + p, e);
+         }
++        if (Files.exists(p)) {
++            logger.error("Rewind: couldn't delete all of " + p);
++            return false;
++        }
++        return true;
+     }
+ 
+     // ---- status for the web UI (GET /api/rewind)
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/IdleMode.java b/photon-core/src/main/java/org/photonvision/vision/processes/IdleMode.java
+index 958624cf..e88df2b7 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/IdleMode.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/IdleMode.java
+@@ -164,7 +164,7 @@ public final class IdleMode {
+     private static void applyFarSearch() {
+         if (farSearchApplied) return;
+         // At most every 5 s: a missing native method throws, and this runs on every frame.
+-        long now = System.currentTimeMillis();
++        long now = System.nanoTime() / 1_000_000; // photonvision-65: monotonic, the date can jump
+         if (now < farSearchNextTryMs) return;
+         farSearchNextTryMs = now + 5000;
+         try {
+@@ -216,7 +216,7 @@ public final class IdleMode {
+     private static volatile long thermalCheckedMs = 0;
+ 
+     public static boolean thermalLimitNow() {
+-        long now = System.currentTimeMillis();
++        long now = System.nanoTime() / 1_000_000; // photonvision-65: monotonic, the date can jump
+         if (now - thermalCheckedMs > 500) {
+             thermalCheckedMs = now;
+             boolean was = thermal;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/QuietMode.java b/photon-core/src/main/java/org/photonvision/vision/processes/QuietMode.java
+index ab119c33..320ec0ed 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/QuietMode.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/QuietMode.java
+@@ -117,7 +117,7 @@ public final class QuietMode {
+                         // code starts at enable loses as little as possible. Off this thread.
+                         if (quiet && !robotSays.exists()) wake();
+                     } else if (old.m_enabled()) {
+-                        disabledSinceMs = System.currentTimeMillis();
++                        disabledSinceMs = nowMs();
+                         // The end of a match: teleop on the field, then disabled.
+                         if (!old.m_autonomous() && now.m_fmsAttached()) matchEnded = true;
+                     }
+@@ -165,7 +165,7 @@ public final class QuietMode {
+             // long field calibration recording doesn't go quiet the moment it stops. (A match that
+             // ended still goes quiet: that recording was the robot's, during the match.)
+             wasRecording = false;
+-            disabledSinceMs = System.currentTimeMillis();
++            disabledSinceMs = nowMs();
+         }
+         var ntm = NetworkTablesManager.getInstance();
+         var ds = ntm.getDriverStation();
+@@ -180,9 +180,9 @@ public final class QuietMode {
+         if (word.m_enabled()) return "";
+         var s = IdleMode.getSettings();
+         if (s.quietAfterMatch && matchEnded) return "the match ended";
+-        if (disabledSinceMs == 0) disabledSinceMs = System.currentTimeMillis();
++        if (disabledSinceMs == 0) disabledSinceMs = nowMs();
+         if (s.quietAfterDisabledSeconds > 0
+-                && System.currentTimeMillis() - disabledSinceMs >= s.quietAfterDisabledSeconds * 1000L) {
++                && nowMs() - disabledSinceMs >= s.quietAfterDisabledSeconds * 1000L) {
+             return "disabled for " + s.quietAfterDisabledSeconds + " s";
+         }
+         return "";
+@@ -192,14 +192,14 @@ public final class QuietMode {
+ 
+     private static void step() throws InterruptedException {
+         String want = wanted();
+-        if (!want.isEmpty() && !quiet && System.currentTimeMillis() >= retryAfterMs) enter(want);
+-        else if (want.isEmpty() && quiet) leave();
++        if (!want.isEmpty() && !quiet && nowMs() >= retryAfterMs) enter(want);
++        else if (want.isEmpty() && quiet && nowMs() >= leaveRetryAfterMs) leave();
+     }
+ 
+     private static void enter(String why) throws InterruptedException {
+         if (!Files.isExecutable(HELPER)) {
+             lastError = HELPER + " isn't installed (10-data-partition.sh)";
+-            retryAfterMs = System.currentTimeMillis() + 60_000;
++            retryAfterMs = nowMs() + 60_000;
+             return;
+         }
+         // Rewind stops at its next loop, and its recorder threads close their files on their next
+@@ -215,7 +215,7 @@ public final class QuietMode {
+             quiet = false;
+             reason = "";
+             lastError = out;
+-            retryAfterMs = System.currentTimeMillis() + 10_000;
++            retryAfterMs = nowMs() + 10_000;
+             logger.error("Quiet mode: couldn't make the scratch partition read-only, trying again in 10 s: " + out);
+             return;
+         }
+@@ -226,12 +226,24 @@ public final class QuietMode {
+ 
+     private static volatile long lastLeaveMs = -1;
+ 
++    private static volatile long leaveRetryAfterMs = 0;
++
+     private static void leave() {
+         long t0 = System.nanoTime();
+         String out = run("off");
+         if (out != null) {
+             lastError = out;
+-            logger.error("Quiet mode: couldn't make the scratch partition writable again: " + out);
++            // photonvision-65: still read-only? Then stay quiet (Rewind and the log file stay
++            // paused, and quietNow says so) and try again in 5 s. Leaving anyway left the partition
++            // read-only with quiet mode off: nothing tried again, and every Rewind write failed.
++            if (scratchReadOnly()) {
++                leaveRetryAfterMs = nowMs() + 5_000;
++                logger.error("Quiet mode: couldn't make the scratch partition writable again, trying again in 5 s: " + out);
++                return;
++            }
++            logger.error("Quiet mode: leaving it, but the helper failed: " + out);
++        } else {
++            lastError = "";
+         }
+         Logger.resumeFileLogging();
+         quiet = false;
+@@ -242,6 +254,17 @@ public final class QuietMode {
+         logger.info("Quiet mode off in " + lastLeaveMs + " ms: the scratch partition is writable");
+     }
+ 
++    /**
++     * photonvision-65: milliseconds on a monotonic clock, for every interval here. The date jumps
++     * when the Jetson takes the robot's (RobotClockSync). Usually forward (at an event the Jetson
++     * boots on the time it last saved), and quiet mode started about a second after the robot
++     * connected instead of after quietAfterDisabledSeconds. Back, and it didn't start while
++     * disabled for as long as the jump, and a failed attempt waited that much longer to retry.
++     */
++    private static long nowMs() {
++        return System.nanoTime() / 1_000_000;
++    }
++
+     private static boolean scratchReadOnly() {
+         try {
+             return Files.isDirectory(SCRATCH) && Files.getFileStore(SCRATCH).isReadOnly();
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
+index c268fd86..dd466e1d 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
+@@ -146,11 +146,13 @@ public class VisionRunner {
+     /**
+      * Waits until the next time this VisionRunner should run its pipeline, based on current FPS limit
+      */
+-    private void waitUntilNextTick(long start) {
++    private void waitUntilNextTick(long startNanos) {
+         int fpsLimit = fpsLimitSupplier.get();
+ 
+         if (fpsLimit > 0) {
+-            long sleepTime = (long) (1000 / fpsLimit - (System.currentTimeMillis() - start));
++            // SpectrumJetson (photonvision-65): a monotonic clock. The date can jump when the Jetson
++            // takes the robot's (RobotClockSync), and a jump back here slept this camera for as long.
++            long sleepTime = 1000 / fpsLimit - (System.nanoTime() - startNanos) / 1_000_000;
+ 
+             if (sleepTime > 0) {
+                 try {
+@@ -192,7 +194,7 @@ public class VisionRunner {
+         }
+ 
+         while (!Thread.interrupted()) {
+-            long start = System.currentTimeMillis();
++            long start = System.nanoTime();
+             // SpectrumJetson (photonvision-63): nothing may end this loop but an interrupt. An exception
+             // outside pipeline.run (a setting change, the frame grab, cscore reconnecting a camera, a
+             // native library that failed to load) used to end the thread: that camera went dark until
+@@ -302,7 +304,7 @@ public class VisionRunner {
+             } catch (VirtualMachineError e) {
+                 throw e;
+             } catch (Throwable t) {
+-                long now = System.currentTimeMillis();
++                long now = System.nanoTime() / 1_000_000;
+                 if (now - lastLoopErrorLogMs > 5000) {
+                     lastLoopErrorLogMs = now;
+                     logger.error("Vision loop error (the camera keeps going)", t);
+@@ -321,5 +323,5 @@ public class VisionRunner {
+         }
+     }
+ 
+-    private long lastLoopErrorLogMs = 0;
++    private long lastLoopErrorLogMs = 0; // monotonic (System.nanoTime) ms
+ }
+\ No newline at end of file
+diff --git a/photon-server/src/main/java/org/photonvision/server/RequestHandler.java b/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
+index eaddfcde..c11bbb55 100644
+--- a/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
++++ b/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
+@@ -675,12 +675,13 @@ public class RequestHandler {
+     public static void onHealthCheckRequest(Context ctx) {
+         Map<String, Object> result;
+         synchronized (healthLock) {
+-            if (lastHealth != null && System.currentTimeMillis() - lastHealthMs < 3000) {
++            // photonvision-65: monotonic (the date can jump: RobotClockSync).
++            if (lastHealth != null && System.nanoTime() / 1_000_000 - lastHealthMs < 3000) {
+                 result = lastHealth;
+             } else {
+                 result = runHealthCheck();
+                 lastHealth = result;
+-                lastHealthMs = System.currentTimeMillis();
++                lastHealthMs = System.nanoTime() / 1_000_000;
+             }
+         }
+         try {
+@@ -697,7 +698,7 @@ public class RequestHandler {
+         var sections = new ArrayList<Map<String, Object>>();
+         var out = new HashMap<String, Object>();
+         String verdict = "";
+-        long start = System.currentTimeMillis();
++        long startNanos = System.nanoTime();
+         var raw = new StringBuilder();
+         try {
+             if (!new java.io.File(script).exists()) throw new IOException(script + " not found (run 06-install-fork-jar.sh)");
+@@ -727,7 +728,7 @@ public class RequestHandler {
+         }
+         out.put("verdict", verdict);
+         out.put("sections", sections);
+-        out.put("seconds", (System.currentTimeMillis() - start) / 1000.0);
++        out.put("seconds", (System.nanoTime() - startNanos) / 1e9);
+         out.put("ranAt", System.currentTimeMillis());
+         out.put("raw", raw.toString());
+         return out;
+@@ -783,10 +784,9 @@ public class RequestHandler {
+     public static void onSnapshotDownloadRequest(Context ctx) {
+         try {
+             String id = ctx.queryParam("id");
+-            var zip = SettingsSnapshots.zip(id);
+             ctx.contentType("application/zip");
+             ctx.header("Content-Disposition", "attachment; filename=\"photonvision-snapshot-" + id + ".zip\"");
+-            ctx.result(new FileInputStream(zip));
++            SettingsSnapshots.writeZip(id, ctx.outputStream());
+         } catch (IOException e) {
+             ctx.status(400);
+             ctx.result("Couldn't download: " + e.getMessage());
+@@ -913,9 +913,10 @@ public class RequestHandler {
+                 rm.updateSettings(req.fps(), req.quotaGB(), req.minFreeGB());
+             }
+             if (req.manual() != null) rm.setManual(req.manual());
+-            if (req.delete() != null && !rm.deleteSession(req.delete())) {
++            String why = req.delete() != null ? rm.deleteSession(req.delete()) : null;
++            if (why != null) {
+                 ctx.status(400);
+-                ctx.result("Cannot delete that session (unknown, or still recording)");
++                ctx.result("Couldn't delete " + req.delete() + ": " + why);
+                 return;
+             }
+             ctx.status(200);

@@ -42,6 +42,8 @@
 #
 # Usage: [FAN=quiet|full|off] 09-robot-tuning.sh [--undo]   (FAN defaults to quiet)
 set -euo pipefail
+# Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
+[[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 
 APT_CONF=/etc/apt/apt.conf.d/99spectrum-no-auto-updates
 CLOCKS_UNIT=/etc/systemd/system/jetson-clocks.service
