@@ -70,6 +70,7 @@
   <div class="prose short">
     <p>Static shocks, loose cables, brownouts, power cuts and software bugs all happen on a robot, so every failure needs something that notices it and a fast path back. A camera that's unplugged and plugged back in is detecting again in about a second. A GPU error skips one frame, and if the GPU stays broken, PhotonVision exits and <span class="term">systemd</span> restarts it in a few seconds.</p>
     <p>The last line of defense is a <span class="term">watchdog</span>: a hardware timer that systemd "pets" regularly. If Linux freezes and the petting stops for 30 s, the board resets itself and is finding tags again about 20 s later.</p>
+    <p>Power cuts are the sneaky one: 21 of them killed our first SSD. Now the Jetson stops writing to its SSD after every match.</p>
   </div>
 
 
@@ -91,7 +92,7 @@
       <div class="stat"><b>~20<small>s</small></b><span>from power-on to detecting tags (the boot takes 16.5 s: <a href="#linux">chapter 6</a>)</span></div>
       <div class="stat"><b>~1<small>s</small></b><span>for an unplugged camera to be detecting again after it's plugged back in</span></div>
       <div class="stat"><b>8<small>s</small></b><span>worst-case vision outage after the GPU breaks</span></div>
-      <div class="stat"><b>1.4<small>s</small></b><span>of video lost when we pulled the power mid-recording, with no filesystem errors</span></div>
+      <div class="stat"><b>21</b><span>power cuts our first SSD took before it died, while our power-cut test said all was well</span></div>
     </div>
   </div>
 
@@ -198,7 +199,7 @@
         <li>The system log is kept on the SSD across power cuts. It used to live only in RAM, so a brownout erased its own evidence.</li>
         <li>Rewind forces its video files to the SSD every 2 s.</li>
       </ul>
-      <div class="callout spectrum"><h5>The power-cut test</h5><p>We pulled the plug 21.4 s into a bench recording. After reboot: <strong>0 filesystem errors</strong>, the log survived up to 3 s before the cut, PhotonVision came back healthy with both calibrations, and the recording kept 20.0 of 21.4 s. <strong>1.4 s lost</strong>, and every saved frame was a complete JPEG (<code>tests/power-cut/run.sh</code>).</p></div>
+      <div class="callout spectrum"><h5>The power-cut test</h5><p>We pulled the plug 21.4 s into a bench recording. After reboot: <strong>0 filesystem errors</strong>, the log survived up to 3 s before the cut, PhotonVision came back healthy with both calibrations, and the recording kept 20.0 of 21.4 s. <strong>1.4 s lost</strong>, and every saved frame was a complete JPEG (<code>tests/power-cut/run.sh</code>). So we called power cuts safe. We were wrong.</p></div>
     </div>
     <div>
       <div class="stats two" style="margin-top:0">
@@ -208,6 +209,25 @@
         <div class="stat"><b>60<small>s</small></b><span>it keeps recording if the robot disconnects mid-match, so you see what happened</span></div>
       </div>
     </div>
+  </div>
+
+  <div class="callout pitfall full"><h5>Our first SSD died from power cuts</h5><p>On Sept 30, 2026, the Jetson stopped booting: Linux couldn't read its filesystem's journal ("critical medium error"). The drive's own health report told the story. It was an <strong>Inland TN320</strong>, a budget drive with no DRAM cache and no power-loss protection: 15 hours of use, 22 power cycles, <strong>21 of them unsafe</strong> (power cut, no shutdown), and <strong>285 media errors</strong>, areas of flash it could no longer read. Its wear was 0%.</p><p>The journal keeps a filesystem consistent through a cut, but only if the drive keeps what it already stored. This one didn't. No filesystem can protect against a drive that corrupts its own flash. Our test checked that the Jetson booted again, not the drive's error count, so it missed the damage building up.</p></div>
+  <div class="callout idea full"><h5>Lesson</h5><p>When a test says "it survived", <strong>check what the hardware itself reports too.</strong></p></div>
+
+  <p class="prose full">So the SSD is now split three ways, and only one part is written all the time:</p>
+  <div class="table-wrap full">
+    <table class="data">
+      <tr><th>Part</th><th>Holds</th><th>Written</th><th>If a cut damages it</th></tr>
+      <tr><td>System, 64 GB</td><td>Ubuntu, CUDA, PhotonVision's program</td><td>Only by updates. With <code>ro-root.sh on</code> it's read-only under a RAM layer (NVIDIA's own overlay): anything written to it is gone at the next boot.</td><td>It isn't being written, so a cut can't damage it.</td></tr>
+      <tr><td>Settings, 2 GB</td><td>Pipelines, calibrations, field calibration, snapshots</td><td>Only when someone changes a setting, straight to the SSD.</td><td>The Jetson runs the match on a last-good copy kept on the system part (<code>--commit-settings</code>). Match Ready says so.</td></tr>
+      <tr><td>Scratch, the rest</td><td>Rewind recordings, PhotonVision's logs, the system log</td><td>All the time</td><td>The Jetson still boots and runs. Recording pauses and logs go to RAM. Nothing is deleted.</td></tr>
+    </table>
+  </div>
+
+  <div class="cards full">
+    <div class="card"><div class="icon">🤫</div><h4>Quiet after the match</h4><p>A power cut only damages an SSD while it's being written, and the robot is switched off a few minutes after every match. So when a match ends, or after 60 s disabled, the Jetson stops writing: Rewind stops, logs move to RAM, scratch goes read-only. The cameras keep finding tags. <strong>Any enable ends it</strong>: writable again about 80 ms later, and nothing on the match path waits on the SSD. A recording someone asks for always wins.</p><span class="chip">photonvision-56</span></div>
+    <div class="card"><div class="icon">🧪</div><h4>Broken on purpose</h4><p>We destroyed each data part's superblock (the filesystem's table of contents). Both times the Jetson booted and PhotonVision served. With scratch gone, logs and Rewind went to RAM. With settings gone, it ran on the saved copy, with identical settings. Still to test: real power cuts on this layout, on a healthy SSD.</p><span class="chip">tests/storage-fallback</span></div>
+    <div class="card"><div class="icon">💽</div><h4>Choosing an SSD</h4><p>Use a known brand with a DRAM cache, or better an industrial drive with power-loss protection. Avoid DRAM-less budget drives. <code>health-check.sh</code> reports the drive's media errors and unsafe shutdowns: any media error means replace it.</p><span class="chip">health-check.sh</span></div>
   </div>
 
   <figure class="photo reveal full" style="margin:10px 0 40px"><img src="assets/from-jetson/screenshots/settings-rewind.webp" alt="PhotonVision Settings, Rewind card: not recording, Record now switch, 5 recordings using 0.1 GB of 100 GB allowed, 214 GB free, saving 30 frames per second per camera" loading="lazy"><figcaption>From our Jetson, Sept 25, 2026: the Rewind card in PhotonVision's Settings. Five bench recordings, 0.1 GB of the 100 GB allowed, 30 frames/s per camera. Recording 0007 is where the frame in the next chapter's "follow one frame" comes from.</figcaption></figure>
@@ -233,13 +253,15 @@
   <h3 class="full">Before the event</h3>
   <p class="prose full">From our checklist in the README. Done items are tested on the bench; the rest happens on the robot.</p>
   <ul class="check full">
-    <li class="done">Fan at full speed from boot, 30 s hardware watchdog, reboot on kernel panic, PhotonVision always restarted</li>
+    <li class="done">Fan on NVIDIA's quiet profile from boot (775 rpm at 43 °C on the bench), 30 s hardware watchdog, reboot on kernel panic, PhotonVision always restarted</li>
     <li class="done">Camera unplug test: detecting again ~1 s after it's plugged back in</li>
-    <li class="done">Power-cut test: no filesystem errors, 1.4 s of video lost</li>
+    <li class="done">Power-cut test: no filesystem errors, 1.4 s of video lost. <strong>But</strong> after 21 cuts the SSD itself failed</li>
+    <li class="done">SSD split three ways, read-only system, quiet mode after a match; each data part's loss tested</li>
     <li class="done">Reboot test: boot 57 s → 16.5 s, first detection ~20 s after power-on</li>
     <li class="done">Static IP 10.85.15.15; Bluetooth off</li>
     <li class="done">Stuck-camera recovery, USB controller watchdog, log flood fixed</li>
     <li class="done">Full backup image of the SSD</li>
+    <li class="todo">Power-cut test on the split SSD, checking the drive's media errors after every cut</li>
     <li class="todo">Test on the robot network with the SystemCore, including pulling the Ethernet cable for 5 s mid-test</li>
     <li class="todo">Hot glue the USB connectors, add strain relief, label cables and ports</li>
     <li class="todo">Lock each lens after focusing, then recalibrate</li>
@@ -263,7 +285,7 @@
     <ul>
       <li>Plan for failure: every fault needs something that notices it and a measured path back.</li>
       <li>Layers of watchdogs: stuck-camera recovery (3 s, then a USB reset), the GPU check (1 s, then a clean restart, ~8 s total), systemd restarting PhotonVision, a 30 s hardware watchdog, reboot 3 s after a kernel panic.</li>
-      <li>Power cuts are normal. We tested by pulling the plug mid-recording: no filesystem errors, 1.4 s of video lost.</li>
+      <li>Power cuts are normal, and 21 of them killed our first SSD while our test said all was well. Check what the hardware itself reports. Now the SSD is split, the system part is read-only, and the Jetson stops writing after each match.</li>
       <li>Health is visible before (<code>health-check.sh</code>), during (NetworkTables telemetry) and after a match (settings in the log, Rewind video).</li>
       <li>Some problems aren't solved yet. Write them down, and tell the pit crew exactly what to do.</li>
     </ul>

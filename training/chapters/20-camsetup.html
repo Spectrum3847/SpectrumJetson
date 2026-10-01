@@ -268,11 +268,24 @@
       <ul class="cs-do">
         <li>Follow the <b>Tuning guide</b> on the camera's Input tab: what to set, in order, with our values. Each control's tooltip starts with its recommended value.</li>
         <li>Hold a tag at your far distance. Watch its decision margin in the Targets tab. It should sit well above the cutoff.</li>
+        <li>Hold a tag up close (24 px or bigger) and read the tag contrast line above the camera controls on the Input tab, e.g. "white 205, black 38 (contrast 167), 0% clipped: good". If it doesn't end in <b>good</b>, it says what to change.</li>
         <li>At an event, run <code>tests/flicker-check/run.sh</code> under the real lights. If frames pulse by several percent, go to exposure 83 (8.3 ms).</li>
       </ul>
       <p class="full">At an event, the <b>Field Calibration</b> page can tune each camera under the field's lights: turn the robot so that camera faces tags near and far, press <b>Tune</b>, then <b>Apply recommended</b>. It picks the shortest exposure that still finds every tag.</p>
+      <p class="full">There's no <b>Camera Gain</b> slider: our cameras have no gain control, so PhotonVision hides it (<code>photonvision-54</code>). Contrast, Gamma, Sharpness and Backlight Compensation keep the value you set (before <code>photonvision-39</code> their sliders snapped back).</p>
+      <details class="deep">
+        <summary>Masks: ignore part of the picture</summary>
+        <div>
+          <p>If part of a camera's view can never hold a tag (ceiling lights, the truss), mask it out (<code>photonvision-40</code>, <code>bos-07</code>). Facing the shop's ceiling lights cost about 10 points of GPU and 0.6 ms before any tag was in view.</p>
+          <ul>
+            <li>Open the <b>Mask</b> tab and pick the mode: Off, Ignore inside the boxes, or Search only inside the boxes.</li>
+            <li>Turn on <b>Draw on the stream</b>. Drag on empty space to draw a box, drag a box to move it, drag a corner to resize it, and press Delete to remove the selected box.</li>
+            <li>The mask is saved with the pipeline and shown faintly on both streams while it's on. Nothing is found in an ignored area, so leave room around where tags can be.</li>
+          </ul>
+        </div>
+      </details>
       <div class="cs-meta">
-        <span class="cs-pass"><b>Pass:</b> tags found at your far distance without flickering in and out; still about 120 fps.</span>
+        <span class="cs-pass"><b>Pass:</b> tags found at your far distance without flickering in and out; tag contrast says good; still about 120 fps.</span>
         <a class="cs-why" href="#settings">Why: chapter 4</a>
       </div>
     </div>
@@ -360,13 +373,18 @@
         <li><b>Distance:</b> tags found, steadily, at the nearest and farthest distances you care about.</li>
         <li><b>Pose:</b> put the robot on a spot you measured with a tape. Each camera's pose should land where the robot really is, and all cameras should agree with each other. Turn the robot: the pose should turn with it, not jump.</li>
         <li><b>Field layout:</b> the Settings page says <b>2026 Rebuilt AndyMark</b>, the same layout robot code uses. The excluded-tags box is empty, unless a tag at the event is mounted wrong.</li>
+        <li><b>Snapshot:</b> on the Settings page, <b>Settings snapshots</b>, save one with a name ("tuned exposure"). It holds every camera's pipelines, settings and calibrations. <b>Restore</b> brings them all back and restarts PhotonVision.</li>
         <li><b>Back up:</b> Settings → Device Control → <b>Export Settings</b> saves every camera's settings and calibration in one file. Keep it on the team drive.</li>
       </ul>
+      <div class="callout pitfall">
+        <h5>Every change saves right away</h5>
+        <p>A change in the dashboard is saved within about a second. There's no undo and no "unsaved changes" warning. So before experimenting, duplicate the pipeline (☰ next to its name) and try things on the copy. Two open dashboards stay in sync (<code>photonvision-41</code>), but only one person should tune a camera at a time.</p>
+      </div>
       <div class="cs-meta">
-        <span class="cs-pass"><b>Pass:</b> ~120 fps, tags at every distance you need, poses where the robot really is, settings exported.</span>
+        <span class="cs-pass"><b>Pass:</b> ~120 fps, tags at every distance you need, poses where the robot really is, a snapshot saved, settings exported.</span>
         <a class="cs-why" href="#pose">From corners to pose: chapter 12</a>
       </div>
-      <p class="full" style="margin-top:14px">For the whole Jetson, <code>scripts/host/04-backup-ssd.sh</code> images the SSD (about 8.7 GB, 7 minutes) with PhotonVision's settings inside. Keep that on the team drive too, never on GitHub: it holds the Wi-Fi password and SSH keys. And if cameras are stuck after a USB glitch, power-cycle the robot rather than pressing <b>Reboot Device</b>: a reboot doesn't cut the cameras' power (<a href="#failsafes">chapter 16</a>).</p>
+      <p class="full" style="margin-top:14px">For the whole Jetson, <code>scripts/host/04-backup-ssd.sh</code> images the SSD (about 8.7 GB, 7 minutes) with PhotonVision's settings inside. Keep that on the team drive too, never on GitHub: it holds the Wi-Fi password and SSH keys. A restore saves the current settings first, as "Before restoring …", so a restore can be undone. PhotonVision also saves a snapshot by itself the first time the field connects each day (<code>photonvision-53</code>). Snapshots stay on the Jetson (about 2 MB each); download one to keep it off the Jetson. Once a camera is tuned for competition, <code>scripts/jetson/ro-root.sh on</code> makes the system partition read-only and saves the current settings as the fallback copy (<a href="#pit">chapter 21</a>). And if cameras are stuck after a USB glitch, power-cycle the robot rather than pressing <b>Reboot Device</b>: a reboot doesn't cut the cameras' power (<a href="#failsafes">chapter 16</a>).</p>
     </div>
   </div>
 
@@ -377,6 +395,12 @@
       <div class="prose">
         <p>A <span class="term">pipeline</span> is one saved set of settings for a camera: its type (AprilTagCuda, object detection…), exposure, resolution, detector settings. A camera can have several, numbered from 0, and runs one at a time. Robot code picks one with <code>camera.setPipelineIndex(n)</code>, which goes over NetworkTables as <code>pipelineIndexRequest</code>.</p>
         <p><strong>Profiles</strong> are our habit of giving every camera the same pipelines at the same numbers: 0 = event field, 1 = practice field. Robot code then switches all cameras together, and the robot log records which one was active. Tune one camera's pipeline, then Copy settings (step 8) fills in the rest.</p>
+        <ul>
+          <li><b>Making one</b> (<code>photonvision-46</code>): in the new-pipeline dialog (☰ → +), <b>Start from</b> a copy of any camera's pipeline, and tick <b>Create on every camera</b>. Each camera gets it as its next number, and the message says which number each got. A copy from another camera keeps each camera's own orientation, exposure limits and mask.</li>
+          <li><b>Switching from the dashboard:</b> ☰ → <b>Switch every camera to pipeline N</b> moves every camera to the number you're on. A camera without that number stays where it is, and the message lists it.</li>
+          <li><b>Numbers everywhere</b> (<code>photonvision-47</code>): the Pipeline dropdown and the Camera Matching page show each pipeline as "N: name", so a mismatched profile is easy to spot.</li>
+          <li><b>At events</b> (<code>photonvision-51</code>): in Settings &gt; Robot state, turn on <b>Event pipeline when the field connects</b> and pick the number. When the field (FMS) connects, every camera switches to it, once. After that anything sticks: a switch on the dashboard, or robot code choosing a pipeline. <b>Switch now</b> tries it without a field, and <code>health-check.sh</code> warns if a camera lacks that pipeline or has a different one there.</li>
+        </ul>
         <p><span class="term">Driver mode</span> is a pipeline that does no vision at all: it just sends a picture for the drivers. Pick <b>Driver Mode</b> in the Dashboard's pipeline list, or call <code>camera.setDriverMode(true)</code>. Our build decodes those colour frames on the JPEG hardware, which about halves the CPU cost (1.12 → 0.59 cores at 120 fps).</p>
       </div>
       <div>

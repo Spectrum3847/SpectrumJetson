@@ -126,15 +126,15 @@
     </div>
     <div class="steps">
       <div class="step"><div class="box"><span class="kicker full">1 · The shutter</span><h4>Light in, for 5 ms</h4><p class="short">All pixels expose at once for 5 ms.</p><p class="full">The camera's global shutter opens every pixel at once for 5 ms (our exposure setting), then closes. The frame's timestamp marks the <em>middle</em> of that window, when the tag was really where the picture shows it.</p></div></div>
-      <div class="step"><div class="box"><span class="kicker full">2 · Down the cable</span><h4>JPEG in 125 µs slices <span class="t">≈ 4.9 ms</span></h4><p class="short">A ~50 KB JPEG crosses USB in slices.</p><p class="full">The camera compresses the frame to a JPEG of about 50 KB (one of our real frames is 52,801 bytes) and sends it in USB <span class="term">microframe</span>s: up to 1280 bytes every 125 µs, the booking our driver gives it (chapter 06). About 40 slices later, the frame is across.</p><p class="full small muted">Before sending, the camera also spends time reading out its sensor and compressing. We haven't measured that yet; it's on our list for the robot.</p></div></div>
+      <div class="step"><div class="box"><span class="kicker full">2 · Down the cable</span><h4>JPEG in 125 µs slices <span class="t">≈ 8.1 ms</span></h4><p class="short">The camera streams the JPEG over USB, over about 8 ms.</p><p class="full">The camera compresses the frame to a JPEG of about 50 KB (one of our real frames is 52,801 bytes) and sends it in USB <span class="term">microframe</span>s: up to 1280 bytes every 125 µs, the booking our driver gives it (chapter 06). It doesn't send it all at once: it streams the JPEG out while its sensor is still reading out, over about one frame period. We timed it with the driver's own log: <strong>8.1 ms</strong> from the first packet to the last, on every camera. At our cap a 34 KB frame could cross in 3.4 ms, so the camera sets the pace, not USB.</p><p class="full small muted">One delay we still haven't measured: any time between the end of the exposure and the camera's first packet. It's on our list for the robot.</p></div></div>
       <div class="step"><div class="box"><span class="kicker full">3 · Straight into RAM</span><h4>No CPU needed</h4><p class="short">The USB controller writes it into RAM by itself.</p><p class="full">The USB controller writes each packet directly into a buffer in RAM. This is <span class="term">DMA</span>: hardware copying data by itself while the CPU does other things. The CPU never touches the bytes on the way in.</p></div></div>
-      <div class="step"><div class="box"><span class="kicker full">4 · The driver</span><h4>"Buffer ready"</h4><p class="short">The <code>uvcvideo</code> driver marks it ready.</p><p class="full">When the last packet lands, the kernel's <code>uvcvideo</code> driver marks the buffer done. It stamped the time when the frame's <em>first</em> packet arrived; PhotonVision later moves that stamp back to mid-exposure.</p></div></div>
+      <div class="step"><div class="box"><span class="kicker full">4 · The driver</span><h4>"Buffer ready"</h4><p class="short">The <code>uvcvideo</code> driver marks it ready.</p><p class="full">When the last packet lands, the kernel's <code>uvcvideo</code> driver marks the buffer done. The frame's time comes from the camera's own clock, which the driver converts to the Jetson's (<a href="#latency">chapter 14</a>); PhotonVision later moves that stamp back to mid-exposure. Our driver also looks for finished packets every 2 ms instead of every 4, which gets each frame to PhotonVision 1.2 ms sooner.</p></div></div>
       <div class="step"><div class="box"><span class="kicker full">5 · PhotonVision</span><h4>Grab the raw JPEG</h4><p class="short">PhotonVision picks up the raw JPEG.</p><p class="full">The camera's thread in PhotonVision picks up the raw JPEG through cscore, untouched (why that matters: <a href="#speed">chapter 10</a>).</p></div></div>
-      <div class="step"><div class="box"><span class="kicker full">6 · Unpack</span><h4>NVJPG decodes to gray <span class="t">≈ 2.3–2.6 ms</span></h4><p class="short">A hardware engine unpacks it to a 1 MB gray image.</p><p class="full">The JPEG goes to one of the two <span class="term">NVJPG</span> hardware engines. It unpacks the 50 KB into a 1 MB gray image, one byte per pixel, while the CPU waits or does other work. Measured: PhotonVision fell from 0.85 to 0.52 CPU cores with two cameras.</p></div></div>
-      <div class="step"><div class="box"><span class="kicker full">7 · Shared memory</span><h4>To the GPU, without a trip</h4><p class="short">The GPU reads it from the same memory: no copy.</p><p class="full">On a desktop PC the graphics card has its own memory, so every image must be copied across the PCIe slot and back. On the Jetson the CPU and GPU share the same RAM: <span class="term">unified memory</span>. The detector still makes one small copy into its own buffer, but it takes just <strong>0.16 ms</strong>.</p></div></div>
-      <div class="step"><div class="box"><span class="kicker full">8 · The GPU</span><h4>Find the tags <span class="t">≈ 1.6–2 ms</span></h4><p class="short">1,024 cores find the tags' corners.</p><p class="full">CUDA programs (<span class="term">kernel (GPU)</span>s) run on all 1,024 GPU cores: find edges, group them into outlines, fit four-sided shapes. Then CPU threads read each candidate's bits. Out come a few numbers: each tag's ID and its four corner positions. Chapter 08 opens this box.</p></div></div>
+      <div class="step"><div class="box"><span class="kicker full">6 · Unpack</span><h4>NVJPG decodes to gray <span class="t">≈ 2.8 ms</span></h4><p class="short">A hardware engine unpacks it to a 1 MB gray image.</p><p class="full">The JPEG goes to one of the two <span class="term">NVJPG</span> hardware engines. It unpacks the 50 KB into a 1 MB gray image, one byte per pixel, while the CPU waits or does other work. Measured: 2.8 ms with 5 cameras sharing the two engines, and PhotonVision fell from 0.85 to 0.52 CPU cores with two cameras.</p></div></div>
+      <div class="step"><div class="box"><span class="kicker full">7 · Shared memory</span><h4>To the GPU, without a trip</h4><p class="short">The GPU reads it from the same memory: no copy.</p><p class="full">On a desktop PC the graphics card has its own memory, so every image must be copied across the PCIe slot and back. On the Jetson the CPU and GPU share the same RAM: <span class="term">unified memory</span>. Copies are cheap: the detector's upload took just <strong>0.16 ms</strong>. Our decoder now skips even that: it also leaves each gray frame in a GPU buffer, where the detector picks it up (1.55 → 1.32 ms a frame with 4 cameras).</p></div></div>
+      <div class="step"><div class="box"><span class="kicker full">8 · The GPU</span><h4>Find the tags <span class="t">≈ 1.2–2 ms</span></h4><p class="short">1,024 cores find the tags' corners.</p><p class="full">CUDA programs (<span class="term">kernel (GPU)</span>s) run on all 1,024 GPU cores: find edges, group them into outlines, fit four-sided shapes. Then CPU threads read each candidate's bits. Out come a few numbers: each tag's ID and its four corner positions. Chapter 08 opens this box.</p></div></div>
       <div class="step"><div class="box"><span class="kicker full">9 · Back to the CPU</span><h4>Corners → pose</h4><p class="short">The CPU turns corners into a pose.</p><p class="full">The CPU takes the corners and works out where the camera must be to see the tags that way (OpenCV's <code>solvePnP</code>, chapter 12). Small math, a perfect job for one fast CPU core.</p></div></div>
-      <div class="step"><div class="box"><span class="kicker full">10 · To the robot</span><h4>A NetworkTables packet</h4><p class="short">Off to the robot over Ethernet: 13–15 ms in all.</p><p class="full">The result (tag IDs, corners, pose, timestamp) goes out over Ethernet to the SystemCore through <span class="term">NetworkTables</span>. PhotonVision's own measure of this frame's delay: about 13–14 ms, plus the half exposure before it.</p></div></div>
+      <div class="step"><div class="box"><span class="kicker full">10 · To the robot</span><h4>A NetworkTables packet</h4><p class="short">Off to the robot over Ethernet: about 14.5 ms in all.</p><p class="full">The result (tag IDs, corners, pose, timestamp) goes out over Ethernet to the SystemCore through <span class="term">NetworkTables</span>. PhotonVision's dashboard shows 14.3–15.2 ms per camera, from mid-exposure to the result.</p></div></div>
       <div class="step"><div class="box"><span class="kicker full">11 · And again</span><h4>120 times a second, per camera</h4><p class="short">A new frame starts every 8.3 ms.</p><p class="full">While this frame was on its trip, the next one was already being exposed. At 120 fps a new frame starts every 8.3 ms, so two or three are in flight at once, each at a different station.</p></div></div>
     </div>
   </div>
@@ -143,7 +143,7 @@
   <div class="full">
   <div class="lab reveal" id="d-lat">
     <div class="lab-head"><span class="tag">Lab</span><h4>Where the 15 ms go</h4></div>
-    <p class="do"><b>Tap any block</b> to see what it is and how we know its size. Switch drivers to see the USB time change.</p>
+    <p class="do"><b>Tap any block</b> to see what it is and how we know its size. Switch drivers and watch the USB time: it surprised us.</p>
     <div class="seg" id="d-lat-seg" style="margin-bottom:12px"><button data-v="ours" class="on">Our capped USB driver</button><button data-v="stock">Stock driver</button></div>
     <div class="lat" id="d-latbar"></div>
     <div class="lat-axis" id="d-lataxis"></div>
@@ -157,7 +157,7 @@
   <div class="split">
     <div class="prose">
       <p>That was one frame from one camera. With several cameras, PhotonVision gives each one its own <span class="term">thread</span>, called a <code>VisionRunner</code>. Each one loops forever: grab a frame, decode, detect, solve, publish. The Linux scheduler spreads the threads over the 6 CPU cores, and they all share the one GPU.</p>
-      <p>That's why a second camera costs about as much as the first, and why a slow camera can't hold up the others. <a href="#speed">Chapter 10</a> digs into what happens when four cameras line up for the GPU at the same moment.</p>
+      <p>That's why a second camera costs about as much as the first, and why a slow camera can't hold up the others. <a href="#cuda">Chapter 08</a> digs into what happens when four cameras line up for the GPU at the same moment, and <a href="#speed">chapter 10</a> into how we got five running at full speed.</p>
     </div>
     <div class="lab thr" style="margin:0"><svg id="d-thr" viewBox="0 0 460 250" role="img" aria-label="Two camera threads, TopLeft and TopRight, each looping through grab, decode, detect and solve, sharing one GPU"></svg><p class="hint">Illustration, slowed down about 40×. The two cameras aren't synchronized, so their frames arrive at different moments.</p></div>
   </div>
@@ -184,21 +184,22 @@
         <li><strong>Not every step splits up.</strong> Tracing an outline, sorting, and decisions that depend on the previous answer run one step at a time. Chapter 08's race shows it: on a chain of steps, one CPU core beats the whole GPU crowd. Real detectors mix both kinds of work.</li>
         <li><strong>CPU cores cheat a little, too.</strong> Each Arm core can do the same operation on 16 bytes at once (SIMD). CPU AprilTag code uses that, and it's fast.</li>
         <li><strong>Moving data costs time.</strong> Handing work to the GPU and getting answers back isn't free. Unified memory makes it cheap on the Jetson (0.16 ms), but a tiny job isn't worth sending.</li>
-        <li><strong>The GPU is mostly idle for us.</strong> With 2 cameras at 122 fps, it's about 12% busy (peaks under 25%). The detector takes ~1.7–2 ms a frame, fast enough for 500+ fps. Our real limits were elsewhere (chapter 10).</li>
+        <li><strong>The GPU is mostly idle for us.</strong> With 2 cameras at 122 fps, it's about 12% busy (peaks under 25%). With 4, about a quarter (25.7%); with 5 facing bright ceiling lights, 44%. The detector takes ~1.2–2 ms a frame, fast enough for 500+ fps. Our real limits were elsewhere (chapter 10).</li>
+        <li><strong>The JPEG engines work harder than the GPU.</strong> In a 4-camera test (Sept 26), the GPU averaged 17% busy while each of the two NVJPG engines averaged about 37%.</li>
       </ul>
     </div>
     <div>
       <div class="stats" style="margin-top:0;grid-template-columns:1fr 1fr">
-        <div class="stat"><b>~2<small>ms</small></b><span>GPU detect per 1280×800 frame (1.6–2.0 ms measured)</span></div>
-        <div class="stat"><b>12<small>%</small></b><span>average GPU load, 2 cameras at 122 fps</span></div>
-        <div class="stat"><b>~25<small>%</small></b><span>of the CPU for 2 cameras at 120 fps: 1.3 of 6 cores</span></div>
+        <div class="stat"><b>1.2<small>ms</small></b><span>GPU detect per 1280×800 frame, 4 cameras (2.1 ms with 5 facing bright lights)</span></div>
+        <div class="stat"><b>26<small>%</small></b><span>average GPU load, 4 cameras at 122 fps (25.7%; 12% with 2)</span></div>
+        <div class="stat"><b>1.9<small>cores</small></b><span>of 6, for PhotonVision with 5 cameras at 122 fps</span></div>
         <div class="stat"><b>500+</b><span>frames a second the detector could handle</span></div>
       </div>
       <figure class="photo"><img style="aspect-ratio:4/3;object-fit:cover;object-position:50% 40%" src="assets/photos/device-metrics-2cam.jpg" alt="PhotonVision's Device Metrics card showing CPU usage 23% and CPU temperature 41 °C" loading="lazy"><figcaption>PhotonVision's Device Metrics with two cameras running: CPU 23%, 41 °C.</figcaption></figure>
     </div>
   </div>
 
-  <div class="callout pitfall"><h5>Comparing fairly with an Orange Pi 5</h5><p>Many FRC teams run stock PhotonVision on an Orange Pi 5, which finds AprilTags on its CPU cores. It works, and it's cheaper. The CPU simply has more to do per frame, so frame rate, resolution and the number of cameras have to be balanced against each other. On the Jetson, the heavy per-pixel work moves to the GPU and JPEG engines, which is why our CPU has room for four cameras at 120 fps at full resolution. We haven't benchmarked an Orange Pi ourselves, so we don't quote numbers for it.</p></div>
+  <div class="callout pitfall"><h5>Comparing fairly with an Orange Pi 5</h5><p>Many FRC teams run stock PhotonVision on an Orange Pi 5, which finds AprilTags on its CPU cores. It works, and it's cheaper. The CPU simply has more to do per frame, so frame rate, resolution and the number of cameras have to be balanced against each other. On the Jetson, the heavy per-pixel work moves to the GPU and JPEG engines, which is why our CPU has room for five cameras at 122 fps at full resolution. We haven't benchmarked an Orange Pi ourselves, so we don't quote numbers for it.</p></div>
 
 
   </div>
@@ -214,16 +215,16 @@
     <ul>
       <li>Camera → JPEG over USB → RAM → NVJPG decode → GPU finds tags → CPU solves the pose → robot.</li>
       <li>The CPU, GPU and JPEG engines share one memory: no copying to a graphics card.</li>
-      <li>The trip takes about 13–15 ms; a new frame starts every 8.3 ms.</li>
+      <li>The trip takes about 14.5 ms; a new frame starts every 8.3 ms.</li>
     </ul>
   </div>
   <div class="recap reveal full">
     <h5>Chapter 7 recap</h5>
     <ul>
-      <li>A frame goes: exposure → JPEG over USB (~4.9 ms) → DMA into RAM → <code>uvcvideo</code> → PhotonVision → NVJPG decode (~2.5 ms) → GPU detect (~2 ms) → CPU pose solve → NetworkTables. About 13–15 ms in all.</li>
+      <li>A frame goes: exposure → JPEG over USB (~8.1 ms, paced by the camera) → DMA into RAM → <code>uvcvideo</code> → PhotonVision → NVJPG decode (~2.8 ms) → GPU detect (~1.2–2 ms) → CPU pose solve → NetworkTables. About 14.5 ms from mid-exposure.</li>
       <li>The CPU, GPU and JPEG engines share one 8 GB RAM at 102 GB/s (unified memory), so there's no slow copy to a graphics card.</li>
       <li>GPUs win on work that splits into many identical pieces, like per-pixel steps. Sequential work still belongs on the CPU.</li>
-      <li class="full">Each camera has its own thread; they share the GPU, which is only about 12% busy with two cameras.</li>
+      <li class="full">Each camera has its own thread; they share the GPU, which is only about a quarter busy with four cameras.</li>
     </ul>
   </div>
 </div>

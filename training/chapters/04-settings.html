@@ -78,7 +78,7 @@
 
   <div class="setcards full">
     <div class="card"><h4><i>⏱️</i>Exposure</h4><p>How long each pixel collects light per frame. Longer is brighter, but anything moving smears.</p><span class="chip">we use 5 ms</span></div>
-    <div class="card"><h4><i>📶</i>Gain</h4><p>Electronic amplification after the light is collected. Brighter, but it amplifies the noise too.</p><span class="chip">probably does nothing on ours</span></div>
+    <div class="card"><h4><i>📶</i>Gain</h4><p>Electronic amplification after the light is collected. Brighter, but it amplifies the noise too.</p><span class="chip">ours have none</span></div>
     <div class="card"><h4><i>☀️</i>Brightness</h4><p>Adds a fixed amount to every pixel: lifts the blacks and the whites together.</p><span class="chip">we use 100</span></div>
     <div class="card"><h4><i>◐</i>Contrast</h4><p>Stretches or squeezes brightness around the middle gray.</p><span class="chip">camera default</span></div>
     <div class="card"><h4><i>〰️</i>Gamma</h4><p>Bends the curve: brightens or darkens the middle tones without moving pure black or white.</p><span class="chip">camera default</span></div>
@@ -108,7 +108,7 @@
         <div class="goals" id="s-goals" aria-live="polite"></div>
         <details class="tune-how"><summary>How to tune, in order</summary><ol>
           <li><b>Robot spin</b>: set it to how fast your robot really turns. Then lower <b>Exposure</b> until <i>Sharp while moving</i> isn't red.</li>
-          <li>If <i>Tags are found</i> drops to amber or red, win back light with <b>Brightness</b> first, then <b>Gain</b>. Stop if <i>Precise corners</i> turns amber.</li>
+          <li>If <i>Tags are found</i> drops to amber or red, win back light with <b>Brightness</b> first, then <b>Gain</b> (on cameras that have it; ours don't). Stop if <i>Precise corners</i> turns amber.</li>
           <li>Leave <b>Contrast</b>, <b>Gamma</b> and <b>Sharpness</b> at their defaults unless a goal needs them.</li>
           <li>Keep <i>Full frame rate</i> green: the exposure has to fit inside the 8.3 ms frame.</li>
           <li>At the event, check again: their lights, a far tag, and the flicker test.</li>
@@ -123,7 +123,7 @@
       </div>
       <div>
         <div class="ctl"><label>Exposure <output></output></label><input type="range" id="s-exp" min="0.5" max="30" step="0.1" value="5"><div class="note">How long the shutter stays open each frame. Longer: brighter, but blurrier.</div></div>
-        <div class="ctl"><label>Gain <output></output></label><input type="range" id="s-gain" min="1" max="8" step="0.1" value="1"><div class="note">Amplifies the signal from the sensor. Brighter, but the noise grows too.</div></div>
+        <div class="ctl"><label>Gain <output></output></label><input type="range" id="s-gain" min="1" max="8" step="0.1" value="1"><div class="note">Amplifies the signal from the sensor. Brighter, but the noise grows too. Our Thriftiest Cams have no gain control.</div></div>
         <div class="ctl"><label>Brightness (black level) <output></output></label><input type="range" id="s-bri" min="-60" max="60" step="1" value="0"><div class="note">Shifts every pixel lighter or darker by the same amount.</div></div>
         <div class="ctl"><label>Contrast <output></output></label><input type="range" id="s-con" min="0.5" max="2" step="0.05" value="1"><div class="note">Stretches the gap between darks and lights.</div></div>
         <div class="ctl"><label>Gamma <output></output></label><input type="range" id="s-gam" min="0.5" max="2.5" step="0.05" value="1"><div class="note">Brightens or darkens the middle grays; black and white stay put.</div></div>
@@ -195,7 +195,7 @@
   </div>
 
   <h3>Our settings, and why</h3>
-  <figure class="photo reveal full" style="margin:10px 0 26px"><img src="assets/from-jetson/screenshots/dashboard-topleft-3d-input-tab-crop.webp" alt="PhotonVision's Input tab for our TopLeft camera: auto exposure off, exposure 50 (5.0 ms), brightness 100, contrast 32, gamma 150, sharpness 5, backlight compensation on, camera gain 75" loading="lazy" width="1320" height="590"><figcaption>Our PhotonVision's Input tab for TopLeft, Sept 25, 2026: exposure 50 shown as 5.0 ms, brightness 100 (at the top of its slider), and the extra controls from <code>photonvision-28</code> at the camera's defaults. The Camera Gain slider shows 75, but our cameras report no gain control, so it probably does nothing.</figcaption></figure>
+  <figure class="photo reveal full" style="margin:10px 0 26px"><img src="assets/from-jetson/screenshots/dashboard-topleft-3d-input-tab-crop.webp" alt="PhotonVision's Input tab for our TopLeft camera: auto exposure off, exposure 50 (5.0 ms), brightness 100, contrast 32, gamma 150, sharpness 5, backlight compensation on, camera gain 75" loading="lazy" width="1320" height="590"><figcaption>Our PhotonVision's Input tab for TopLeft, Sept 25, 2026: exposure 50 shown as 5.0 ms, brightness 100 (at the top of its slider), and the extra controls from <code>photonvision-28</code> at the camera's defaults. The Camera Gain slider showed 75 then, but our cameras have no gain control, so it did nothing. Since <code>photonvision-54</code> it's hidden.</figcaption></figure>
   <p class="prose">Every AprilTag camera on our robot uses the same settings. New cameras get them automatically: a camera PhotonVision has never seen starts with our team defaults (<code>photonvision-06</code>), so nobody has to remember them.</p>
   <div class="table-wrap full"><table class="data">
     <tr><th>Setting</th><th>Value</th><th>Why</th></tr>
@@ -216,9 +216,10 @@
 
   <div class="cards full">
     <div class="card"><div class="icon">🧭</div><h4>Tuning guide, built in</h4><p>The camera's Input tab has a "Tuning guide: what to set, in order" (<code>photonvision-26</code>) with the settings above and the reasons, and each control's tooltip starts with its recommended value.</p><span class="chip">photonvision-26</span></div>
-    <div class="card"><div class="icon">🎚️</div><h4>The hidden controls</h4><p>Stock PhotonVision doesn't show contrast, gamma, sharpness or backlight compensation. Ours does (<code>photonvision-28</code>), with the camera's own ranges: contrast 0–95 (default 32), gamma 100–300 (150), sharpness 1–10 (5). Leave them at the defaults unless you're testing; sharpness is the one worth trying lower, because sharpening can halo tag edges.</p><span class="chip">photonvision-28</span></div>
-    <div class="card"><div class="icon">❓</div><h4>The gain slider that may do nothing</h4><p>Upstream PhotonVision's Thriftiest Cam support added a Camera Gain slider (<code>photonvision-21</code>). But our cameras' firmware reports no gain control at all, so setting it is probably ignored. Test it before relying on it.</p><span class="chip">photonvision-21</span></div>
-    <div class="card"><div class="icon">🎯</div><h4>Auto-tune on the field</h4><p>The Field Calibration page (<code>photonvision-30</code>) can tune each camera under the event's own lights: it steps through exposure, gain, brightness, contrast, gamma and sharpness, and recommends the <strong>shortest exposure that still finds every tag</strong>, changing the others only if they clearly help.</p><span class="chip">photonvision-30</span></div>
+    <div class="card"><div class="icon">🎚️</div><h4>The hidden controls</h4><p>Stock PhotonVision doesn't show contrast, gamma, sharpness or backlight compensation. Ours does (<code>photonvision-28</code>), with the camera's own ranges: contrast 0–95 (default 32), gamma 100–300 (150), sharpness 1–10 (5). Leave them at the defaults unless you're testing; sharpness is the one worth trying lower, because sharpening can halo tag edges. (Until <code>photonvision-39</code>, their sliders snapped back to the old number even though the camera changed.)</p><span class="chip">photonvision-28</span></div>
+    <div class="card"><div class="icon">❓</div><h4>No gain on our cameras</h4><p>Upstream PhotonVision lists the Thriftiest Cam as having gain, and added a Camera Gain slider (<code>photonvision-21</code>). Ours has no gain control, so the slider did nothing. Now PhotonVision asks the camera itself, and hides the slider when there's no gain (<code>photonvision-54</code>).</p><span class="chip">photonvision-54</span></div>
+    <div class="card"><div class="icon">🔲</div><h4>How the tags look</h4><p>Whenever a camera sees a tag 24 px or bigger, PhotonVision measures its white margin and black border, a few times a second (<code>photonvision-54</code>). The Input tab shows it above the camera controls, e.g. "white 205, black 38 (contrast 167), 0% clipped: good", with what to change when it isn't good: whites clipping (over 10% at 250 or more: shorten exposure, or lower brightness or gamma), low contrast (under 50: lengthen exposure, watching motion blur), or blacks lifted (over 80: brightness too high). The thresholds are first guesses, still to be checked on the field.</p><span class="chip">photonvision-54</span></div>
+    <div class="card"><div class="icon">🎯</div><h4>Auto-tune on the field</h4><p>The Field Calibration page (<code>photonvision-30</code>) can tune each camera under the event's own lights: it steps through exposure, brightness, contrast, gamma and sharpness (and gain, on cameras that have it), and recommends the <strong>shortest exposure that still finds every tag</strong>, changing the others only if they clearly help.</p><span class="chip">photonvision-30</span></div>
   </div>
 
   <div class="deeper full">

@@ -20,6 +20,8 @@ Site.chapter('pit', (root) => {
     ['version', '🧩', 'Robot code error about PhotonLib\'s version'],
     ['noboot', '🔌', 'The Jetson won\'t come back after a reboot'],
     ['stream', '🖥️', 'A camera\'s stream won\'t show in the browser'],
+    ['norec', '⏺️', 'Rewind stopped recording after a match'],
+    ['lostset', '↩️', 'A good setup got changed or lost'],
     ['blackcal', '⬛', 'The image is black during calibration'],
     ['calfail', '🏁', 'Calibration fails'],
   ];
@@ -27,7 +29,7 @@ Site.chapter('pit', (root) => {
     /* no targets */
     notargets: { q: 'Open the dashboard (' + DASH + ') and hold a tag in front of that camera. Does PhotonVision draw a box on it?', short: 'Boxed on the dashboard?', yes: 'nt_topic', no: 'nt_fps' },
     nt_topic: { q: 'In a NetworkTables viewer on the robot side, is <code>/photonvision/&lt;camera name&gt;</code> there, and updating?', short: 'Topics on the robot?', help: 'AdvantageScope or the driver dashboard can show NetworkTables. Look for the camera\'s name under <code>photonvision</code>.', yes: 'L_name', no: 'L_nt' },
-    nt_fps: { q: 'Is that camera\'s fps normal on the dashboard (about 120)?', short: 'fps normal?', yes: 'L_nodetect', no: 'lowfps' },
+    nt_fps: { q: 'Is that camera\'s fps normal on the dashboard (about 120, or about 30 while the robot is disabled)?', short: 'fps normal?', yes: 'L_nodetect', no: 'lowfps' },
     L_name: {
       title: 'The robot code is asking for a different camera name',
       cause: 'PhotonVision is sending results, but <code>new PhotonCamera("…")</code> in the robot code uses a name that doesn\'t match exactly. Names are case-sensitive: <code>TopLeft</code> is not <code>topLeft</code> or <code>Top Left</code>.',
@@ -121,7 +123,20 @@ Site.chapter('pit', (root) => {
     },
 
     /* low fps */
-    lowfps: { q: 'Are all the cameras slow, not just one?', short: 'All cameras?', yesLabel: 'All of them', noLabel: 'Just one', yes: 'lf_thr', no: 'L_exposure' },
+    lowfps: { q: 'Is it about 30 fps, with the robot disabled?', short: '30 fps, disabled?', help: 'The dashboard says <em>"Robot disabled: cameras idle at 30 fps, full speed on enable"</em> under the FPS.', yes: 'L_idle', no: 'lf_all' },
+    lf_all: { q: 'Are all the cameras slow, not just one?', short: 'All cameras?', yesLabel: 'All of them', noLabel: 'Just one', yes: 'lf_thr', no: 'L_exposure' },
+    L_idle: {
+      title: 'Nothing is wrong: the cameras idle while the robot is disabled',
+      cause: 'While the Jetson is connected to a robot that\'s disabled, each camera processes 30 frames a second instead of about 120 (<code>photonvision-49</code>). Less power and heat in the queue, and 30 results a second is plenty to set the starting pose.',
+      steps: [
+        'Nothing to fix. Enable the robot: every camera is back to full rate within 5 ms.',
+        'To test at full speed while disabled, press <b>Full speed</b> on the dashboard\'s notice, or switch off <b>Idle while the robot is disabled</b> in Settings › Robot state.',
+        'Switch it back on afterwards. It\'s saved across restarts, and <code>health-check.sh</code> warns while it\'s off.',
+      ],
+      confirm: 'Enabled, every camera reads about 120 fps.',
+      why: ['#failsafes', 'Chapter 16: Built for match day'],
+      more: 'Off the robot (no NetworkTables connection) nothing idles, so bench tuning sees every frame.',
+    },
     lf_thr: { q: 'Does the Settings page show CPU Throttling as something other than <code>None</code>?', short: 'Throttling?', yes: 'L_throttle', no: 'L_allslow' },
     L_exposure: {
       title: 'Exposure too long: the units trap',
@@ -152,6 +167,7 @@ Site.chapter('pit', (root) => {
       steps: [
         'Check each camera\'s exposure: about 5 ms, auto exposure off.',
         'Run the health check. It should say <code>power mode MAXN SUPER</code> and <code>clocks locked</code>, and name any camera under 30 fps.',
+        'All of them at about 60 fps, on a fanless Jetson? That\'s the thermal cap (<code>photonvision-57</code>): at 95 °C every camera is capped at 60 fps until the chip is under 88 °C. Match Ready and Settings › Robot state show it. Let it cool, and get it some air.',
         'Restart PhotonVision (Settings › Device Control › Restart Software).',
       ],
       confirm: 'Every camera reads ~120 fps; the <code>971 stats</code> lines say about 120 calls/s.',
@@ -333,11 +349,41 @@ Site.chapter('pit', (root) => {
       cause: 'Check whether the camera is working and only the browser video is stuck.',
       steps: [
         'Reload with Ctrl+Shift+R.',
+        'Was the tab behind another tab, or the window minimised? Then its streams were disconnected on purpose, so the Jetson stops encoding them (<code>photonvision-48</code>). They come back when you look at the tab again.',
         'Look at the camera\'s fps number. At 0, the camera itself is out: go to "A camera is missing".',
         'Try another browser. An old one also hides the Settings page\'s Device Control card.',
       ],
       confirm: 'The video shows, and the fps reads ~120.',
       why: ['#photonvision', 'Chapter 9: PhotonVision and our patches'],
+    },
+
+    /* recording */
+    norec: {
+      title: 'Quiet mode: the Jetson stops writing to the SSD after a match',
+      cause: 'Power cuts only damage an SSD while it\'s being written, and the robot is switched off a few minutes after every match. So when a match ends, or after 60 s disabled, the Jetson stops writing (<code>photonvision-56</code>): Rewind stops, the logs go to RAM, and the scratch partition goes read-only. The cameras keep running and tags are still found.',
+      steps: [
+        'Nothing to fix. <b>Any enable ends it</b>: the SSD is writable again in about 80 ms, and vision never waits on it.',
+        'Need a recording while disabled? <b>Record now</b> in Settings › Rewind, field calibration, or robot code\'s <code>/photonvision/rewind/record</code> keeps quiet mode off for as long as it records.',
+        'The health check says <code>quiet mode: scratch partition read-only</code> while it\'s on.',
+      ],
+      confirm: 'Enable the robot (or press Record now), and the recording starts.',
+      why: ['#failsafes', 'Chapter 16: Built for match day'],
+      more: 'Robot code can also decide with <code>/photonvision/jetson/quiet</code> (true or false); the Jetson publishes <code>quietNow</code> and <code>quietReason</code>.',
+    },
+
+    /* lost settings */
+    lostset: {
+      title: 'Restore a settings snapshot',
+      cause: 'Every change in the dashboard is saved right away, with no undo. A slider dragged by mistake, or an experiment on the match pipeline, sticks.',
+      steps: [
+        'On the Settings page, open <b>Settings snapshots</b> and <b>Restore</b> the last good one. Every camera\'s pipelines, settings and calibrations come back, and PhotonVision restarts.',
+        'Not sure which? PhotonVision saves one by itself the first time the field connects each day. And a restore first saves the current settings as "Before restoring …", so it can be undone.',
+        'Only one camera wrong, and another still has good settings? <b>Copy settings from…</b> in the pipeline menu (☰) copies them over.',
+        'Next time, duplicate the pipeline (☰) before experimenting, and try things on the copy.',
+      ],
+      confirm: 'PhotonVision is back (about 10 s) with every camera on its pipeline, and the values you expect.',
+      why: ['#camsetup', 'Chapter 20: Setting up a camera'],
+      more: 'The settings from any earlier match are also in that match\'s robot log (<code>/photonvision/&lt;camera&gt;/settingsJson</code>) and in any Rewind recording\'s <code>session.json</code>.',
     },
 
     /* calibration */
@@ -440,11 +486,23 @@ Site.chapter('pit', (root) => {
   {
     const CMD = '$ ssh -i ~/.ssh/jetson_ed25519 spectrum3847@10.85.15.15 \\\n    ~/SpectrumJetson/scripts/jetson/health-check.sh 4';
     const DET = '  PASS  971 library loaded (frc971/bos detector, min_white_black_diff 20, max_line_fit_mse 10, threads 6, CUDA wait block, GPU connections 32)';
-    const tail = (boots) => [
+    const tail = (boots, quiet) => [
       '== Robot connection',
       '  PASS  NT connected to 10.85.15.2:5810 (server team is 8515)',
       '  PASS  time sync pointed at the robot',
+      '  PASS  frames timestamped by the camera clock (uvcvideo hwtimestamps)',
+      '  PASS  camera driver hands frames over in 2 ms steps (urb_packets 16)',
+      '  PASS  idle while disabled: 30 fps per camera',
+      '  PASS  far-tag search on: up to 30 full-size searches a second while no camera has a good view (0 so far)',
+      '  PASS  event pipeline 0 when the field connects: TopLeft \'Event\', TopRight \'Event\', BottomLeft \'Event\', BottomRight \'Event\'',
       '        addresses: enP8p1s0 10.85.15.15/8',
+      '== Storage',
+      '  PASS  settings partition mounted (sync, data=journal)',
+      '  PASS  scratch partition mounted (171G free)',
+      '  PASS  last-good settings committed 2026-10-16 19:05',
+      ...(quiet ? ['  PASS  quiet mode: scratch partition read-only (quiet since 11:39:12); any enable ends it'] : []),
+      '  PASS  system partition read-only (ro-root on; 41 MB in its RAM layer)',
+      '  PASS  SSD: no media errors (23 unsafe shutdowns)',
       '== System',
       '  PASS  power mode MAXN SUPER',
       '  PASS  clocks locked (CPU 1728 MHz, GPU 1020 MHz)',
@@ -463,14 +521,15 @@ Site.chapter('pit', (root) => {
       ok: [
         '== PhotonVision', '  PASS  running 1840s, version dev-v2026.1.1-27-gd8c9e8e1',
         '== CUDA detector', DET,
-        '  PASS  h0: 121 fps, detect 1.02 ms', '  PASS  h1: 122 fps, detect 0.98 ms', '  PASS  h2: 121 fps, detect 1.05 ms', '  PASS  h3: 122 fps, detect 1.01 ms',
-        '  PASS  JPEG decode: NVJPG hardware, 486 frames/s (checks: 24110 ok, 0 differ)',
+        '  PASS  h0: 30 fps, detect 1.02 ms', '  PASS  h1: 31 fps, detect 0.98 ms', '  PASS  h2: 30 fps, detect 1.05 ms', '  PASS  h3: 30 fps, detect 1.01 ms',
+        '  PASS  JPEG decode: NVJPG hardware, 121 frames/s (checks: 24110 ok, 0 differ)',
         '  PASS  calibration loaded for 4 detector(s), 8 lens coefficients',
         '== Cameras', ...cam('TopLeft', '2.1'), ...cam('BottomLeft', '2.2'), ...cam('TopRight', '2.3'), ...cam('BottomRight', '2.4'),
         '  PASS  camera driver: bandwidth cap 1bcf:28c5:1280',
         '  PASS  USB controller watchdog running',
         '  PASS  USB bandwidth reserved: bus 1: 5120 of ~6720 bytes per microframe (usb-bandwidth.py for details)',
-        ...tail(14), 'READY (0 warning(s))',
+        '  PASS  TopLeft tags: white 205, black 38 (contrast 167), 0% clipped: good',
+        ...tail(14, true), 'READY (0 warning(s))',
       ],
       hit: [
         '== PhotonVision', '  PASS  running 2310s, version dev-v2026.1.1-27-gd8c9e8e1',
@@ -478,30 +537,36 @@ Site.chapter('pit', (root) => {
         '  PASS  h0: 121 fps, detect 1.03 ms', '  PASS  h2: 122 fps, detect 0.99 ms', '  PASS  h3: 121 fps, detect 1.04 ms',
         '  PASS  JPEG decode: NVJPG hardware, 365 frames/s (checks: 30251 ok, 0 differ)',
         '  PASS  calibration loaded for 4 detector(s), 8 lens coefficients',
-        '== Cameras', ...cam('TopLeft', '2.1'), ...cam('TopRight', '2.3'), ...cam('BottomRight', '2.4'),
+        '== Cameras', '  FAIL  BottomLeft isn\'t on USB (its port 2.2 is empty): replug it, or power-cycle the robot if it\'s a stuck Thriftiest Cam',
+        ...cam('TopLeft', '2.1'), ...cam('TopRight', '2.3'), ...cam('BottomRight', '2.4'),
         '  FAIL  3 camera(s) found, expected 4',
         '  PASS  camera driver: bandwidth cap 1bcf:28c5:1280',
         '  PASS  USB controller watchdog running',
         '  FAIL  USB port 1-2.2: something plugged in there couldn\'t read its descriptor, couldn\'t be connected at all (in the last 10 min). That\'s usually the cable or adapter, or the plug not fully in; sometimes not enough power. Re-seat it, or try another cable or port. A camera that worked until a USB hub reset is stuck instead: replug it, or power-cycle the robot (a reboot doesn\'t cut USB power).',
         '  PASS  USB bandwidth reserved: bus 1: 3840 of ~6720 bytes per microframe (usb-bandwidth.py for details)',
-        ...tail(14), 'NOT READY: 2 failure(s), 0 warning(s)',
+        ...tail(14, false), 'NOT READY: 3 failure(s), 0 warning(s)',
       ],
     };
     // our notes: shown under the first line containing the key
     const NOTES = {
       ok: {
         'running 1840s': 'up 31 minutes with no restarts. A restart count would show up as a WARN here',
-        'h3: 122 fps': 'h0–h3: one GPU detector per camera, all at ~120 fps. Under 30 fps gets a WARN (exposure too long?)',
+        'h3: 30 fps': 'h0–h3: one GPU detector per camera. 30 fps because the robot is disabled: idle mode. On enable, ~120. Under 30 fps gets a WARN (exposure too long?)',
         'calibration loaded for 4': 'every camera has its lens calibration',
         'TopLeft on USB port 2.1': 'every camera on its own port: names follow ports',
         'BottomRight streaming': 'really streaming the mode PhotonVision set, not a tiny image scaled up',
         'NT connected': 'talking to the SystemCore, as team 8515',
+        'TopLeft tags': 'only for cameras with a tag in view, big enough to measure. Anything but "good" is a WARN that says what to change',
+        'event pipeline 0': 'every camera has an Event pipeline at number 0, so the switch on field connect works for all of them',
+        'quiet mode': 'the last match ended, so the SSD isn\'t written until the next enable. Recording is paused on purpose',
+        'SSD: no media errors': 'any media error is a FAIL: replace the SSD. Media errors killed our first one',
         'hottest sensor': 'WARN at 70 C, FAIL at 85 C',
         'fan: NVIDIA': 'read from the fan\'s speed sensor: it really spins',
         'READY': 'good to go. (A clean run still prints "0 warning(s)")',
       },
       hit: {
         'h3: 121 fps': 'only three detectors reporting: h1 is gone',
+        'isn\'t on USB': 'PhotonVision knows a camera on port 2.2, and nothing is plugged in there now',
         '3 camera(s) found': 'BottomLeft (port 2.2) is missing from the list above',
         'USB port 1-2.2': 'the kernel tried and failed to talk to whatever is in port 2.2. It had been fine: reseat BottomLeft\'s plug first',
         'NOT READY': 'fix the FAILs, then run it again. Don\'t reboot the Jetson for this',

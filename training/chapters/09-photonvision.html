@@ -113,7 +113,7 @@
   <div class="ch-head">
     <span class="eyebrow"><span class="num">09</span> · PhotonVision<span class="full"> and our patches</span></span>
     <h2 class="full">PhotonVision, and how we <em>made it better.</em></h2><h2 class="short">PhotonVision: <em>the vision software.</em></h2>
-    <p class="lede">The Jetson runs PhotonVision, the same free vision software many FRC teams use.<span class="short"> This chapter shows what it does and how one camera frame flows through it.</span><span class="full"> Ours is a special version: someone else's GPU version, merged with the newest official fixes, plus 34 small changes of our own. This chapter shows what PhotonVision does inside, where our copy came from, and every change we made.</span></p>
+    <p class="lede">The Jetson runs PhotonVision, the same free vision software many FRC teams use.<span class="short"> This chapter shows what it does and how one camera frame flows through it.</span><span class="full"> Ours is a special version: someone else's GPU version, merged with the newest official fixes, plus 60 small changes of our own. This chapter shows what PhotonVision does inside, where our copy came from, and every change we made.</span></p>
   </div>
 
   <div class="split oneup-s">
@@ -146,6 +146,7 @@
     </div>
     <figcaption>Our PhotonVision, Sept 25, 2026. The camera view is flat gray because the room was dark, and no tag was in view.</figcaption>
   </figure>
+  <p class="prose">Since these screenshots, the dashboard has turned <strong>Spectrum purple</strong> (<code>photonvision-35</code>): white cards with purple accents, our dino next to the PhotonVision logo in the sidebar, and a theme toggle that switches light and dark in one click. The sidebar also has two new pages. <strong>Match Ready</strong> (<code>photonvision-52</code>) is one screen to check before a match (<a href="#pit">chapter 21</a>). <strong>Documentation</strong> opens this training site, which the build bundles into PhotonVision itself, so it works on the robot with no internet.</p>
 
   </div>
 
@@ -171,8 +172,8 @@
       <ol>
         <li><strong>PhotonVision</strong> (the official project, "upstream") runs AprilTags on the CPU.</li>
         <li><strong>FRC Team 4143</strong> made a 2026 fork that adds the <em>AprilTagCuda</em> pipeline, using the CUDA detector from FRC 971.</li>
-        <li><strong>We</strong> started from 4143's version, merged in upstream's newest 2026 release (v2026.3.4, our patch 00), and added patches 01–34.</li>
-        <li>The detector itself is <strong>Austin Schuh's</strong> current code, built from 971's <code>frc971/bos</code> repo, with two patches and our own wrapper.</li>
+        <li><strong>We</strong> started from 4143's version, merged in upstream's newest 2026 release (v2026.3.4, our patch 00), and added patches 01–60.</li>
+        <li>The detector itself is <strong>Austin Schuh's</strong> current code, built from 971's <code>frc971/bos</code> repo, with eight patches (<code>bos-01</code> to <code>bos-08</code>) and our own wrapper.</li>
       </ol>
       <p>We don't copy their code into our repo. We keep <em>patches</em>: small files that say exactly what we changed (<a href="#linux">chapter 06</a> shows one), applied fresh at every build. That keeps the credit clear and makes it easy to take the next upstream fix.</p>
     </div>
@@ -207,11 +208,13 @@
     <div class="btns"><button class="btn-sm light" id="pv-build-go">▶ Build and install</button><button class="btn-sm light" id="pv-build-bad">💥 Try a truncated jar</button></div>
   </figure>
   <div class="callout spectrum"><h5>What we added: safe deploys</h5><p>Once, a copy step moved only the first <strong>228 KB of a 76 MB jar</strong>. PhotonVision couldn't start, and systemd gave up after 5 tries. Worse, we first believed it was fine, because we read a log line from the <em>old</em> process. Now <code>06-install-fork-jar.sh</code> refuses any jar that isn't a valid zip, keeps the last working one as <code>photonvision.jar.prev</code>, and every check looks at the running process's own ID.</p></div>
+  <p class="prose"><strong>You don't have to build it.</strong> Each GitHub release has a prebuilt bundle with our jar and everything slow to compile: the CUDA detector, the three allwpilib libraries it needs, and the TensorRT and JPEG-hardware libraries. <code>setup-jetson.sh --prebuilt</code> installs it in about 35 minutes instead of an hour, after checking every file against the bundle's <code>MANIFEST</code>. It refuses a bundle built for another L4T or CUDA version.</p>
+  <p class="prose"><strong>After installing a new build,</strong> run <code>tests/ui/run.sh</code> on the laptop. It drives the dashboard in Chrome and checks that every slider, switch and menu changes the page, PhotonVision and a second dashboard, then puts each one back. It works on a temporary copy of a pipeline, so your settings aren't touched, and takes about a minute and a half. No cameras on the bench? <code>scripts/jetson/fake-cameras.sh start</code> makes virtual cameras (<code>v4l2loopback</code>) that play a Rewind recording over and over (<code>photonvision-60</code>). PhotonVision opens them like USB cameras, on throwaway settings, so the real cameras' settings are never touched; <code>fake-cameras.sh stop</code> puts everything back. Fake cameras have no exposure or gain controls and no USB bandwidth, so those can't be tested this way.</p>
 
   <!-- ───────────── Gallery ───────────── -->
   <h3>Every change we made</h3>
   <div class="full">
-  <p class="prose">Here are all of our patches: 35 to PhotonVision (00–34), 5 to the detectors, and one to Linux's camera driver. Filter by what they're for. Cards with a <strong>story</strong> link have a closer look below.</p>
+  <p class="prose">Here are all of our patches: 61 to PhotonVision (00–60), 11 to the detectors, and two to Linux's camera driver. Filter by what they're for. Cards with a <strong>story</strong> link have a closer look below.</p>
   <p class="do">Click a group to filter the cards.</p>
   <div class="filters" id="pv-filters"></div>
   <div class="gallery" id="pv-gallery"></div>
@@ -225,7 +228,7 @@
 
     <article class="story" id="pv-s27">
       <div class="vis"><canvas id="pv-c27" aria-label="A sharp tag at 1280 by 800 next to a blurry tag upscaled from 320 by 240, and 20 restarts with one failing"></canvas></div>
-      <div class="txt"><span class="pn">photonvision-27 · reliability</span><h4>Silently stuck at 320×240</h4><p>At about <b>1 start in 20</b>, two parts of the software raced to set the camera's video mode, and the camera ended up sending 320×240 while everything believed it was 1280×800. Our fast decoder noticed the size mismatch, but after 30 frames it fell back to cscore, which quietly <b>stretched</b> the tiny frames to full size. Detection kept running at 122 fps on a blurry image, using 1.7 cores instead of 0.5. No error anywhere.</p><p><b>Fix:</b> a size mismatch never falls back. The frame is dropped, and after 1 s the camera is closed and reopened so the mode is applied again. The health check now fails any camera whose real format differs from what PhotonVision set.</p></div>
+      <div class="txt"><span class="pn">photonvision-27 · reliability</span><h4>Silently stuck at 320×240</h4><p>At about <b>1 start in 20</b>, two parts of the software raced to set the camera's video mode, and the camera ended up sending 320×240 while everything believed it was 1280×800. Our fast decoder noticed the size mismatch, but after 30 frames it fell back to cscore, which quietly <b>stretched</b> the tiny frames to full size. Detection kept running at 122 fps on a blurry image, using 1.7 cores instead of 0.5. No error anywhere.</p><p><b>Fix:</b> a size mismatch never falls back. The frame is dropped, and after 1 s the camera is closed and reopened so the mode is applied again. The health check now fails any camera whose real format differs from what PhotonVision set.</p><p><b>Then it came back</b> (<code>photonvision-37</code>). The driver had refused 1280×800 ("device busy"), and the "reopen" only paused and restarted the stream, which never sends the format again. Now the camera is switched to another mode and back, which really reopens it.</p></div>
     </article>
 
     <article class="story" id="pv-s15">
@@ -264,6 +267,8 @@
     <li>The hidden color decode (patch 09: 8.9 → 2.6 ms a frame) and the USB bandwidth card (patches 31–32): <a href="#speed">chapter 10</a>.</li>
     <li>Exposure in milliseconds (patch 10: "295" meant 29.5 ms): <a href="#settings">chapter 04</a>.</li>
     <li>The focus score (patch 34): <a href="#camera">chapter 03</a>.</li>
+    <li>Tag contrast and the hidden gain slider (patch 54): <a href="#settings">chapter 04</a>. Masks, profiles, the event pipeline and snapshots (40, 46–47, 51, 53): <a href="#camsetup">chapter 20</a>.</li>
+    <li>Match Ready, idling while disabled, quiet mode and the thermal cap (49, 50, 52, 56, 57): <a href="#pit">chapter 21</a>.</li>
   </ul>
   </div>
 
@@ -298,7 +303,7 @@
     <h5>Chapter 9 recap</h5>
     <ul>
       <li>PhotonVision runs one VisionRunner thread per camera: grab a frame, run the pipeline (detect, then pose), publish the result to NetworkTables, and feed the dashboard stream.</li>
-      <li>Ours is FRC 4143's CUDA fork, merged with upstream v2026.3.4, plus our patches 01–34, running Austin Schuh's detector from frc971/bos.</li>
+      <li>Ours is FRC 4143's CUDA fork, merged with upstream v2026.3.4, plus our patches 01–60, running Austin Schuh's detector from frc971/bos.</li>
       <li>It works with 2027 robot code because the message hash matches. Don't upgrade the robot's PhotonLib past alpha-6.</li>
       <li>The build applies every patch to a pinned commit, and the installer refuses a broken jar.</li>
       <li>The best fixes came from measuring: a hidden color decode, a silent 320×240 camera, frozen frames, a leak that only showed after minutes.</li>

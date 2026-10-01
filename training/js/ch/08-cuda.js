@@ -613,7 +613,8 @@ Site.chapter('cuda', (root) => {
   /* ── 12. GPU checkout line (simplified queue model) ───── */
   {
     const cv = $('#c-q'), st = Site.canvas(cv, 0.74);
-    const CAMS = [{ n: 'TopLeft', p: 1000 / 122, c: '#a78bfa' }, { n: 'TopRight', p: 1000 / 122, c: '#22d3ee' }, { n: 'GS 1', p: 1000 / 61, c: '#f59e0b' }, { n: 'GS 2', p: 1000 / 61, c: '#f472b6' }];
+    const CAMS = [{ n: 'TopLeft', p: 1000 / 122, c: '#a78bfa' }, { n: 'TopRight', p: 1000 / 122, c: '#22d3ee' }, { n: 'BotLeft', p: 1000 / 122, c: '#f59e0b' }, { n: 'BotRight', p: 1000 / 122, c: '#f472b6' }, { n: '5th Cam', p: 1000 / 122, c: '#a3e635' }];
+    const NC = CAMS.length;
     const PIECES = 8, CPUGAP = 0.12, DECODE = 0.45;
     // One simulation: ncam cameras, g ms of GPU work per frame, a single GPU doing one piece at a time.
     const makeSim = (ncam, g, seed0) => {
@@ -644,7 +645,7 @@ Site.chapter('cuda', (root) => {
       };
       return S;
     };
-    let ncam = 4, g = 0.9, sim = makeSim(4, 0.9, 5);
+    let ncam = 4, g = 0.8, sim = makeSim(4, 0.8, 5);
     const els = { busy: $('#c-q-busy'), avg: $('#c-q-avg'), max: $('#c-q-max') };
     const measure = () => {
       const m = makeSim(ncam, g, 9);
@@ -662,22 +663,22 @@ Site.chapter('cuda', (root) => {
       if (dt) sim.step(dt * 14, true); // 14 ms of Jetson time per real second
       const { ctx, w, h } = st, T = sim.T, WIN = 42, lx = 66, rx = w - 10, sx = (rx - lx) / WIN, x = (tt) => lx + (tt - (T - WIN)) * sx;
       ctx.fillStyle = BG; ctx.fillRect(0, 0, w, h);
-      const rowH = (h - 64) / 5;
+      const rowH = (h - 64) / (NC + 1);
       ctx.font = '600 11px "Plus Jakarta Sans", sans-serif';
       ctx.save(); ctx.beginPath(); ctx.rect(lx, 0, rx - lx, h); ctx.clip();
-      for (let i = 0; i < 4; i++) { ctx.fillStyle = 'rgba(255,255,255,.04)'; ctx.fillRect(lx, 10 + i * rowH + 3, rx - lx, rowH - 6); }
+      for (let i = 0; i < NC; i++) { ctx.fillStyle = 'rgba(255,255,255,.04)'; ctx.fillRect(lx, 10 + i * rowH + 3, rx - lx, rowH - 6); }
       for (const f of sim.frames) {
         const y = 10 + f.cam * rowH, a = x(f.t0), b = x(f.end ?? T);
         ctx.fillStyle = CAMS[f.cam].c; ctx.globalAlpha = .3; ctx.fillRect(a, y + 5, b - a, rowH - 10); ctx.globalAlpha = 1;
         ctx.fillRect(a, y + 5, 2, rowH - 10);
         if (f.inQ) { ctx.fillStyle = '#fff'; ctx.fillRect(b - 4, y + rowH / 2 - 4, 8, 8); }
       }
-      const gy = 10 + 4 * rowH + 8;
+      const gy = 10 + NC * rowH + 8;
       ctx.fillStyle = 'rgba(255,255,255,.06)'; ctx.fillRect(lx, gy, rx - lx, rowH);
       for (const l of sim.log) { ctx.fillStyle = CAMS[l.cam].c; ctx.fillRect(x(l.a), gy + 2, Math.max(1, x(l.b) - x(l.a) - .6), rowH - 4); }
       if (sim.gpu) { ctx.fillStyle = CAMS[sim.gpu.f.cam].c; ctx.fillRect(x(sim.gpu.start), gy + 2, x(T) - x(sim.gpu.start), rowH - 4); }
       ctx.restore();
-      for (let i = 0; i < 4; i++) { ctx.fillStyle = i < ncam ? CAMS[i].c : 'rgba(184,169,212,.3)'; ctx.fillText(CAMS[i].n, 6, 10 + i * rowH + rowH / 2 + 4); }
+      for (let i = 0; i < NC; i++) { ctx.fillStyle = i < ncam ? CAMS[i].c : 'rgba(184,169,212,.3)'; ctx.fillText(CAMS[i].n, 6, 10 + i * rowH + rowH / 2 + 4); }
       ctx.fillStyle = INK; ctx.fillText('GPU', 6, gy + rowH / 2 + 4);
       ctx.fillStyle = MUTED; ctx.fillText(`waiting in line: ${sim.queue.length}`, lx, h - 30);
       sim.queue.slice(0, 14).forEach((q, i) => { ctx.fillStyle = CAMS[q.f.cam].c; ctx.fillRect(lx + 116 + i * 12, h - 40, 9, 12); });

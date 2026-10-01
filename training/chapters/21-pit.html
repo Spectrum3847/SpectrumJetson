@@ -137,12 +137,13 @@
   </div>
 
   <h3>The 60-second health check</h3>
-  <p class="prose">Before you start fixing, or when you're not sure what's wrong, look at these in order. The first two need only a browser.</p>
+  <p class="prose">Before you start fixing, or when you're not sure what's wrong, look at these in order. The first three need only a browser.</p>
   <ol class="look">
-    <li><b class="t">The dashboard</b>Open <code>http://10.85.15.15:5800</code> (on the bench, over the USB-C cable: <code>192.168.55.1:5800</code>). Every camera (TopLeft, TopRight, BottomLeft, BottomRight) should show about <strong>120 fps</strong>. Hold a tag up to each one: it should get a box.<span class="full"> The video in the browser is capped at 30 fps on purpose, to save CPU. Judge by the fps number, not by how smooth the video looks.</span></li>
+    <li><b class="t">Match Ready</b>Open <b>Match Ready</b> in PhotonVision's sidebar (<code>photonvision-52</code>). It shows a big <strong>READY</strong> or <strong>NOT READY</strong>, with anything that needs attention first.<span class="full"> It runs the same checks as <code>health-check.sh</code>, every 30 s while the page is open (or press <b>Check again</b>), so the page and SSH always agree. Each camera gets a live tile: pipeline number and name, fps, latency, targets in view, and whether it's calibrated at its resolution. Every check is underneath, by section.</span></li>
+    <li><b class="t">The dashboard</b>Open <code>http://10.85.15.15:5800</code> (on the bench, over the USB-C cable: <code>192.168.55.1:5800</code>). Every camera (TopLeft, TopRight, BottomLeft, BottomRight) should show about <strong>120 fps</strong>. Hold a tag up to each one: it should get a box. <strong>About 30 fps while the robot is disabled is normal.</strong><span class="full"> That's idle mode (<code>photonvision-49</code>): while connected to a disabled robot, each camera processes 30 frames a second, and it's back to full rate within 5 ms of enable. The dashboard says "Robot disabled: cameras idle at 30 fps, full speed on enable"; press <b>Full speed</b> on it to test at full rate, or switch off <b>Idle while the robot is disabled</b> in Settings &gt; Robot state. It's saved across restarts, so <code>health-check.sh</code> warns while it's off: switch it back on. The video in the browser is capped at 30 fps on purpose too, to save CPU. Judge by the fps number, not by how smooth the video looks.</span></li>
     <li><b class="t">The Settings page</b><strong>CPU Throttling</strong> should say <code>None</code>. <code>OVER-CURRENT</code> means the power sagged (check the battery). <code>HIGH TEMP</code> means it's too hot (check the fan and airflow).<span class="full"> The GPU Usage chart below it read 10–13% with two cameras on the bench; a flat 0% means no detector is running.</span></li>
     <li><b class="t">The robot's view</b>In a <span class="term">NetworkTables</span> viewer on the robot side, <code>/photonvision/&lt;camera&gt;/health/fps</code> should be about 120 for every camera. If a camera's <code>health/problem</code> has text in it, it's telling you what to do. <code>/photonvision/jetson/throttle</code> should say <code>None</code>, and <code>heartbeat</code> should keep counting up.</li>
-    <li><b class="t">The health check</b>Still unsure? <span class="term" data-term="SSH" data-def="Secure Shell: logging in to another computer over the network to type commands on it.">SSH</span> in and run <code>health-check.sh</code>. It checks PhotonVision, the detector, every camera, the robot connection and the Jetson itself, and ends with <code>READY</code> or <code>NOT READY</code>. Every FAIL line says what to do.</li>
+    <li><b class="t">The health check</b>Still unsure? <span class="term" data-term="SSH" data-def="Secure Shell: logging in to another computer over the network to type commands on it.">SSH</span> in and run <code>health-check.sh</code>. It checks PhotonVision, the detector, every camera, the robot connection, storage and the Jetson itself, and ends with <code>READY</code> or <code>NOT READY</code>. Every FAIL line says what to do.<span class="full"> It also fails a camera whose port is empty, and the SSD if it reports any media errors (replace the drive). It reports the event pipeline, the far-tag search, and any camera driver setting that's live now but would be lost at the next boot.</span></li>
   </ol>
 
   <div class="lab full">
@@ -196,7 +197,8 @@
       <div class="cmd"><div class="line"><code>journalctl -k --since "-10 min" | grep usb</code></div><p><b>USB errors from the kernel.</b> <code>error -110</code> and "unable to enumerate" = not answering; <code>error -71</code> = data wires; "Not enough bandwidth" = USB budget. (<code>sudo dmesg</code> shows the same.)</p></div>
       <div class="cmd"><div class="line"><code>~/SpectrumJetson/scripts/jetson/usb-bandwidth.py</code></div><p><b>What each camera reserves</b> on the shared USB 2.0 budget, which port failed, and the fix.</p></div>
       <div class="cmd"><div class="line"><code>sudo systemctl restart photonvision</code></div><p><b>Restart PhotonVision.</b> Fine any time; same as Restart Software.</p></div>
-      <div class="cmd"><div class="line"><code>journalctl -u photonvision -b -1 -n 200</code></div><p><b>The end of the last boot's log</b>, e.g. after a power cut. The log is kept on the SSD across power cuts.</p></div>
+      <div class="cmd"><div class="line"><code>journalctl -u photonvision -b -1 -n 200</code></div><p><b>The end of the last boot's log</b>, e.g. after a power cut. The log is kept on the SSD across power cuts, except while quiet mode has it in RAM after a match (below).</p></div>
+      <div class="cmd"><div class="line"><code>~/SpectrumJetson/scripts/jetson/ro-root.sh status</code></div><p><b>Is the system partition read-only?</b> It should be at competition, and anything installed while it's on is gone at the next boot. To update: <code>ro-root.sh off</code>, update, <code>ro-root.sh on</code>. Each one reboots the Jetson, so not while a camera is stuck.</p></div>
       <div class="cmd avoid"><div class="line"><code>sudo reboot</code></div><p><b>Avoid if any camera is stuck.</b> Power-cycle the robot instead.</p></div>
     </div>
     <details class="deep">
@@ -213,10 +215,23 @@
     </details>
   </div>
 
+  <h3 class="full">Things that look broken but aren't</h3>
+  <div class="full">
+    <ul class="prose">
+      <li><b>30 fps while disabled.</b> Idle mode, on purpose (above). Any enable brings full speed back within 5 ms.</li>
+      <li><b>Rewind stopped recording after a match.</b> That's <strong>quiet mode</strong> (<code>photonvision-56</code>). Power cuts only damage an SSD while it's being written, and the robot is switched off a few minutes after every match. So when a match ends (field connected, teleop, then disabled), or after 60 s disabled, the Jetson stops writing: Rewind stops, PhotonVision's log file closes (the log still shows in the UI), the system log moves to RAM, and the scratch partition goes read-only. The cameras keep running and tags are still found. <strong>Any enable ends it.</strong> A recording someone asks for always wins: <b>Record now</b> in Settings › Rewind, field calibration, or robot code's <code>/photonvision/rewind/record</code> keeps quiet mode off for as long as it records.</li>
+      <li><b>A dashboard tab's video went blank while you looked away.</b> A tab behind another tab, or in a minimised window, disconnects its streams so the Jetson stops encoding them (<code>photonvision-48</code>). They come back when you look at the tab again.</li>
+      <li><b>Every camera at about 60 fps, on a fanless Jetson.</b> The thermal cap (<code>photonvision-57</code>): at 95 °C every camera is capped at 60 fps until the chip is under 88 °C. Match Ready and Settings › Robot state show it. Give it air, or let it cool between matches.</li>
+    </ul>
+    <h4>Getting a good setup back</h4>
+    <p class="prose">Every change in the dashboard is saved right away, with no undo. If a good setup got lost, open the Settings page's <b>Settings snapshots</b> card and <b>Restore</b> the last good one: every camera's pipelines, settings and calibrations come back, and PhotonVision restarts (back in about 10 s). It saves the current settings first as "Before restoring …", so a restore can be undone. PhotonVision saves a snapshot by itself the first time the field connects each day, so there's always one from the start of the event (<code>photonvision-53</code>). Settings from any earlier match are also in that match's robot log (<code>settingsJson</code>).</p>
+  </div>
+
   <h3>Before you leave the pit</h3>
   <p class="prose">Five minutes before queueing. Tap each one as you check it.</p>
   <ul class="pchk" id="pit-check">
-    <li><button type="button" aria-pressed="false">Every camera streaming at about 120 fps on the dashboard: TopLeft, TopRight, BottomLeft, BottomRight</button></li>
+    <li><button type="button" aria-pressed="false">Match Ready says READY</button></li>
+    <li><button type="button" aria-pressed="false">Every camera streaming on the dashboard: TopLeft, TopRight, BottomLeft, BottomRight (about 120 fps, or 30 while the robot is disabled)</button></li>
     <li><button type="button" aria-pressed="false">Hold a tag to each camera: PhotonVision boxes it, and the robot code sees a target</button></li>
     <li><button type="button" aria-pressed="false">Pose sanity: park the robot on a spot you know, and the field view puts it there (within a few cm)</button></li>
     <li><button type="button" aria-pressed="false">Settings: CPU Throttling says None</button></li>
@@ -240,7 +255,7 @@
     <h5>Chapter 21 recap</h5>
     <ul>
       <li>Start from the symptom. The quickest check is always first.</li>
-      <li>Look first: dashboard fps (~120), CPU Throttling (None), the health topics, then <code>health-check.sh</code>.</li>
+      <li>Look first: Match Ready (READY), dashboard fps (~120, or 30 while disabled), CPU Throttling (None), the health topics, then <code>health-check.sh</code>.</li>
       <li>A stuck camera needs its power cut: replug it or power-cycle the robot. Don't reboot the Jetson.</li>
       <li>Restarting PhotonVision is always safe.</li>
     </ul>
@@ -249,10 +264,11 @@
     <h5>Chapter 21 recap</h5>
     <ul>
       <li>Symptom first: the finder above covers the problems we've actually seen, with the fix and how to confirm it.</li>
-      <li>The 60-second check: dashboard fps, CPU Throttling, <code>/photonvision/&lt;camera&gt;/health/</code> and <code>/photonvision/jetson/</code>, then <code>health-check.sh 4</code> over SSH.</li>
+      <li>The 60-second check: Match Ready, dashboard fps (30 while disabled is idle mode), CPU Throttling, <code>/photonvision/&lt;camera&gt;/health/</code> and <code>/photonvision/jetson/</code>, then <code>health-check.sh 4</code> over SSH.</li>
       <li><code>971 stats</code> lines: fps, detect time, tags and decision margin, per camera, every second.</li>
       <li>Restart PhotonVision freely. Replug or power-cycle for stuck cameras. Avoid <code>sudo reboot</code> when cameras are stuck.</li>
-      <li>Logs: Download Logs, Export Settings, or <code>journalctl</code> over SSH. The log survives power cuts.</li>
+      <li>Logs: Download Logs, Export Settings, or <code>journalctl</code> over SSH. The log survives power cuts, except during quiet mode after a match.</li>
+      <li>A lost setup: restore a settings snapshot. Recording stops after a match: quiet mode, ended by any enable.</li>
     </ul>
   </div>
 </div>

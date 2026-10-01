@@ -78,17 +78,19 @@ Site.chapter('latency', (root) => {
   {
     const S = [
       { n: 'Exposure', ms: 5, k: 'm', d: 'The sensor collects light for 5 ms (our setting: exposure 50, in 100 µs units). Every pixel starts and stops together (global shutter). The frame\'s timestamp points at the middle of this bar.' },
-      { n: 'Readout + JPEG', ms: 1.2, k: 'u', d: 'The camera reads the pixels out and starts compressing them into a JPEG before sending the first byte. This delay is inside the camera and not measured yet (SPECTRUM_CAMERA_DELAY_US). Bar width is a placeholder.' },
-      { n: 'USB transfer', ms: 4.9, k: 'm', d: 'A ~50 KB JPEG crosses USB 2.0 in 1280-byte slices, one slice every 125 µs microframe: about 4.9 ms. The Linux driver stamps the frame when its first packet arrives, at the start of this bar.' },
-      { n: 'Decode', ms: 2.6, k: 'm', d: 'The JPEG is turned back into a 1280×800 gray image: about 2.6 ms, on the Jetson\'s NVJPG hardware decoder (or libjpeg-turbo on the CPU). It was 8.9 ms before our fix. Our Jetson\'s log: "nvjpg 362.13 frames/s (2.58713 ms)".' },
-      { n: 'GPU detect', ms: 2, k: 'm', d: 'The CUDA detector finds every tag and its four corners on the GPU: about 1.6–2 ms per frame with a tag in view (bench measurements). Our Jetson\'s log with no tags in view shows about 0.9–1.0 ms on the Thriftiest Cams.' },
+      { n: 'Before sending', ms: 1.2, k: 'u', d: 'Any time between the end of the exposure and the camera\'s first USB packet. This delay is inside the camera and not measured yet (SPECTRUM_CAMERA_DELAY_US). Bar width is a placeholder.' },
+      { n: 'Camera sends', ms: 8.1, k: 'm', d: 'The slowest step, and it\'s the camera: it streams each JPEG (34–36 KB here) out over about one frame period while its sensor reads out. Timed with the camera driver\'s own log: 8.1 ms from the first USB packet to the last, on every camera. At our USB cap the frame could cross in 3.4 ms, so the cap costs no latency. The frame\'s timestamp comes from the camera\'s own clock, at about the start of this bar.' },
+      { n: 'To the decoder', ms: 0.15, k: 'm', d: 'From the last packet to the start of decoding: 0.15 ms (measured). Since then, our driver also looks for finished packets every 2 ms instead of every 4 (urb_packets=16), which took another 1.2 ms off: 12.98 → 11.76 ms from capture to result with 5 cameras.' },
+      { n: 'Decode', ms: 2.8, k: 'm', d: 'The JPEG is turned back into a 1280×800 gray image: about 2.8 ms on the Jetson\'s NVJPG hardware decoders, with 4–5 cameras sharing the two of them. It was 8.9 ms before our fix.' },
+      { n: 'GPU detect', ms: 1.2, k: 'm', d: 'The CUDA detector finds every tag and its four corners on the GPU: about 1.2 ms per frame with 4 cameras, 2.1 ms with 5 cameras facing bright ceiling lights (more candidate blobs to check).' },
       { n: 'Pose solve', ms: 0.5, k: 'e', d: 'PhotonVision solves the camera\'s pose from the corners (single-tag and multi-tag PnP) and packs the result. A fraction of a millisecond; our estimate, not separately measured.' },
       { n: 'NetworkTables', ms: 0.5, k: 'e', d: 'The result goes over Ethernet to the SystemCore. On a wired network that\'s well under a millisecond (estimate). PhotonVision\'s latency readout stops at publish.' },
       { n: 'Robot loop', ms: 20, k: 'r', d: 'Robot code runs every 20 ms and reads new results when it next runs: anywhere from 0 to 20 ms later. With the timestamp, this wait doesn\'t add error: the estimator knows exactly how old the measurement is.' },
     ];
     let t0 = 0; S.forEach((s) => { s.a = t0; t0 += s.ms; s.b = t0; });
-    S[7].a = S[6].b; S[7].b = S[6].b + 20;
-    const TOT = S[7].b + 1;
+    const RL = S.length - 1; // the robot loop row
+    S[RL].a = S[RL - 1].b; S[RL].b = S[RL - 1].b + 20;
+    const TOT = S[RL].b + 1;
     const cv = $('#l-tl'); cv.style.height = (root.clientWidth < 560 ? 380 : 300) + 'px';
     const st = Site.canvas(cv);
     const card = $('#l-tl-card'), btn = $('#l-tl-play');
@@ -108,7 +110,7 @@ Site.chapter('latency', (root) => {
       if (!geo) return;
       const r = cv.getBoundingClientRect(), y = e.clientY - r.top;
       const i = Math.floor((y - geo.top) / geo.rh);
-      if (i >= 0 && i < S.length) { sel = i; T = S[i].a + S[i].ms * 0.999; if (i === 7) T = S[7].a + 10; playing = false; btn.textContent = '▶ Play'; show(i); }
+      if (i >= 0 && i < S.length) { sel = i; T = S[i].a + S[i].ms * 0.999; if (i === RL) T = S[RL].a + 10; playing = false; btn.textContent = '▶ Play'; show(i); }
     });
     let lastShown = -1;
     Site.loop(cv, (_, dt) => {
@@ -122,12 +124,12 @@ Site.chapter('latency', (root) => {
       // grid
       ctx.font = font(10, 500, 'mono'); ctx.textAlign = 'center';
       for (let m = 0; m <= TOT; m += narrow ? 10 : 5) { ctx.strokeStyle = LINE; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(X(m), top - 6); ctx.lineTo(X(m), h - 38); ctx.stroke(); ctx.fillStyle = MUTED; ctx.fillText(m + ' ms', X(m), h - 24); }
-      // bracket: light to published
-      const pub = S[6].b;
+      // bracket: mid-exposure to the detector's result
+      const mid = 2.5, pub = S[5].b;
       ctx.strokeStyle = '#c4b5fd'; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.moveTo(X(0), 16); ctx.lineTo(X(0), 22); ctx.lineTo(X(pub), 22); ctx.lineTo(X(pub), 16); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(X(mid), 16); ctx.lineTo(X(mid), 22); ctx.lineTo(X(pub), 22); ctx.lineTo(X(pub), 16); ctx.stroke();
       ctx.fillStyle = '#c4b5fd'; ctx.font = font(narrow ? 10 : 11, 600); ctx.textAlign = 'center';
-      ctx.fillText(narrow ? '≈15 ms + camera delay' : '≈ 15 ms + camera delay: light → answer published', X(pub / 2), 12);
+      ctx.fillText(narrow ? '≈14.5 ms + camera delay' : '≈ 14.5 ms + camera delay: mid-exposure → result', X((mid + pub) / 2), 12);
       let active = -1;
       S.forEach((s, i) => {
         const y = top + i * rh, bh = Math.min(20, rh - 6), by = y + (rh - bh) / 2;
@@ -157,9 +159,9 @@ Site.chapter('latency', (root) => {
       ctx.beginPath(); ctx.moveTo(X(2.5), top - 4); ctx.lineTo(X(2.5), yb); ctx.stroke(); ctx.setLineDash([]);
       ctx.fillStyle = '#a3e635'; ctx.font = font(10, 700); ctx.textAlign = 'left'; ctx.fillText('timestamp', X(2.5) + 4, h - 8);
       ctx.strokeStyle = 'rgba(245,158,11,.8)'; ctx.setLineDash([2, 3]); ctx.beginPath(); ctx.moveTo(X(S[2].a), top + 2 * rh); ctx.lineTo(X(S[2].a), yb); ctx.stroke(); ctx.setLineDash([]);
-      if (!narrow) { ctx.fillStyle = '#f59e0b'; ctx.fillText('driver stamp (first packet)', X(S[2].a) + 4, h - 8); }
+      if (!narrow) { ctx.fillStyle = '#f59e0b'; ctx.fillText('camera-clock stamp (starts sending)', X(S[2].a) + 4, h - 8); }
       // playhead
-      if (T > 0) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(X(T), top - 6); ctx.lineTo(X(T), yb); ctx.stroke(); ctx.fillStyle = '#fff'; ctx.font = font(11, 700, 'mono'); ctx.textAlign = X(T) > w - 70 ? 'right' : 'left'; ctx.fillText(T.toFixed(1) + ' ms', X(T) + (ctx.textAlign === 'right' ? -5 : 5), top + (T < S[7].a ? 7 : 6) * rh + rh / 2 + 4); }
+      if (T > 0) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(X(T), top - 6); ctx.lineTo(X(T), yb); ctx.stroke(); ctx.fillStyle = '#fff'; ctx.font = font(11, 700, 'mono'); ctx.textAlign = X(T) > w - 70 ? 'right' : 'left'; ctx.fillText(T.toFixed(1) + ' ms', X(T) + (ctx.textAlign === 'right' ? -5 : 5), top + (T < S[RL].a ? RL : RL - 1) * rh + rh / 2 + 4); }
       if (playing && active !== lastShown && active >= 0) { lastShown = active; sel = -1; show(active); }
     });
   }
@@ -326,7 +328,7 @@ Site.chapter('latency', (root) => {
     let E = 5;
     const late = $('#l-late'), sub = $('#l-sub');
     Site.range($('#l-exp'), (v) => { E = v; late.textContent = (v / 2).toFixed(1) + ' ms + ?'; sub.textContent = (v / 2).toFixed(2) + ' ms'; }, (v) => v.toFixed(1) + ' ms');
-    const D = 1.0, USB = 4.9;
+    const D = 1.0, USB = 8.1;
     Site.loop(cv, (t) => {
       const { ctx, w, h } = st;
       ctx.fillStyle = LAB_BG; ctx.fillRect(0, 0, w, h);
@@ -374,8 +376,8 @@ Site.chapter('latency', (root) => {
       const fp = E + D;
       if (T >= fp) {
         ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(X(fp), yb - 44); ctx.lineTo(X(fp), yb + bh); ctx.stroke();
-        ctx.fillStyle = '#fcd34d'; ctx.font = font(11, 700); ctx.textAlign = 'left'; ctx.fillText('driver stamps the frame', X(fp) + 5, yb - 44);
-        ctx.fillStyle = MUTED; ctx.font = font(10.5, 500); ctx.fillText('(first packet arrives)', X(fp) + 5, yb - 30);
+        ctx.fillStyle = '#fcd34d'; ctx.font = font(11, 700); ctx.textAlign = 'left'; ctx.fillText('the frame is stamped', X(fp) + 5, yb - 44);
+        ctx.fillStyle = MUTED; ctx.font = font(10.5, 500); ctx.fillText('(camera\'s clock: it starts sending)', X(fp) + 5, yb - 30);
       }
       if (T >= fp + 1.2) {
         const a = Site.ease(Site.clamp((T - fp - 1.2) / 2, 0, 1));

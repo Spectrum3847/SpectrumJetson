@@ -44,7 +44,7 @@ const MATS = {
 
 // Clickable labels. Each covers one or more nodes.
 const HOTS = [
-  ['fan', 'Fan', ['fan'], 'Pulls air through the heatsink. It runs at full speed, about 5,600 rpm.'],
+  ['fan', 'Fan', ['fan'], 'Pulls air through the heatsink. On NVIDIA\'s quiet profile it turned at 775 rpm on our bench (43 °C). FAN=full runs it at about 5,600 rpm.'],
   ['heatsink', 'Heatsink', ['heatsink'], 'Metal fins spread the chip\'s heat into the air. A leaf spring presses it onto the module.'],
   ['module', 'Orin Nano module', ['module', 'module_screws'], 'The computer itself, 69.6 × 45 mm: the SoC (CPU, GPU, engines) and 8 GB of LPDDR5.'],
   ['sodimm', 'SO-DIMM socket', ['sodimm'], '260 pins, the shape laptops use for RAM. Power, PCIe, USB, Ethernet and camera signals all pass through it.'],
@@ -586,8 +586,10 @@ function thermalLab(root) {
     // limits
     const hline = (T, col, label) => { ctx.strokeStyle = col; ctx.setLineDash([5, 4]); ctx.beginPath(); ctx.moveTo(pl, Y(T)); ctx.lineTo(w - pr, Y(T)); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = col; ctx.textAlign = 'left'; ctx.fillText(label, pl + 6, Y(T) - 5); };
     hline(99, '#f43f5e', '99 °C: throttling starts');
+    hline(95, '#f59e0b', '');
+    ctx.textAlign = 'right'; ctx.fillText('95 °C: fanless mode caps cameras at 60 fps', w - pr - 6, Y(95) + 15);
     hline(43, '#22d3ee', '');
-    ctx.textAlign = 'right'; ctx.fillText('fan at full speed: 43 °C (measured)', w - pr - 6, Y(43) + 15);
+    ctx.textAlign = 'right'; ctx.fillText('fan on, quiet profile: 43 °C (measured)', w - pr - 6, Y(43) + 15);
     // curve
     let peak = 0;
     ctx.lineWidth = 3; ctx.lineJoin = 'round';

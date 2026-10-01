@@ -172,11 +172,11 @@ Site.chapter('camsetup', (root) => {
       ['USB bandwidth', 'Streaming, not "squeezed" (under 90%), largest frame fits 1.3x+', 2],
       ['Team defaults', 'AprilTagCuda, 1280x800 MJPEG, 5.0 ms, cutoff 15, Low Latency off', 3],
       ['Focus and lock', 'Centre 100%, grid near 100% everywhere, lens glued', 4],
-      ['Exposure', 'Far tags found without flicker; about 120 fps', 5],
+      ['Exposure', 'Far tags found without flicker; tag contrast good; about 120 fps', 5],
       ['Calibrate', '100+ snapshots, error under 1 px, fx near 737 px; 3D came on', 6],
       ['Measure the mount', 'robotToCamera in robot code; mount estimate agrees', 7],
       ['Copy to siblings', 'Copy settings done; settingsJson matches', 8],
-      ['Final checks and backup', 'fps, distances, pose on a measured spot, AndyMark layout, Export Settings', 9],
+      ['Final checks and backup', 'fps, distances, pose on a measured spot, AndyMark layout, snapshot saved, Export Settings', 9],
     ];
     const KEY = 'vt-camsetup';
     let data = {};

@@ -166,9 +166,9 @@
       </div></div>
       <div class="step"><div class="box">
         <span class="kicker full">Step 2 · Cooling</span>
-        <h4>Heatsink and fan</h4><p class="short">They carry the chip's heat away. Our fan runs at full speed.</p>
+        <h4>Heatsink and fan</h4><p class="short">They carry the chip's heat away. Our fan runs on NVIDIA's quiet profile.</p>
         <p class="full">Every computer turns its electricity into heat. The metal <strong>heatsink</strong> soaks up the chip's heat and spreads it into thin fins, and the <strong>fan</strong> blows air through them. A leaf spring presses the heatsink onto the chip.</p>
-        <p class="full">The chip slows itself down at 99 °C to protect itself (<em>throttling</em>). We run the fan at full speed all the time: it took our bench Jetson from 56 °C to <strong>43 °C</strong>.</p>
+        <p class="full">The chip slows itself down at 99 °C to protect itself (<em>throttling</em>), and shuts down at 104 °C. Our fan runs on NVIDIA's <strong>quiet profile</strong>: NVIDIA's fan program, <code>nvfancontrol</code>, picks its speed from the chip's temperature. On the bench it turned at just 775 rpm, and the chip sat at <strong>43 °C</strong>. Full speed (about 5,600 rpm) is one setting away: <code>FAN=full</code>.</p>
       </div></div>
       <div class="step"><div class="box">
         <span class="kicker full">Step 3 · The brain</span>
@@ -208,7 +208,8 @@
       <div class="step"><div class="box">
         <span class="kicker full">Step 8 · Underneath</span>
         <h4>The SSD: where Linux lives</h4><p class="short">Underneath, a 256 GB SSD holds Linux.</p>
-        <p class="full">Flip the board over. The small card is an <span class="term">NVMe</span> <span class="term">SSD</span>, plugged into an <span class="term">M.2</span> Key M slot. Ours holds 256 GB, and the Jetson boots Linux from it. We don't use an SD card at all: the SSD is much faster and tougher.</p>
+        <p class="full">Flip the board over. The small card is an <span class="term">NVMe</span> <span class="term">SSD</span>, plugged into an <span class="term">M.2</span> Key M slot. Ours holds 256 GB, and the Jetson boots Linux from it. We don't use an SD card at all: the SSD is much faster.</p>
+        <p class="full">Not every SSD is tough, though. Our first one, a budget drive, died after 21 power cuts. The story, and how the SSD is split up now, is in <a href="#failsafes">chapter 16</a>.</p>
         <p class="full">There are two Key M slots: a long one (2280) with 4 <span class="term">PCIe</span> lanes, where our SSD goes, and a short one (2230) with 2 lanes, which is empty. (The CAD draws a short 2230 drive.)</p>
       </div></div>
       <div class="step"><div class="box">
@@ -362,18 +363,31 @@ NV Power Mode: MAXN_SUPER
         <div class="ctl"><label>Robot on before the match <output></output></label><input type="range" id="j-t-wait" min="0" max="30" step="1" value="10"><div class="note">disabled, PhotonVision stopped, 7.2 W</div></div>
         <div class="ctl"><label>Heatsink <output></output></label><input type="range" id="j-t-r" min="2" max="8" step="0.1" value="6.2"><div class="note">thermal resistance: lower is a better heatsink. Stock is 6.2 °C/W.</div></div>
         <div class="seg" id="j-t-seg"><button data-v="6.2" class="on">Stock, fan off</button><button data-v="4">4 °C/W design</button></div>
-        <p class="hint">The match is 4 minutes at full power (9.5 W). A simplified model fitted to our two fan-off tests; it matched them within 0.8 °C. Real enclosures and event halls differ, so test the real thing.</p>
+        <p class="hint">The match is 4 minutes at full power (9.5 W). A simplified model fitted to our two fan-off tests from Sept 24, with 2 cameras; it matched them within 0.8 °C. It's a model, not a measurement: five cameras draw more (11.6 W in a match), and real enclosures and event halls differ. Our real fanless runs are below.</p>
       </div>
     </div>
   </div>
 
-  <div class="callout spectrum"><h5>What we measured: going fanless</h5><p>A sealed Jetson would be nice on a robot (no dust, no fan to fail). So we switched the fan off and watched. At full power the stock heatsink climbed from 42 to 85 °C in under 10 minutes and was still rising: its steady state is right at the 99 °C throttle point. Our conclusion (TECHNICAL.md, "Fanless"): a fanless design needs a heatsink of about <strong>4 °C/W or better</strong>, tested through a real match cycle. Until then, the fan stays on, at full speed. The good news: a dead fan isn't fatal. The chip slowly climbs to its throttle point and slows down, instead of shutting off.</p></div>
+  <div class="callout spectrum"><h5>What we measured: going fanless</h5><p>A sealed Jetson would be nice on a robot (no dust, no fan to fail). So we switched the fan off and watched. At full power the stock heatsink climbed from 42 to 85 °C in under 10 minutes and was still rising. The good news: a dead fan isn't fatal. The chip slowly climbs to its throttle point and slows down, instead of shutting off.</p><p>Now we're testing the stock heatsink with its fan sealed under an aluminium plate and thermal tape. <code>FAN=off</code> keeps the fan stopped. If the chip reaches <strong>95 °C</strong>, the Jetson caps every camera at <strong>60 fps</strong> until it's under 88 °C (<code>spectrum-fan-guard</code> and <code>photonvision-57</code>; the Match Ready page shows it). That's before the chip's own throttling at 99 °C.</p></div>
+
+  <div class="table-wrap">
+    <table class="data">
+      <tr><th>Fanless, plate only, no airflow</th><th>Result</th></tr>
+      <tr><td>Full rate, without a break</td><td>89.4 °C after 18 min, still rising ~0.3 °C/min (stopped there). Never needed: a match is 2:30.</td></tr>
+      <tr><td>Idle at 30 fps (robot disabled), after that</td><td>Settles at <strong>81 °C</strong>, 8.7 W</td></tr>
+      <tr><td>Three matches from that idle, 8 min of queue between</td><td>Peaks <strong>86.2, 87.1, 87.6 °C</strong>, 11.6 W during a match. Each match adds 4–5 °C; the queue brings it back to ~83 °C.</td></tr>
+    </table>
+    <p class="small muted">From our Jetson, Oct 1, 2026 (5 cameras, 4 on AprilTags at 122 fps, lights on). The pessimistic case: at an event the robot is off most of the time, so every match starts much cooler; <code>tests/thermal/event-sim.sh</code> (power off, then a cold start) measures that case. The fan, on the quiet profile, is still the default; fanless is <code>FAN=off</code>.</p>
+  </div>
+
+  <div class="callout pitfall"><h5>Make sure "off" really means off</h5><p>Our first plate tests seemed to level off at about 73 °C. Great news, we thought. But the fan wasn't really off: Linux's own thermal settings switch it on at 74 °C, and that's what held the temperature there. Now <code>FAN=off</code> takes the fan away from the kernel too. A test only proves what it really tested.</p></div>
 
   <h3>Power from the robot</h3>
   <div class="split top">
     <div class="prose">
       <p>A robot battery starts around 12–13 V and sags when motors pull hard, sometimes well below 10 V. Computers hate that. So the Jetson doesn't take battery power directly: a <strong>15 V boost regulator</strong> turns whatever the battery gives into a steady 15 V for the DC jack.</p>
       <p>On 2026-09-25 we tested it by lowering the input voltage on a bench supply: the Jetson <strong>kept running down to a 5 V input</strong>. That's far below any <span class="term">brownout</span> the robot will see.</p>
+      <p>Five cameras at 122 fps take 11.1–11.2 W (facing bright ceiling lights, the hard case). While the robot is disabled, each camera processes only 30 frames a second instead of 122, so five cameras take <strong>7.8 W instead of 9.7 W</strong> (<code>photonvision-49</code>). That's less heat in the queue.</p>
       <p>If the supply does sag, the Jetson reports it: PhotonVision publishes a throttle reason (<code>OVER-CURRENT</code>, <code>HIGH TEMP</code>) on <span class="term">NetworkTables</span> so robot code can raise an alert (chapter 16).</p>
     </div>
     <div class="flow" style="margin:0;flex-direction:column">
@@ -381,7 +395,7 @@ NV Power Mode: MAXN_SUPER
       <div class="arrow" style="transform:rotate(90deg);height:30px">→</div>
       <div class="node"><b>15 V boost regulator</b>steady output from 5 V and up (tested)</div>
       <div class="arrow" style="transform:rotate(90deg);height:30px">→</div>
-      <div class="node"><b>Jetson DC jack</b>about 9 W with 2 cameras</div>
+      <div class="node"><b>Jetson DC jack</b>about 9 W with 2 cameras, 11.1–11.2 W with 5</div>
     </div>
   </div>
 
@@ -428,7 +442,7 @@ NV Power Mode: MAXN_SUPER
     <ul>
       <li>The devkit is a small <b>module</b> (the computer) plugged into a <b>carrier board</b> (power and ports), with a heatsink and fan on top and an NVMe SSD and Wi-Fi card underneath.</li>
       <li>The <b>SoC</b> puts 6 CPU cores, a 1,024-core GPU, JPEG decoders and the memory controller on one chip. CPU and GPU share 8 GB of RAM at 102 GB/s.</li>
-      <li>We run <b>MAXN SUPER</b> with clocks locked and the fan at full speed: under 10 W with four cameras.</li>
+      <li>We run <b>MAXN SUPER</b> with clocks locked and the fan on NVIDIA's quiet profile: under 10 W with four cameras. Going fanless is being tested; above 95 °C the cameras are capped at 60 fps.</li>
       <li>All USB 2.0 ports share <b>one bus</b>: four USB-A, USB-C and the Bluetooth. That shapes how many cameras fit.</li>
     </ul>
   </div>

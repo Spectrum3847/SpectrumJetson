@@ -244,7 +244,14 @@
     <figcaption>Stock: two Thriftiest Cams book 6120 bytes, and a third is refused with "No space left on device". Capped: four cameras on the USB-A ports plus a fifth on a USB-C hub fit in 6720. Chapter 10's lab lets you plug in cameras and pick each one's booking yourself.</figcaption>
   </figure>
 
-  <div class="callout spectrum"><h5>What we did: a one-knob patch</h5><p>Our patch (<code>kernel/uvcvideo-payload-cap.patch</code>) adds one setting to the driver, <code>payload_cap</code>. For the Thriftiest Cam it caps the booking at <strong>1280 bytes</strong>, still about 1.4× the largest frame we've measured at 120 fps. Tested with 2 cameras: 122 fps each, every frame complete. The price: results reach the robot ~2 ms later. Timestamps don't get worse, because the driver stamps a frame when its <em>first</em> packet arrives. The patch also counts each camera's bytes and largest frames for PhotonVision's USB bandwidth card (<a href="#speed">chapter 10</a>).</p></div>
+  <div class="callout spectrum"><h5>What we did: a one-knob patch</h5><p>Our patch (<code>kernel/uvcvideo-payload-cap.patch</code>) adds one setting to the driver, <code>payload_cap</code>. For the Thriftiest Cam it caps the booking at <strong>1280 bytes</strong>, still about 1.4× the largest frame we've measured at 120 fps. Tested with 2 cameras: 122 fps each, every frame complete. The price: results reach the robot ~2 ms later. Timestamps don't get worse: they come from the camera's own clock (see below). The patch also counts each camera's bytes and largest frames for PhotonVision's USB bandwidth card (<a href="#speed">chapter 10</a>).</p></div>
+
+  <h3>Two more driver settings: steadier and sooner</h3>
+  <div class="cards reveal">
+    <div class="card"><div class="icon">⏱️</div><h4>Timestamps from the camera's clock</h4><p>The stock driver stamps a frame when its first USB packet is processed. It handles packets in 4 ms batches, so the stamps landed on 4 ms steps. With <code>hwtimestamps=1</code> it uses the camera's own clock instead. The timestamps the robot gets now vary by <strong>0.01 ms instead of 0.95 ms</strong>. That matters when the robot turns: 1 ms is 0.36° at 360°/s.</p></div>
+    <div class="card"><div class="icon">📦</div><h4>Smaller batches: 1.2 ms sooner</h4><p>The driver only looks at a batch of 32 packets (4 ms) once the whole batch is in, so a finished frame could wait up to 4 ms. Our second patch, <code>kernel/uvcvideo-urb-packets.patch</code>, adds <code>urb_packets</code>. At 16 packets (2 ms), frames reach PhotonVision sooner: <strong>12.98 → 11.76 ms</strong> from capture to result with 5 cameras, for about 0.1 of a CPU core.</p></div>
+  </div>
+  <p class="prose"><code>11-uvcvideo-payload-cap.sh --install</code> saves both settings, and <code>health-check.sh</code> checks them. It also warns when a setting was only changed live and not saved, so a reboot would undo it.</p>
 
   <div class="full">
   <div class="termsplit reveal">
@@ -333,6 +340,9 @@ Every camera fits, and nothing failed to connect.</pre><figcaption>From our Jets
 make -C /lib/modules/$(uname -r)/build M=$PWD CONFIG_USB_VIDEO_CLASS=m modules
 <span class="c"># the setting, applied every time the module loads</span>
 <span class="k">options</span> uvcvideo payload_cap=1bcf:28c5:1280,32e4:0144:1280,32e4:62f0:1600
+<span class="c"># the two other settings, each saved in its own file</span>
+<span class="k">options</span> uvcvideo hwtimestamps=1
+<span class="k">options</span> uvcvideo urb_packets=16
 <span class="c"># swap the running driver (PhotonVision stops for a few seconds)</span>
 sudo modprobe -r uvcvideo &amp;&amp; sudo modprobe uvcvideo
 cat /sys/module/uvcvideo/parameters/payload_cap</pre>
@@ -405,27 +415,41 @@ multi-user.target reached after 6.183s in userspace
 
   <div class="full">
   <h3>Everything else we tuned</h3>
-  <p class="prose">A laptop and a robot want different things from Linux. <code>scripts/jetson/09-robot-tuning.sh</code> makes ten changes (and <code>--undo</code> reverses them):</p>
+  <p class="prose">A laptop and a robot want different things from Linux. <code>scripts/jetson/09-robot-tuning.sh</code> makes eleven changes (and <code>--undo</code> reverses them):</p>
   <div class="cards reveal">
     <div class="card"><div class="icon">🚫</div><h4>No automatic updates</h4><p>Nothing may update NVIDIA or Java packages in the middle of an event.</p></div>
     <div class="card"><div class="icon">🖥️</div><h4>Headless</h4><p>Boots to a text console, no desktop. Nobody looks at a screen on a robot.</p></div>
     <div class="card"><div class="icon">⏱️</div><h4>Clocks locked</h4><p><code>jetson_clocks</code> at every boot: CPU 1728 MHz, GPU 1020 MHz, so timing never wobbles.</p></div>
     <div class="card"><div class="icon">🔌</div><h4>USB autosuspend off</h4><p>Linux likes to nap idle USB devices to save power. Cameras must never nap.</p></div>
-    <div class="card"><div class="icon">🔋</div><h4>Power-cut safe</h4><p>A robot is switched off, never shut down. Data reaches the SSD within 3 s (not 30), and the system log is kept on the SSD.</p></div>
-    <div class="card"><div class="icon">🌀</div><h4>Fan at full speed</h4><p>Noise doesn't matter on a robot: 56 → 43 °C.</p></div>
+    <div class="card"><div class="icon">🔋</div><h4>Power-cut safe</h4><p>A robot is switched off, never shut down. Data reaches the SSD within 3 s (not 30), and the system log is kept on the SSD. (A power cut can still hurt the SSD itself: <a href="#failsafes">chapter 16</a>.)</p></div>
+    <div class="card"><div class="icon">🌀</div><h4>Fan on the quiet profile</h4><p>NVIDIA's quiet profile: 775 rpm at 43 °C on the bench. <code>FAN=full</code> for full speed, <code>FAN=off</code> for a fanless heatsink (<a href="#jetson">chapter 5</a>).</p></div>
     <div class="card"><div class="icon">🐕</div><h4>Recover from hangs</h4><p>30 s hardware watchdog, reboot 3 s after a kernel panic, PhotonVision always restarted.</p></div>
     <div class="card"><div class="icon">😴</div><h4>Idle threads sleep</h4><p>OpenCV's helper threads spun in circles waiting for work. Now they sleep.</p></div>
     <div class="card"><div class="icon">🔁</div><h4>1 s USB retries</h4><p>A stuck camera held up the others on its hub for ~65 s each. Now about 20 s.</p></div>
     <div class="card"><div class="icon">📜</div><h4>Bigger log</h4><p>Up to 2 GB of system log, so the story of a bad match is still there afterwards.</p></div>
+    <div class="card"><div class="icon">👻</div><h4>Forget vanished laptops</h4><p>A dashboard laptop that left without closing kept its camera streams encoding for nobody, for ~15 minutes. Now a connection whose other end has vanished is dropped after ~13 s.</p></div>
   </div>
 
   <h3>Flashing: installing Linux on a Jetson</h3>
   <p class="prose">A new Jetson's SSD is empty. <span class="term">Flashing</span> writes NVIDIA's operating system onto it, and updates the small boot program stored on the board itself. It's done from an Ubuntu 22.04 laptop over a USB-C cable, and took us about 7 minutes.</p>
   <div class="flash-steps reveal">
-    <div class="card"><svg id="l-hdr" viewBox="0 0 220 110" role="img" aria-label="The 12-pin button header with pins 9 and 10 joined by a jumper"></svg><h4>Recovery mode</h4><p>Power off. Put a jumper on pins 9 and 10 (FC REC and GND) of the 12-pin button header under the module, not the 40-pin one. Power on, remove the jumper.</p></div>
+    <div class="card"><svg id="l-hdr" viewBox="0 0 220 110" role="img" aria-label="The 12-pin button header with pins 9 and 10 joined by a jumper"></svg><h4>Recovery mode</h4><p>Power off. Put a jumper on pins 9 and 10 (FC REC and GND) of the 12-pin button header under the module, not the 40-pin one. Power on, remove the jumper. (A running Jetson can also do it itself: <code>sudo reboot forced-recovery</code>.)</p></div>
     <div class="card"><svg viewBox="0 0 220 110"><rect x="10" y="30" width="80" height="54" rx="6" fill="#1f1b23"/><rect x="16" y="36" width="68" height="36" rx="3" fill="#6b1199"/><rect x="4" y="84" width="92" height="8" rx="3" fill="#635a72"/><path d="M96 80 C130 80 130 58 160 58" fill="none" stroke="#8b5cf6" stroke-width="4"/><rect x="150" y="34" width="62" height="46" rx="6" fill="#10281d"/><rect x="168" y="40" width="30" height="22" rx="3" fill="#1f1b23"/><text x="181" y="96" text-anchor="middle" font-size="11" fill="#635a72" font-family="var(--font)">Jetson</text><text x="50" y="104" text-anchor="middle" font-size="11" fill="#635a72" font-family="var(--font)">Ubuntu laptop</text><text x="128" y="52" text-anchor="middle" font-size="10" fill="#8b5cf6" font-family="var(--font)">USB-C</text></svg><h4>Connect</h4><p>USB-C cable to an Ubuntu laptop. <code>lsusb</code> should list <code>0955:7523 NVIDIA Corp. APX</code>: the Jetson is waiting in recovery mode.</p></div>
     <div class="card"><svg viewBox="0 0 220 110"><rect x="10" y="14" width="200" height="82" rx="8" fill="#0e0518"/><text x="22" y="36" font-size="10.5" fill="#b8a9d4" font-family="var(--mono)">$ 02-flash-nvme.sh</text><text x="22" y="54" font-size="10.5" fill="#b8a9d4" font-family="var(--mono)">Waiting for target…</text><rect x="22" y="66" width="176" height="10" rx="5" fill="rgba(255,255,255,.1)"/><rect x="22" y="66" width="120" height="10" rx="5" fill="#8b5cf6"><animate attributeName="width" values="10;176;176" dur="4s" repeatCount="indefinite"/></rect></svg><h4>Flash</h4><p>Our script writes the OS to the SSD and the boot program to the board. "Waiting for target to boot-up" for 30 s is normal.</p></div>
     <div class="card"><svg viewBox="0 0 220 110"><circle cx="110" cy="52" r="34" fill="#dcfce7"/><path d="M92 53 l12 12 l24 -26" fill="none" stroke="#16a34a" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/></svg><h4>Wait for "Flash is successful"</h4><p>Not the earlier "Successfully flashed the external device": the board is still writing then. Unplug too soon and you start over.</p></div>
+  </div>
+
+  <p class="prose">Flashing is one step of four. Our scripts do the rest from the laptop, so nobody has to touch the Jetson (the README's Quick Start):</p>
+  <div class="flow reveal">
+    <div class="node"><b>1. Prepare</b><code>01-prepare-bsp.sh</code>: NVIDIA's flashing tools and the Jetson's account. Once per laptop, about 15 min</div><div class="arrow">→</div>
+    <div class="node"><b>2. Prestage</b><code>prestage-rootfs.sh</code>: passwordless sudo, the laptop's Wi-Fi and its SSH key go into the image</div><div class="arrow">→</div>
+    <div class="node"><b>3. Flash</b><code>02-flash-nvme.sh</code>, about 7 min</div><div class="arrow">→</div>
+    <div class="node"><b>4. Set up</b><code>setup-jetson.sh --prebuilt</code>: unattended, about 35 min</div>
+  </div>
+  <div class="prose">
+    <p><code>setup-jetson.sh</code> waits for the Jetson to boot, copies everything over and runs the installer there. If a step fails, fix it and run the same command again: it carries on from that step.</p>
+    <p><code>--prebuilt</code> uses a <strong>prebuilt release bundle</strong>: the slow parts (three allwpilib libraries, the CUDA detector, our PhotonVision jar and more) compiled once and packed up. The installer checks every file's SHA-256, and refuses a bundle built for another L4T or CUDA version. Only the camera driver is still compiled on the Jetson (41 s), for its exact kernel. Without <code>--prebuilt</code>, it builds everything from source in about an hour.</p>
+    <p>The flash also splits the SSD three ways: <strong>system</strong> (64 GB), <strong>settings</strong> (2 GB) and <strong>scratch</strong> (the rest, for recordings and logs). Before an event, <code>ro-root.sh on</code> makes the system part read-only. Why, in <a href="#failsafes">chapter 16</a>.</p>
   </div>
 
   <div class="deeper">
@@ -450,7 +474,7 @@ multi-user.target reached after 6.183s in userspace
       <li>The operating system shares the hardware between programs. Linux is free, open source and everywhere; ours is Ubuntu 22.04 from JetPack 6.2.3 (kernel 5.15, CUDA 12.6).</li>
       <li>The kernel owns the hardware; programs live in user space and ask through system calls. Drivers are kernel code for one kind of device.</li>
       <li>Camera path: UVC camera → <code>uvcvideo</code> driver → V4L2 <code>/dev/video0</code> → cscore in PhotonVision.</li>
-      <li>We patched <code>uvcvideo</code> so each camera books 1280 instead of 3060 bytes per microframe: 4–5 cameras fit instead of 2. That's only possible because Linux is open source.</li>
+      <li>We patched <code>uvcvideo</code> so each camera books 1280 instead of 3060 bytes per microframe: 4–5 cameras fit instead of 2. That's only possible because Linux is open source. Two more driver settings give camera-clock timestamps and 1.2 ms lower latency.</li>
       <li>systemd restarts PhotonVision on any exit; tuning cut boot time from 57 s to 16.5 s.</li>
     </ul>
   </div>

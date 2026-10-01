@@ -142,8 +142,8 @@ Site.chapter('speed', (root) => {
       stock2: [[0, 'thrifty', 3060], [1, 'thrifty', 3060]],
       stock3: [[0, 'thrifty', 3060], [1, 'thrifty', 3060], [2, 'thrifty', 3060]],
       usbc: [[4, 'color', 3072], [0, 'thrifty', 3060], [1, 'thrifty', 3060]],
-      ours: [[0, 'thrifty', 1280], [1, 'thrifty', 1280], [2, 'gs', 1280], [3, 'gs', 1280], [4, 'color', 1600]],
-      greedy: [[0, 'thrifty', 1280], [1, 'thrifty', 1280], [2, 'gs', 1280], [3, 'gs', 1280], [4, 'color', 2400]],
+      ours: [[0, 'thrifty', 1280], [1, 'thrifty', 1280], [2, 'thrifty', 1280], [3, 'thrifty', 1280], [4, 'thrifty', 1280]],
+      greedy: [[0, 'thrifty', 1280], [1, 'thrifty', 1280], [2, 'thrifty', 1280], [3, 'thrifty', 1280], [4, 'color', 2400]],
     };
     const preset = (k) => { state.forEach((_, i) => set(i, '')); PRE[k].forEach(([i, ty, a]) => set(i, ty, a)); render(); };
     $('#sp-presets').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; $('#sp-presets').querySelectorAll('button').forEach((x) => x.classList.toggle('primary', x === b)); preset(b.dataset.p); });

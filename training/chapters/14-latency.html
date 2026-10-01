@@ -79,7 +79,7 @@
     </div>
   </div>
 
-  <div class="callout spectrum full"><h5>What we measured</h5><p>PhotonVision showed <strong>13–14 ms of latency</strong> after our fixes, down from 44 ms. How we got there (exposure, decode, USB caps) is the story of <a href="#speed">chapter 10</a>.</p></div>
+  <div class="callout spectrum full"><h5>What we measured</h5><p>A result is ready about <strong>14.5 ms</strong> after the middle of the exposure (the dashboard shows 14.3–15.2 ms per camera), down from 44 ms at the start. We timed each step with the camera driver's own log: half the 5 ms exposure (2.5 ms), then <strong>8.1 ms for the camera to send the frame</strong>, 0.15 ms until our decoder starts, 2.8 ms of JPEG decode, and 1.2 ms of detection. The camera streams each frame out while its sensor reads out, so neither USB nor PhotonVision is what's slow. How we got the rest down (exposure, decode, USB caps) is the story of <a href="#speed">chapter 10</a>.</p></div>
   <figure class="full" style="margin:0 0 30px;max-width:var(--prose)">
 <pre class="code" aria-label="Real PhotonVision log lines">971 stats h1 1280x800: 122.405 calls/s, detect avg 0.905398 ms max 1.48748 ms, jni 0.0038643 ms, tags/frame 0 [bos]
 971 jpeg 10 s: nvjpg 362.13 frames/s (2.58713 ms), libjpeg-turbo 0 frames/s; checks since start 19925 ok, 0 differ</pre>
@@ -129,7 +129,8 @@
   <h3 class="full">Which instant is "the moment of capture"?</h3>
   <div class="prose full">
     <p>That fix needs to know exactly when each frame was captured. This sounds easy until you look closely. A frame isn't taken in an instant. The sensor collects light for the whole <span class="term">exposure</span> (5 ms on our cameras), and a moving tag smears across that window. The blur's middle is where the tag was at the <em>middle</em> of the exposure. So that's the honest timestamp.</p>
-    <p>But the Jetson can't see the exposure happen. The first thing it notices is the frame's <strong>first USB packet</strong> arriving. Linux's camera <span class="term">driver</span> stamps the frame right then. By that moment the whole exposure is over, and the camera has also spent some time reading out the sensor and starting the JPEG.</p>
+    <p>But the Jetson can't see the exposure happen. The camera puts its own clock's time on each frame, at about the moment it starts sending it, and Linux's camera <span class="term">driver</span> converts that to the Jetson's clock. By that moment the whole exposure is over.</p>
+    <p>The driver used to stamp the frame itself, when it handled the frame's <strong>first USB packet</strong>. But it handles packets in 4 ms batches, so the stamps landed on 4 ms steps: they jittered by 0.95 ms, and up to 4 ms. With the camera's clock (<code>hwtimestamps=1</code>), the timestamps the robot receives vary by just <strong>0.01 ms</strong>. That matters when the robot turns: at 360°/s, 1 ms of timestamp error is 0.36° of heading.</p>
   </div>
 
   <div class="lab full">
@@ -143,12 +144,12 @@
           <div><small>Driver stamp is late by</small><b id="l-late">2.5 ms + ?</b></div>
           <div><small>Jetson subtracts</small><b id="l-sub">2.5 ms</b></div>
         </div>
-        <p class="hint">The striped block is the camera's own delay (sensor readout and JPEG start). It's still to be measured on the robot, so for now it's set to 0.</p>
+        <p class="hint">The striped block is the camera's own delay between the end of the exposure and its first packet. It's still to be measured on the robot, so for now it's set to 0. The packets then stream for 8.1 ms, as measured.</p>
       </div>
     </div>
   </div>
 
-  <div class="callout spectrum full"><h5>What we did</h5><p>Our patch <code>photonvision-13</code> subtracts half the exposure from every frame's timestamp, so it marks the middle of the exposure; robot code shouldn't subtract anything itself. <span class="full">We checked whether the camera sends its own hardware timestamps (UVC has a way to): it doesn't. </span>The camera's internal delay (readout and JPEG) is still to be measured on the robot, by spinning in front of a tag.</p></div>
+  <div class="callout spectrum full"><h5>What we did</h5><p>Our patch <code>photonvision-13</code> subtracts half the exposure from every frame's timestamp, so it marks the middle of the exposure; robot code shouldn't subtract anything itself. <span class="full">The frames are stamped by the camera's own clock: the USB video standard (UVC) lets a camera send its clock with each frame, and our driver setting <code>hwtimestamps=1</code> uses it. </span>The camera's internal delay before it starts sending is still to be measured on the robot, by spinning in front of a tag.</p></div>
 
   <details class="deep"><summary>The code that moves the timestamp</summary><div>
     <p>From <code>photonvision-13-mid-exposure-timestamps.patch</code>, in <code>USBFrameProvider</code>. The exposure comes from the camera setting, which is in 100 µs units (50 → 5,000 µs). With auto exposure on, the exposure time is unknown, so only the camera delay is subtracted.</p>
@@ -160,7 +161,7 @@
     <span class="k">return</span> captureTimeUs - shift;
 }</pre>
     <p>Why fix it on the Jetson and not as a constant in robot code? The Jetson knows the exposure exactly, and the exposure changes whenever someone retunes a camera. The patch's own comment gives the stakes: 2.5 ms late while turning at 360°/s is about 1° of heading error.</p>
-    <p>Why the USB bandwidth cap doesn't hurt timestamps: the driver stamps a frame at its <em>first</em> packet, so a frame that takes 4.9 ms to cross USB instead of 2 ms gets the same stamp. The answer arrives ~2 ms later, but it's labeled just as accurately.</p>
+    <p>Why the USB bandwidth cap doesn't hurt: the stamp is taken when the camera starts sending, so a frame that takes longer to cross USB gets the same stamp. And measured with 4 cameras, the cap doesn't even make the answer later. We had estimated it would cost ~2 ms, but the camera spreads each frame over ~8 ms anyway while its sensor reads out, and the capped link keeps up with that.</p>
   </div></details>
 
   <h3 class="full">Two computers, two clocks</h3>
@@ -286,6 +287,7 @@
         <li><strong>More samples:</strong> a robot loop runs every 20 ms. At 120 fps each loop gets 2–3 new measurements per camera to average, which cuts random noise.</li>
       </ul>
       <p class="small">One trap: PhotonVision's "Low Latency Mode" sounds perfect but halved our frame rate, so we run it off (<a href="#speed">chapter 10</a>).</p>
+      <p class="small"><strong>Idle while disabled</strong> (<code>photonvision-49</code>): while the robot is disabled, each camera processes 30 frames a second instead of 122, which is plenty to set the starting pose. It's back to full rate within 5 ms of enable. With 5 cameras that's 7.8 W instead of 9.7 W: less heat in the queue. As the robot disables, PhotonVision also runs Java's garbage collection (27 ms), so memory is cleaned up before the match, not during it. During a match a collection now and then delays about one frame per camera in every 976, by up to ~7 ms. Because results keep their capture timestamps, the pose estimator still places a late one correctly.</p>
     </div>
     <div class="lab" style="margin:0">
       <div class="lab-head"><span class="tag">Lab</span><h4>How old is the newest answer?</h4></div>
@@ -316,7 +318,8 @@
       <li>Latency is the delay between capture and the answer. Ours is about 15 ms.</li>
       <li>On a moving robot, pretending an answer is "now" costs centimeters: 4 m/s × 15 ms = 6 cm, and spinning is worse.</li>
       <li>The fix is a timestamp plus <code>addVisionMeasurement(pose, timestamp)</code>.</li>
-      <li>Our timestamps mark the middle of the exposure (<code>photonvision-13</code>). The camera's own delay is still to be measured.</li>
+      <li>Our timestamps come from the camera's own clock and mark the middle of the exposure (<code>photonvision-13</code>). The camera's own delay before sending is still to be measured.</li>
+      <li class="full">Most of the ~14.5 ms is the camera sending the frame (8.1 ms), not USB or PhotonVision.</li>
       <li>Time sync puts Jetson timestamps on the robot's clock.</li>
       <li class="full">The monotonic clock times vision; the wall clock only names files.</li>
       <li class="full">The same lookup gives the gyro heading at capture time: <code>addHeadingData</code> keeps a 1 s buffer of headings.</li>

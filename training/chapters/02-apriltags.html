@@ -189,8 +189,10 @@
       <div><small>Pixels per tag square</small><b id="a-rcell"></b></div>
       <div><small>Pixels per QR square</small><b id="a-rqr"></b></div>
     </div>
-    <p class="hint">Simplified: the tag is face-on and centered, and every pixel averages the light that falls on it. Real images also have lens blur, JPEG blocks and motion blur, which make things worse.</p>
+    <p class="hint">Simplified: the tag is face-on and centered, and every pixel averages the light that falls on it. Real images also have lens blur, JPEG blocks and motion blur, which make things worse. The verdicts use the 2-pixels-per-square rule of thumb below; our far-tag search reads a little past it.</p>
   </div>
+
+  <p class="prose short">Our detector normally reads tags down to about 20 pixels wide. When no camera has a good view, it also searches the full-size image and reads them about 1.8× as far away.</p>
 
   <div class="split top split-dist full">
     <div class="prose">
@@ -200,6 +202,8 @@
     </div>
     <div class="callout spectrum full" style="margin-top:0"><h5>What we measured</h5><p>We took 40 real frames of tag 3, shrank them to smaller and smaller sizes, re-compressed them with the camera's own JPEG settings, and ran our real detector on them. The tag was found in <strong>85% of frames at 20 pixels wide</strong> (about 6 m face-on), 52% at 18 px, and only 2% at 14 px.</p><p>20 px is 2.5 pixels per square, so the rule of thumb holds. Our GPU detector looks for tag outlines on a half-size image to save time, which costs some range: searching at full size found 98% at 12 px (about 10 m). Real far-away tags are blurrier than shrunk ones, so real ranges are a bit shorter.</p></div>
   </div>
+
+  <div class="callout spectrum full"><h5>What we built: the far-tag search</h5><p>Searching at full size on every frame would cost about 2.75× the GPU, so we only do it when it's needed (<code>photonvision-55</code>). Normally the detector searches the half-size image and misses tags under about 18–20 px. When <strong>no camera has had a good view for 0.25 s</strong> (a good view is at least 2 near tags, 40 px or more, with a decision margin of 30), the cameras also search their full-size images, one camera at a time and at most 30 a second across all of them. Far tags they find are then followed with small full-size crops. <strong>As soon as any camera has a good view again, it all stops</strong>, so while the pose is good it costs nothing.</p><p>In the bench test it finds tags down to <strong>10 px instead of 18 px: 1.8× the distance</strong> (about 6 m → 10 m for a 6.5 in tag face-on). Searching the whole time, with 5 cameras and no tags in view, the GPU went from 16.5% to 19.4% busy, and every camera stayed at 122 fps. The switch is in Settings &gt; Robot state (<b>Far-tag search when the pose is weak</b>). It hasn't been tested on real far tags yet, on a field or down a long hallway.</p></div>
 
   <h3>36h11: codes that can't be confused</h3>
   <div class="split top full">

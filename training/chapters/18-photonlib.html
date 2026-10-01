@@ -77,7 +77,7 @@ PhotonCamera bottomRight = new PhotonCamera("BottomRight");
 // Handy extras on PhotonCamera
 topLeft.isConnected();        // false if no results lately
 topLeft.setPipelineIndex(1);  // switch pipeline
-topLeft.setEnabled(false);    // rest while disabled</pre>
+topLeft.setEnabled(false);    // pause this camera</pre>
   </div>
 
   <h3>Step 3: read every frame</h3>
@@ -350,6 +350,7 @@ visionSim.addCamera(new PhotonCameraSim(topLeft, props), MOUNTS.get("TopLeft"));
   <div class="callout spectrum">
     <h5>Our extras on NetworkTables</h5>
     <p>Our PhotonVision publishes more than stock: per-camera health (<code>/photonvision/TopLeft/health/fps</code>, <code>latencyMs</code>, <code>problem</code>…), Jetson temperatures and throttling, <code>settingsJson</code> snapshots for the log, and controls like Rewind recording and excluded tags. Robot code reads them with plain NetworkTables subscribers and can raise Driver Station alerts from them. The full topic tree is in <a href="#networktables">chapter 15</a>.</p>
+    <p class="full">Three things change what robot code receives. <b>While the robot is disabled</b>, each camera sends about 30 results a second instead of 120 (<code>photonvision-49</code>), and full rate is back within 5 ms of enable; no robot code needed. It reads the Driver Station's state from NetworkTables, which isn't checked with 2027 robot code yet; if that's missing, the cameras just stay at full rate. <b>When the field connects</b>, with <b>Event pipeline when the field connects</b> on, every camera switches to the event pipeline once (<code>photonvision-51</code>); a <code>setPipelineIndex</code> after that sticks. <b>After a match</b>, quiet mode stops Rewind (<code>photonvision-56</code>); robot code can override it with <code>/photonvision/jetson/quiet</code> (true or false), and the Jetson publishes <code>quietNow</code> and <code>quietReason</code>. A recording robot code asks for on <code>/photonvision/rewind/record</code> always wins.</p>
   </div>
 
   <div class="deeper full">

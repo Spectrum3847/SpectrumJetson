@@ -37,15 +37,15 @@ Site.chapter('finale', (root) => {
       for (let i = 0; i < d.length; i += 4) { const v = d[i] > bd[i] - 10 ? 255 : 0; td.data[i] = td.data[i + 1] = td.data[i + 2] = v; td.data[i + 3] = 255; }
       t.putImageData(td, 0, 0);
     };
-    const MF = Math.ceil(JPEG_BYTES / 1280), USB_MS = MF * 0.125;
+    const MF = Math.ceil(JPEG_BYTES / 1280), USB_MS = MF * 0.125, SEND_MS = 8.1; // SEND_MS: first to last packet, measured 2026-09-29
 
     const S = [
       { n: 'Light', t: '0 ms', ch: 'camera', cn: '03', d: 'Room light shines on tag 3, propped on a box in our shop. White squares reflect a lot of light, black ones very little. Some of that light heads into TopLeft\'s lens.', data: 'photons → lens → sensor' },
       { n: 'Exposure', t: '0 → 5 ms (likely)', ch: 'settings', cn: '04', d: 'Every pixel of the global-shutter sensor collects light at once, then each pixel\'s charge becomes a number: 0 is black, 255 is white. This recording didn\'t save its exposure; our setting then was 5 ms, so it was likely 5 ms.', data: () => 'real pixel values at the tag\'s top-left corner:\n' + (pix ? pix.map((r) => r.map((v) => String(v).padStart(3)).join(' ')).join('\n') : '…') },
       { n: 'JPEG', t: 'camera delay (?)', ch: 'camera', cn: '03', d: 'The camera compresses the 1,024,000 numbers into a JPEG, 8×8 pixel blocks at a time. This frame\'s JPEG is exactly 52,801 bytes, about 1/19 of the raw pixels. The time this takes inside the camera isn\'t measured yet.', data: 'the real first bytes of this frame:\n' + HEX.slice(0, 24).join(' ') + '\n' + HEX.slice(24).join(' ') + ' …\n(52,801 bytes in all)' },
-      { n: 'USB', t: `+${USB_MS.toFixed(1)} ms`, ch: 'speed', cn: '10', chs: 'dataflow', cns: '07', d: 'The JPEG crosses USB 2.0 in slices of up to 1280 bytes, one slice every 125 µs microframe. The Linux driver stamps the frame when the first slice arrives.', data: `52,801 B ÷ 1280 B → ${MF} microframes\n${MF} × 125 µs ≈ ${USB_MS.toFixed(1)} ms\nshared bus: ~6,700 B per microframe for all cameras` },
+      { n: 'USB', t: `+${SEND_MS} ms`, ch: 'speed', cn: '10', chs: 'dataflow', cns: '07', d: `The JPEG crosses USB 2.0 in slices of up to 1280 bytes, one slice every 125 µs microframe. The link could carry it in ${USB_MS.toFixed(1)} ms, but the camera sends while its sensor reads out, so it takes about one frame period: ${SEND_MS} ms, measured. The frame is timestamped by the camera's own clock.`, data: `52,801 B ÷ 1280 B → ${MF} microframes\n${MF} × 125 µs ≈ ${USB_MS.toFixed(1)} ms at full link speed\nmeasured, first to last packet: ${SEND_MS} ms\nshared bus: ~6,700 B per microframe for all cameras` },
       { n: 'Decode', t: '+2.6 ms', ch: 'dataflow', cn: '07', d: 'The Jetson\'s NVJPG hardware turns the JPEG back into a gray image in shared (unified) memory, where the GPU can read it without a copy across a bus. The picture here is that gray decode, pixel for pixel.', data: 'a gray image, 1 byte per pixel:\n1280 × 800 = 1,024,000 bytes\nNVJPG: 2.59 ms a frame (our Jetson\'s log)' },
-      { n: 'Blobs', t: 'GPU, ~1–2 ms total', ch: 'cuda', cn: '08', d: 'Thousands of GPU threads threshold the image into black and white, then group touching pixels into blobs. The tag\'s black border pops out as a ring.', data: 'threshold → connected components → blob edges\n(1,024 CUDA cores, 32-thread warps)\nthe threshold view is an illustration' },
+      { n: 'Blobs', t: 'GPU, ~1.2 ms total', ch: 'cuda', cn: '08', d: 'Thousands of GPU threads threshold the image into black and white, then group touching pixels into blobs. The tag\'s black border pops out as a ring.', data: 'threshold → connected components → blob edges\n(1,024 CUDA cores, 32-thread warps)\nthe threshold view is an illustration' },
       { n: 'Corners', t: '(same GPU step)', ch: 'cuda', cn: '08', d: 'Blob edges are fit with four straight lines. Their crossings are the tag\'s corners, found to a fraction of a pixel. Then a few CPU threads read the inside as bits to get the ID. These are the corners our Jetson\'s detector really found.', data: () => TAGS.map((tg) => `tag ${tg.id}, decision margin ${tg.dm}:\n` + tg.k.map((pt) => `  (${pt[0].toFixed(1)}, ${pt[1].toFixed(1)})`).join('\n')).join('\n') },
       { n: 'Pose', t: '≈ <1 ms', ch: 'pose', cn: '12', d: 'With TopLeft\'s calibration (focal length 737.8 px, image center, 8 distortion numbers), PnP turns the four corners into the camera\'s 3D pose relative to the tag. With 2+ tags in view, one multi-tag solve would use every corner.', data: 'tag ≈151 px wide, fx ≈ 738 px\n→ about 0.8 m away, if it\'s a full-size 6.5 in tag\n(axes drawn for illustration)' },
       { n: 'Network', t: '≈ <1 ms', ch: 'networktables', cn: '15', d: 'PhotonVision packs the result, with its mid-exposure capture timestamp already on the robot\'s clock, and publishes it on NetworkTables to the SystemCore.', data: '/photonvision/TopLeft/rawBytes\n{ captureTimestampMicros, targets [ id 3,\n  corners, bestCameraToTarget, ambiguity ] }' },
@@ -142,7 +142,7 @@ Site.chapter('finale', (root) => {
         for (let i = 0; i < total; i++) { ctx.fillStyle = i < sent ? '#06b6d4' : 'rgba(255,255,255,.08)'; ctx.fillRect(gx + (i * gw) / total, gy, gw / total - 2, 14); }
         ctx.fillStyle = '#b8a9d4'; ctx.font = font(12, 600); ctx.textAlign = 'left'; ctx.fillText(`microframe ${sent} of ${total} · ${(sent * 0.125).toFixed(2)} ms · ${Math.min(JPEG_BYTES, sent * 1280).toLocaleString('en-US')} B`, gx, gy + 32);
         label(ctx, 'USB 2.0: ≤1280 bytes every 125 µs', 12, 26, '#67e8f9');
-        if (sent < 3) { ctx.fillStyle = '#fcd34d'; ctx.font = font(12, 700); ctx.textAlign = 'left'; ctx.fillText('first packet → timestamp', gx, h * 0.5 - 20); }
+        if (sent < 3) { ctx.fillStyle = '#fcd34d'; ctx.font = font(12, 700); ctx.textAlign = 'left'; ctx.fillText('camera clock → timestamp', gx, h * 0.5 - 20); }
       },
       // 4 decode
       (ctx, w, h, p) => {
@@ -249,7 +249,7 @@ Site.chapter('finale', (root) => {
       ctx.fillStyle = '#0e0518'; ctx.fillRect(0, 0, w, h);
       R[i](ctx, w, h, Site.clamp(p * 1.15, 0, 1), t, w / IW);
       // running clock (after the camera stage, the camera's own unmeasured delay is added as "+ cam")
-      const u0 = 5 + USB_MS, u1 = u0 + 2.6, u2 = u1 + 1.6; // exposure (likely 5), USB, NVJPG 2.6, detect ~1.6 with a tag
+      const u0 = 5 + SEND_MS, u1 = u0 + 2.6, u2 = u1 + 1.2; // exposure (likely 5), camera send 8.1, NVJPG 2.6, detect ~1.2
       const A = [0, 0, 5, 5, u0, u1, u2, u2, u2 + 0.5, u2 + 1], B = [0, 5, 5, u0, u1, u2, u2, u2 + 0.5, u2 + 1, u2 + 1];
       const cur = Site.lerp(A[i], B[i], Site.clamp(p * 1.15, 0, 1));
       ctx.font = font(w < 520 ? 11 : 13, 700, true); const txt = `≈ ${cur.toFixed(1)} ms${i >= 2 ? ' + cam' : ''}${i === 9 ? ' + loop' : ''}`; const tw = ctx.measureText(txt).width;
@@ -275,6 +275,7 @@ Site.chapter('finale', (root) => {
       ['A robot drives 4 m/s and treats a 15 ms old vision pose as "now." How far off is it?', ['0.6 mm', '6 cm', '60 cm', '6 m'], 1, '4 m/s × 0.015 s = 0.06 m. The fix: addVisionMeasurement(pose, timestamp).', 'latency'],
       ['In NetworkTables 4, where does the server run?', ['On the Jetson', 'In the robot program on the SystemCore', 'On the driver station', 'In the cloud'], 1, 'PhotonVision and dashboards are clients that connect on port 5810 and publish or subscribe to topics.', 'networktables'],
       ['What does the Jetson\'s hardware watchdog do?', ['Resets the board if Linux stops "petting" it for 30 s', 'Checks lens focus', 'Watches for other robots', 'Cools the GPU'], 0, 'systemd pets it regularly. If Linux freezes, the petting stops and the hardware resets the Jetson.', 'failsafes'],
+      ['Our power-cut test passed, yet the SSD died after 21 power cuts. What did the test miss?', ['The Jetson never booted', 'The drive\'s own count of media errors, which kept climbing', 'The fan speed', 'The camera settings'], 1, 'The filesystem survived each cut, but the cheap drive was damaging its own flash. Now the system partition isn\'t written during matches, and health-check.sh reads the drive\'s error count.', 'failsafes', 'full'],
     ];
     // spread the right answers across positions: rotate each question's options by a fixed amount
     QS.forEach((q, i) => { const r = (i * 3 + 2) % 4, o = q[1]; q[1] = o.map((_, j) => o[(j + r) % o.length]); q[2] = (q[2] - r + o.length) % o.length; });
