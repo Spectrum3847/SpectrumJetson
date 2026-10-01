@@ -28,6 +28,7 @@ robot_address_add() {
 }
 
 robot_address_del() {
+  trap '' PIPE  # an SSH drop closes our output; the clean-up must still finish
   if [[ $bench_added_address == 1 ]]; then
     sudo -n ip addr del "$BENCH_ROBOT_IP/32" dev lo 2>/dev/null
     bench_added_address=0
@@ -49,6 +50,9 @@ ntp_pause() {
 
 ntp_restore() {
   [[ -n ${bench_skew0:-} ]] || return 0
+  # An SSH drop closes our output, and the next echo's SIGPIPE would end this half way: the date
+  # put back, NTP still off.
+  trap '' PIPE
   if python3 -c 'import sys,time; sys.exit(abs(time.time() - time.monotonic() - float(sys.argv[1])) < 1)' "$bench_skew0"; then
     sudo -n date -s "@$(python3 -c 'import sys,time; print(f"{time.monotonic() + float(sys.argv[1]):.3f}")' "$bench_skew0")" >/dev/null
     echo "Date put back: $(date -u +%FT%TZ)"

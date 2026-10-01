@@ -80,6 +80,23 @@ if selected robot-vision-live; then
   fi
 fi
 
+# A Jetson test runs detached there (setsid, its output to a file on the Jetson), and this polls
+# for its exit code: the Jetson's Wi-Fi drops now and then, and over a plain SSH session a drop
+# would kill the test half way, its clean-up (NTP, the date, fake cameras) with it.
+jetson_test() {
+  local name=$1 deadline=$2 cmd=$3 log=$4 remote=/tmp/spectrum-run-all-$1 rc=""
+  "${SSH[@]}" "rm -f $remote.log $remote.rc; cd ~/SpectrumJetson && setsid nohup bash -c 'timeout --kill-after=20 $deadline $cmd > $remote.log 2>&1; echo \$? > $remote.rc' >/dev/null 2>&1 < /dev/null &" \
+    || { echo "couldn't start it over SSH" >"$log"; return 2; }
+  local until=$((SECONDS + deadline + 60))
+  while ((SECONDS < until)); do
+    sleep 5
+    rc=$("${SSH[@]}" "cat $remote.rc 2>/dev/null" 2>/dev/null) && [[ -n $rc ]] && break
+  done
+  for _ in 1 2 3 4 5 6; do "${SSH[@]}" "cat $remote.log" >"$log" 2>/dev/null && break; sleep 10; done
+  [[ -n $rc ]] || { echo "no exit code from the Jetson within $((deadline + 60)) s (unreachable?)" >>"$log"; return 124; }
+  return "$rc"
+}
+
 results=() fails=0
 for t in "${TESTS[@]}"; do
   IFS='|' read -r name where deadline cmd <<<"$t"
@@ -90,7 +107,7 @@ for t in "${TESTS[@]}"; do
   if [[ $where == laptop ]]; then
     (cd "$ROOT" && timeout --kill-after=20 "$deadline" bash -c "$cmd") >"$log" 2>&1 || rc=$?
   else
-    timeout --kill-after=20 $((deadline + 30)) "${SSH[@]}" "cd ~/SpectrumJetson && timeout --kill-after=20 $deadline $cmd" >"$log" 2>&1 || rc=$?
+    jetson_test "$name" "$deadline" "$cmd" "$log" || rc=$?
   fi
   secs=$((SECONDS - start))
   case $rc in
