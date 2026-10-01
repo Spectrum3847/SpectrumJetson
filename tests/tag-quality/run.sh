@@ -11,7 +11,7 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 SECS=${1:-20}
-JAVA=/usr/lib/jvm/java-17-openjdk-arm64/bin/java
+JAVA=${JAVA:-/usr/lib/jvm/java-25-openjdk-arm64/bin/java}
 JAR=/opt/photonvision/photonvision.jar
 DEADLINE=$((SECS + 360))
 if [[ -z ${TQ_UNDER_TIMEOUT:-} ]]; then

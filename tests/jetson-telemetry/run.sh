@@ -9,7 +9,7 @@
 # Usage: tests/jetson-telemetry/run.sh [seconds]   (default 6)
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-JAVA=/usr/lib/jvm/java-17-openjdk-arm64/bin/java
+JAVA=${JAVA:-/usr/lib/jvm/java-25-openjdk-arm64/bin/java}
 "$JAVA" -cp /opt/photonvision/photonvision.jar "$HERE/NtTelemetryDump.java" "${1:-6}" 2>&1 | grep -v "^\["
 echo
 echo "Now set the NT server address back to 8515 in Settings and Save."

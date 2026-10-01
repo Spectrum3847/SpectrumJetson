@@ -9,7 +9,7 @@
 // FAKE_ROBOT_WPILIB=2027 (the default: our SystemCore robot) publishes the control word as WPILib
 // 2027 does, the /FMSInfo/ControlWord struct; FAKE_ROBOT_WPILIB=2026 as a roboRIO on 2026 does,
 // the /FMSInfo/FMSControlData integer. PhotonVision reads both (photonvision-62).
-import edu.wpi.first.networktables.NetworkTableInstance;
+import org.wpilib.networktables.NetworkTableInstance;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import org.photonvision.jni.LibraryLoader;

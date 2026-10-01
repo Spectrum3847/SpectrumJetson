@@ -16,9 +16,9 @@ if [[ -z ${GC_COMPARE_UNDER_TIMEOUT:-} ]]; then
   [[ $rc == 124 ]] && echo "TIMEOUT: compare.sh didn't finish" >&2
   exit "$rc"
 fi
-CONF=/etc/systemd/system/photonvision.service.d/java17.conf
-sudo cp $CONF /tmp/java17.conf.orig
-restore() { sudo cp /tmp/java17.conf.orig $CONF; sudo systemctl daemon-reload; }
+CONF=/etc/systemd/system/photonvision.service.d/java25.conf
+sudo cp $CONF /tmp/java25.conf.orig
+restore() { sudo cp /tmp/java25.conf.orig $CONF; sudo systemctl daemon-reload; }
 trap restore EXIT
 sudo sed -i "s|-Xmx512m|$FLAGS|" $CONF
 grep ExecStart= $CONF | tail -1

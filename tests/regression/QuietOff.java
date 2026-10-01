@@ -3,7 +3,7 @@
 // (the fake robot's on the bench) until /tmp/quiet-off-stop appears or SECONDS pass. Unpublishing
 // it hands quiet mode back to PhotonVision. Prints "holding" once the Jetson reports quietNow false.
 //   java -cp /opt/photonvision/photonvision.jar QuietOff.java [SECONDS]
-import edu.wpi.first.networktables.NetworkTableInstance;
+import org.wpilib.networktables.NetworkTableInstance;
 import org.photonvision.jni.LibraryLoader;
 
 public class QuietOff {
@@ -14,7 +14,7 @@ public class QuietOff {
         LibraryLoader.loadWpiLibraries();
         var nt = NetworkTableInstance.create();
         nt.setServer("10.85.15.2");
-        nt.startClient4("quiet-off");
+        nt.startClient("quiet-off");
         var t = nt.getTable("photonvision").getSubTable("jetson");
         var pub = t.getBooleanTopic("quiet").publish();
         var now = t.getBooleanTopic("quietNow").subscribe(true);

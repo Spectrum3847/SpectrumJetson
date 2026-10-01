@@ -8,7 +8,7 @@
 # Prints, per phase: each camera's frames a second, board power, and the garbage-collection log.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-JAVA=/usr/lib/jvm/java-17-openjdk-arm64/bin/java
+JAVA=${JAVA:-/usr/lib/jvm/java-25-openjdk-arm64/bin/java}
 PHASES=("$@")
 [[ ${#PHASES[@]} -gt 0 ]] || PHASES=(disabled:30 enabled:30 disabled:30)
 # A hard deadline for the whole run: the phases, plus 60 s to connect and report. On a timeout

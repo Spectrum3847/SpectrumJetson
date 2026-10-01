@@ -69,26 +69,29 @@ def try_patches(d, ref, patch_glob):
 
 
 def version_key(tag):
-    nums = [int(x) for x in re.findall(r"\d+", tag)]
-    return nums + [0] * (6 - len(nums)) if "alpha" not in tag and "beta" not in tag else nums
+    m = re.fullmatch(r"v?(\d+)\.(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-(alpha|beta|rc)-?(\d+))?", tag)
+    if not m:
+        return [-1]
+    a, b, c, d, stage, n = m.groups()
+    return [int(a), int(b), int(c or 0), int(d or 0), {"alpha": 0, "beta": 1, "rc": 2, None: 3}[stage], int(n or 0)]
 
 
-def report_fork():
-    sha = pin("scripts/host/03-build-photonvision-fork.sh", r"^FORK_SHA=([0-9a-f]+)")
-    d = clone("https://github.com/FRC-Team-4143/photonvision.git", "pv4143")
+def report_pv_main():
+    sha = pin("scripts/host/03-build-photonvision-fork.sh", r"^UPSTREAM_SHA=([0-9a-f]+)")
+    d = clone("https://github.com/PhotonVision/photonvision.git", "pv")
     head = sh("git", "rev-parse", "origin/HEAD", cwd=d).stdout.strip()
     new = commits(d, sha, head)
     if not new:
         return None
-    ok, total, fail = try_patches(d, head, r"photonvision-\d+.*\.patch")
-    patches = (f"All {total} `photonvision-*` patches apply to `{head[:8]}`." if not fail else
-               f"**{ok} of {total} patches apply**; the first that doesn't is `{fail}`.")
+    ok, total, fail = try_patches(d, head, r"photonvision-2027-alpha7-migration\.patch")
+    patches = (f"The migration patch applies to `{head[:8]}`." if not fail else
+               f"**The migration patch doesn't apply** to `{head[:8]}`: `{fail}`.")
     return {
-        "key": f"pv4143:{head}",
-        "title": "Upstream: FRC-Team-4143/photonvision (the CUDA fork we build on)",
-        "body": f"We pin `{sha[:8]}` (`scripts/host/03-build-photonvision-fork.sh`). {len(new)} new commit(s) on its default branch:\n\n"
+        "key": f"pvmain:{head}",
+        "title": "Upstream: PhotonVision main (the alpha-7 base we build on)",
+        "body": f"We pin `{sha[:8]}` (`scripts/host/03-build-photonvision-fork.sh`). {len(new)} new commit(s) on main:\n\n"
                 + "\n".join(f"- {c}" for c in new[:40]) + ("\n- …" if len(new) > 40 else "")
-                + f"\n\n{patches}\n\nTo update: change `FORK_SHA`, rebuild (`03-build-photonvision-fork.sh`), fix any patch that no longer applies, then run the test suites.",
+                + f"\n\n{patches}\n\nTo update: change `UPSTREAM_SHA`, regenerate the migration patch, rebuild (`03-build-photonvision-fork.sh`), then run the test suites.",
     }
 
 
@@ -153,18 +156,18 @@ def report_aos():
 
 
 def report_allwpilib():
-    pinned = pin("scripts/jetson/04-build-allwpilib.sh", r"^TAG=\$\{1:-(v[\d.]+)\}")
+    pinned = pin("scripts/jetson/04-build-allwpilib.sh", r"^TAG=(v[\w.-]+)")
     tags = [t["name"] for t in api("repos/wpilibsuite/allwpilib/tags?per_page=100")]
-    newer = sorted({t for t in tags if t.startswith(pinned[:6]) and re.fullmatch(r"v[\d.]+", t)
-                    and version_key(t) > version_key(pinned)}, key=version_key)
+    newer = sorted({t for t in tags if t.startswith(pinned[:6]) and version_key(t) > version_key(pinned)},
+                   key=version_key)
     if not newer:
         return None
     return {
         "key": "allwpilib:" + ",".join(newer),
         "title": "Upstream: allwpilib (the detector's runtime libraries)",
-        "body": f"We build `{pinned}` (`scripts/jetson/04-build-allwpilib.sh`). Newer tags this season: "
+        "body": f"We use `{pinned}`'s headers (`scripts/jetson/04-build-allwpilib.sh`). Newer tags this season: "
                 + ", ".join(f"`{t}`" for t in newer)
-                + "\n\nThe detector only uses wpiutil, wpimath and apriltag; a point release rarely matters. PhotonVision itself bundles its own WPILib.",
+                + "\n\nThe detector compiles against wpiutil's `RawFrame.h` and `PixelFormat.h` and links no WPILib library. They must match PhotonVision's `wpilibVersion`, so move both together.",
     }
 
 
@@ -231,7 +234,7 @@ def sync_issue(report, title):
 
 def main():
     checks = [
-        ("Upstream: FRC-Team-4143/photonvision (the CUDA fork we build on)", report_fork),
+        ("Upstream: PhotonVision main (the alpha-7 base we build on)", report_pv_main),
         ("Upstream: PhotonVision releases", report_photonvision),
         ("Upstream: frc971/bos (the CUDA AprilTag detector)", report_bos),
         ("Upstream: RealtimeRoboticsGroup/aos (where Austin develops the detector now)", report_aos),

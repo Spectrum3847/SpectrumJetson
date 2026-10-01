@@ -17,13 +17,15 @@ DEST=/opt/spectrum/fieldcal
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 SRC=$HOME/build/bos
 OUT=$HOME/build/fieldcal-detect
+ALLWPILIB_DIR=${ALLWPILIB_DIR:-$HOME/build/allwpilib-v2027.0.0-alpha-7}
 
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64
+export JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-arm64}
 export PATH=$PATH:/usr/local/cuda/bin
 
 [[ -f $SRC/third_party/971apriltag/apriltag.h ]] || { echo "Run 07-build-bos-detector.sh first." >&2; exit 1; }
 
-cmake -S "$REPO_ROOT/detector" -B "$OUT" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBOS_DIR="$SRC"
+cmake -S "$REPO_ROOT/detector" -B "$OUT" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBOS_DIR="$SRC" \
+  -DALLWPILIB_DIR="$ALLWPILIB_DIR"
 # Low priority and 3 jobs: PhotonVision keeps running while this builds.
 nice -n 10 cmake --build "$OUT" --parallel 3 --target fieldcal_detect
 

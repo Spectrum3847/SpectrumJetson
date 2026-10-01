@@ -10,7 +10,7 @@
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 BUILD=$HOME/build/bos-detector
-JAVA=/usr/lib/jvm/java-17-openjdk-arm64/bin/java
+JAVA=${JAVA:-/usr/lib/jvm/java-25-openjdk-arm64/bin/java}
 if [[ -z ${REGRESSION_UNDER_TIMEOUT:-} ]]; then
   rc=0
   REGRESSION_UNDER_TIMEOUT=1 timeout --kill-after=20 1800 "$0" "$@" || rc=$?

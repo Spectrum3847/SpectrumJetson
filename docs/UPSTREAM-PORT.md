@@ -4,6 +4,11 @@ What we brought in from upstream PhotonVision on 2026-09-24, and what to watch f
 done by a Claude subagent in a separate clone (`~/build/pv-upstream`), then built with our real
 build script and bench-tested on the Jetson. For the setup itself, see the [README](../README.md).
 
+These notes and their bench results are for the JetPack 6 build on WPILib `v2026.2.1`. The
+experimental alpha-7 build replaces the numbered `photonvision-*` patches with
+`patches/photonvision-2027-alpha7-migration.patch`, applied to PhotonVision `1f419c9d`. See
+[CUDA13-MIGRATION.md](CUDA13-MIGRATION.md). No alpha-7 hardware result is recorded.
+
 ## The short version
 
 - **`photonvision-00-upstream-v2026.3.4.patch`:** the full diff from the 4143 fork (`d8c9e8e`) to

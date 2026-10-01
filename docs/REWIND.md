@@ -134,8 +134,9 @@ Every frame has two timestamps:
 
 - `jetson_us`: the Jetson's clock, the same one PhotonVision stamps its results with.
 - `robot_us`: the **robot's clock**, from PhotonVision's time sync with the robot. That's the
-  timebase of PhotonLib's result timestamps and of the AdvantageKit log. It's blank when no robot
-  was connected (bench recordings).
+  timebase of PhotonLib's result timestamps and of the AdvantageKit log, in microseconds (alpha-7
+  PhotonLib reports nanoseconds: divide by 1000). It's blank when no robot was connected (bench
+  recordings).
 
 `frames.csv` has `video_s` (seconds into the video) next to `robot_s` (the robot's time), so a moment
 in the log can be found in the video and back. In AdvantageScope, open the `.mp4` in the Video tab

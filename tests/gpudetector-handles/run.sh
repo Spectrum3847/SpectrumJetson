@@ -5,13 +5,17 @@
 # AprilTagDetection class the JNI looks up on load).
 set -euo pipefail
 cd "$(dirname "$0")"
-JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64
-CP=$(ls /usr/local/java/apriltag*.jar /usr/local/java/wpimath*.jar /usr/local/java/wpiutil*.jar 2>/dev/null | tr '\n' ':')
+JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-arm64}
+CP=/opt/photonvision/photonvision.jar
+[[ -x $JAVA_HOME/bin/javac && -f $CP ]] || {
+  echo "Install PhotonVision's alpha-7 jar and openjdk-25-jdk first." >&2
+  exit 1
+}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/src/org/photonvision/jni"
 cat > "$tmp/src/org/photonvision/jni/GpuDetectorJNI.java" <<'J'
 package org.photonvision.jni;
-import edu.wpi.first.apriltag.AprilTagDetection;
+import org.wpilib.vision.apriltag.AprilTagDetection;
 public class GpuDetectorJNI {
   static { System.loadLibrary("971apriltag"); }
   public static native long createGpuDetector(int width, int height);

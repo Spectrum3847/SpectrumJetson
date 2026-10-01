@@ -3,13 +3,16 @@ import org.opencv.core.CvType;
 import org.opencv.core.Mat;
 import org.opencv.core.MatOfDouble;
 import org.photonvision.jni.GpuDetectorJNI;
+import org.photonvision.jni.LibraryLoader;
 
 // Feed lib971apriltag synthetic frames at several resolutions, the way PhotonVision does
 // (one detector, resized when the frame size changes). The JNI prints "971 detector hN
 // failure" lines for failed frames; run.sh counts them per resolution.
 public class FrameSizeTest {
   public static void main(String[] args) throws Exception {
-    System.loadLibrary("opencv_java454d");
+    if (!LibraryLoader.loadWpiLibraries()) {
+      throw new IllegalStateException("PhotonVision could not load its WPILib and OpenCV natives");
+    }
     int[][] sizes = {{1280, 800}, {640, 480}, {320, 240}, {800, 600}, {1280, 720}, {1280, 800}};
     long h = GpuDetectorJNI.createGpuDetector(640, 480);
     for (int[] s : sizes) {

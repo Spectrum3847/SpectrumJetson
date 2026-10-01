@@ -23,7 +23,6 @@
 //   - no per-detection std::cout; a once-per-second stats line instead
 
 #include <jni.h>
-#include <wpi/jni_util.h>
 
 #include <algorithm>
 #include <atomic>
@@ -53,8 +52,8 @@
 #include <jpeglib.h>
 #include "far_search.h"
 #include "nvjpg_decoder.h"
-#include <wpi/RawFrame.h>
-#include <wpi/timestamp.h>
+#include <wpi/util/PixelFormat.h>
+#include <wpi/util/RawFrame.h>
 #include "absl/status/status.h"
 #include <opencv2/core/mat.hpp>
 
@@ -66,10 +65,46 @@ void SpectrumInjectStickyCudaFault();  // fault_kernel.cu (test only)
 
 namespace {
 
-wpi::java::JClass detectionCls;
+class GlobalJClass {
+ public:
+  GlobalJClass() = default;
+  GlobalJClass(JNIEnv *env, const char *name) : m_name(name) {
+    jclass local = env->FindClass(name);
+    if (!local) return;
+    m_class = static_cast<jclass>(env->NewGlobalRef(local));
+    env->DeleteLocalRef(local);
+  }
 
-const wpi::java::JClassInit classes[] = {
-    {"edu/wpi/first/apriltag/AprilTagDetection", &detectionCls}};
+  void Free(JNIEnv *env) {
+    if (m_class) env->DeleteGlobalRef(m_class);
+    m_class = nullptr;
+  }
+
+  explicit operator bool() const { return m_class != nullptr; }
+  operator jclass() const { return m_class; }
+  const char *name() const { return m_name; }
+
+ private:
+  const char *m_name = "";
+  jclass m_class = nullptr;
+};
+
+struct ClassInit {
+  const char *name;
+  GlobalJClass *cls;
+};
+
+GlobalJClass detectionCls;
+
+constexpr char kDetectionClass[] = "org/wpilib/vision/apriltag/AprilTagDetection";
+const ClassInit classes[] = {{kDetectionClass, &detectionCls}};
+
+// wpi::util::Now's default timebase (steady_clock, ns), which cscore frame timestamps use.
+int64_t NowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 // Contrast threshold for the GPU thresholding step. 4143 used 5, frc971/bos uses 4,
 // and RealtimeRoboticsGroup/aos 76d8f216 moved to 20 for speed. Override at launch
@@ -369,41 +404,52 @@ void RecordFailure(DetectorSlot &s, jlong handle, const char *what) {
   }
 }
 
-jobject MakeJObject(JNIEnv *env, const apriltag_detection_t *detect) {
+jobject NewDetection(JNIEnv *env, const char *family_name, int id, int hamming, float margin,
+                     const double *h, size_t h_size, double cx, double cy, const double *p) {
   static jmethodID constructor =
       env->GetMethodID(detectionCls, "<init>", "(Ljava/lang/String;IIF[DDD[D)V");
   if (!constructor) return nullptr;
 
-  wpi::java::JLocal<jstring> fam{env, wpi::java::MakeJString(env, detect->family->name)};
-  auto homography = detect->H;
-  wpi::java::JLocal<jdoubleArray> harr{
-      env, wpi::java::MakeJDoubleArray(
-               env, {reinterpret_cast<const jdouble *>(homography->data),
-                     static_cast<size_t>(homography->nrows * homography->ncols)})};
-  wpi::java::JLocal<jdoubleArray> carr{
-      env, wpi::java::MakeJDoubleArray(
-               env, {reinterpret_cast<const jdouble *>(detect->p), 4 * 2})};
+  jstring family = env->NewStringUTF(family_name);
+  if (!family) return nullptr;
 
-  return env->NewObject(detectionCls, constructor, fam.obj(), static_cast<jint>(detect->id),
-                        static_cast<jint>(detect->hamming),
-                        static_cast<jfloat>(detect->decision_margin), harr.obj(),
-                        static_cast<jdouble>(detect->c[0]), static_cast<jdouble>(detect->c[1]),
-                        carr.obj());
+  jdoubleArray homography = env->NewDoubleArray(static_cast<jsize>(h_size));
+  if (!homography) {
+    env->DeleteLocalRef(family);
+    return nullptr;
+  }
+  env->SetDoubleArrayRegion(homography, 0, static_cast<jsize>(h_size),
+                            reinterpret_cast<const jdouble *>(h));
+
+  jdoubleArray corners = env->NewDoubleArray(4 * 2);
+  if (!corners) {
+    env->DeleteLocalRef(homography);
+    env->DeleteLocalRef(family);
+    return nullptr;
+  }
+  env->SetDoubleArrayRegion(corners, 0, 4 * 2, reinterpret_cast<const jdouble *>(p));
+
+  jobject result = env->NewObject(detectionCls, constructor, family, static_cast<jint>(id),
+                                  static_cast<jint>(hamming), static_cast<jfloat>(margin),
+                                  homography, static_cast<jdouble>(cx), static_cast<jdouble>(cy),
+                                  corners);
+  env->DeleteLocalRef(corners);
+  env->DeleteLocalRef(homography);
+  env->DeleteLocalRef(family);
+  return result;
+}
+
+jobject MakeJObject(JNIEnv *env, const apriltag_detection_t *detect) {
+  return NewDetection(env, detect->family->name, detect->id, detect->hamming,
+                      detect->decision_margin, detect->H->data,
+                      static_cast<size_t>(detect->H->nrows * detect->H->ncols), detect->c[0],
+                      detect->c[1], &detect->p[0][0]);
 }
 
 // SpectrumJetson: the same from a copied detection (far_search.h), for results with far-search tags.
 jobject MakeJObject(JNIEnv *env, const far_search::Det &d) {
-  static jmethodID constructor =
-      env->GetMethodID(detectionCls, "<init>", "(Ljava/lang/String;IIF[DDD[D)V");
-  if (!constructor) return nullptr;
-  wpi::java::JLocal<jstring> fam{env, wpi::java::MakeJString(env, d.family->name)};
-  wpi::java::JLocal<jdoubleArray> harr{
-      env, wpi::java::MakeJDoubleArray(env, {reinterpret_cast<const jdouble *>(d.H.data()), d.H.size()})};
-  wpi::java::JLocal<jdoubleArray> carr{
-      env, wpi::java::MakeJDoubleArray(env, {reinterpret_cast<const jdouble *>(d.p.data()), d.p.size()})};
-  return env->NewObject(detectionCls, constructor, fam.obj(), static_cast<jint>(d.id),
-                        static_cast<jint>(d.hamming), static_cast<jfloat>(d.margin), harr.obj(),
-                        static_cast<jdouble>(d.c[0]), static_cast<jdouble>(d.c[1]), carr.obj());
+  return NewDetection(env, d.family->name, d.id, d.hamming, d.margin, d.H.data(), d.H.size(),
+                      d.c[0], d.c[1], d.p.data());
 }
 
 // A line every 10 s while the far search has done anything since the last one.
@@ -432,8 +478,13 @@ jobjectArray MakeJObjectArray(JNIEnv *env, const std::vector<far_search::Det> &d
   jobjectArray jarr = env->NewObjectArray(static_cast<jsize>(dets.size()), detectionCls, nullptr);
   if (!jarr) return nullptr;
   for (size_t i = 0; i < dets.size(); ++i) {
-    wpi::java::JLocal<jobject> elem{env, MakeJObject(env, dets[i])};
-    env->SetObjectArrayElement(jarr, static_cast<jsize>(i), elem.obj());
+    jobject elem = MakeJObject(env, dets[i]);
+    if (!elem) {
+      env->DeleteLocalRef(jarr);
+      return nullptr;
+    }
+    env->SetObjectArrayElement(jarr, static_cast<jsize>(i), elem);
+    env->DeleteLocalRef(elem);
   }
   return jarr;
 }
@@ -459,8 +510,13 @@ jobjectArray MakeJObjectArray(JNIEnv *env, const zarray_t *detections) {
   for (int i = 0; i < n; ++i) {
     apriltag_detection_t *det;
     zarray_get(detections, i, &det);
-    wpi::java::JLocal<jobject> elem{env, MakeJObject(env, det)};
-    env->SetObjectArrayElement(jarr, i, elem.obj());
+    jobject elem = MakeJObject(env, det);
+    if (!elem) {
+      env->DeleteLocalRef(jarr);
+      return nullptr;
+    }
+    env->SetObjectArrayElement(jarr, i, elem);
+    env->DeleteLocalRef(elem);
   }
   return jarr;
 }
@@ -904,9 +960,9 @@ int NvjpgDecode(const uint8_t *jpeg, size_t size, cv::Mat &mat, bool bgr) {
 // A "971 jpeg" line every 10 s (not "971 stats", which health-check.sh parses per detector).
 // Colour frames are also counted on their own, in a clause at the end of the line.
 std::atomic<int> last_timestamp_src{-1};  // WPI_TimestampSource of the last gray frame
-// The capture timestamp (wpi::Now microseconds) of the last gray frame decoded on this thread;
+// The capture timestamp (wpi::util::Now nanoseconds) of the last gray frame decoded on this thread;
 // processimage reports how old that frame is when its detection ends ("frame age at result").
-thread_local uint64_t last_capture_us = 0;
+thread_local int64_t last_capture_ns = 0;
 
 // age_ms: how old the frame was when its decode started (from cscore's capture timestamp, which
 // the camera driver takes when the frame's first USB packet arrives), or < 0 if unknown.
@@ -990,7 +1046,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
   JNIEnv *env;
   if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
   for (auto &c : classes) {
-    *c.cls = wpi::java::JClass(env, c.name);
+    *c.cls = GlobalJClass(env, c.name);
     if (!*c.cls) {
       std::cout << "971 library could not find class " << c.name << std::endl;
       return JNI_ERR;
@@ -1029,10 +1085,9 @@ JNIEXPORT jint JNICALL Java_org_photonvision_jni_GpuDetectorJNI_decodeMjpegGray(
 
   const auto t0 = std::chrono::steady_clock::now();
   const double age_ms =
-      frame->timestamp ? (static_cast<double>(wpi::Now()) - static_cast<double>(frame->timestamp)) / 1000
-                       : -1;
+      frame->timestamp ? static_cast<double>(NowNs() - frame->timestamp) / 1e6 : -1;
   last_timestamp_src = frame->timestampSrc;
-  last_capture_us = frame->timestamp;
+  last_capture_ns = frame->timestamp;
   // Latency probe (tests only): while /tmp/spectrum-971-kmsg exists (checked every 60 frames),
   // log each decode start to the kernel log, next to uvcvideo's "Frame complete" trace lines.
   {
@@ -1111,7 +1166,7 @@ JNIEXPORT jint JNICALL Java_org_photonvision_jni_GpuDetectorJNI_decodeMjpegBgr(
 JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *) {
   JNIEnv *env;
   if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) return;
-  for (auto &c : classes) c.cls->free(env);
+  for (auto &c : classes) c.cls->Free(env);
 }
 
 JNIEXPORT jlong JNICALL Java_org_photonvision_jni_GpuDetectorJNI_createGpuDetector(
@@ -1462,13 +1517,13 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
     result = MakeJObjectArray(env, all);
   }
   auto t2 = std::chrono::steady_clock::now();
-  if (last_capture_us) {
-    const double age = (static_cast<double>(wpi::Now()) - static_cast<double>(last_capture_us)) / 1000;
+  if (last_capture_ns) {
+    const double age = static_cast<double>(NowNs() - last_capture_ns) / 1e6;
     if (age >= 0 && age < 1000) {
       s->stats.age_ms += age;
       s->stats.ages++;
     }
-    last_capture_us = 0;  // one frame, one reading
+    last_capture_ns = 0;  // one frame, one reading
   }
   RecordStats(s->stats, handle, img, detections, failed, t0, t1, t2);
   return result;

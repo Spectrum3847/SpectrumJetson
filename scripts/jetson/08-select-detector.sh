@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Choose which lib971apriltag.so PhotonVision loads, and its runtime options.
-# Run ON THE JETSON. Both builds have the same Java API.
+# Run ON THE JETSON. Only the bos build loads in the alpha-7 jar.
 #
 # Usage: 08-select-detector.sh 4143|bos [--mwbd N] [--jpeg nvjpg|turbo] [--mse N]
 #                              [--gpu-connections N] [--no-restart]
-#   4143   FRC-Team-4143/GpuDetectorJNI + our patches (05-build-gpudetector.sh)
+#   4143   FRC-Team-4143/GpuDetectorJNI, 2026 jar only (refused on this branch)
 #   bos    Austin's current detector via frc971/bos (07-build-bos-detector.sh)
 #   --mwbd N         min_white_black_diff (bos build only; default 5)
 #   --mse N          max_line_fit_mse (bos build only; default 10). Lower (e.g. 2.5, upstream
@@ -22,6 +22,7 @@ set -euo pipefail
 
 which=${1:?usage: $0 4143|bos [--mwbd N] [--jpeg nvjpg|turbo] [--mse N] [--gpu-connections N] [--no-restart]}
 shift
+[[ $which == 4143 ]] && { echo "The 4143 detector does not load in the alpha-7 jar. Use bos." >&2; exit 1; }
 mwbd=""
 jpeg=""
 mse=""

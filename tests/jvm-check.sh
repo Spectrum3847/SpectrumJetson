@@ -4,7 +4,7 @@
 # Usage: tests/jvm-check.sh [seconds]
 set -euo pipefail
 SECS=${1:-20}
-BIN=/usr/lib/jvm/java-17-openjdk-arm64/bin
+BIN=${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-arm64}/bin
 P=$(systemctl show photonvision -p MainPID --value)
 [[ $P != 0 ]] || { echo "photonvision is not running" >&2; exit 1; }
 

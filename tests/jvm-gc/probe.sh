@@ -3,7 +3,7 @@
 # per-second worst detect time. Run ON THE JETSON: tests/jvm-gc/probe.sh [seconds, default 120]
 # Then: python3 tests/jvm-gc/analyze.py /tmp/pv-gc-copy.log /tmp/pv-stats.log
 set -euo pipefail
-J=/usr/lib/jvm/java-17-openjdk-arm64/bin/jcmd
+J=${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-arm64}/bin/jcmd
 P=$(systemctl show photonvision -p MainPID --value)
 OUT=/tmp/pv-gc.log
 sudo rm -f $OUT

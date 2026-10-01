@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
-# Swap the 4143 CUDA PhotonVision fork jar into the photonvision.service created by
-# 03-photonvision.sh, and run it on Java 17 (the fork targets 17; the 2027 installer
-# made Java 25 the system default).
-# Run ON THE JETSON. Usage: 06-install-fork-jar.sh <path/to/photonvision-...-linuxarm64.jar>
+# Install the alpha-7-based SpectrumJetson PhotonVision jar and run it on Java 25.
+# Run ON THE JETSON. Usage: 06-install-fork-jar.sh <photonvision-...-linuxarm64.jar>
 set -euo pipefail
 
 JAR=${1:?usage: $0 <photonvision-linuxarm64.jar>}
-JAVA17=/usr/lib/jvm/java-17-openjdk-arm64/bin/java
+JAVA25=${JAVA25:-/usr/lib/jvm/java-25-openjdk-arm64/bin/java}
 NET_FLAG=""
 [[ ${PV_MANAGE_NETWORK:-1} == 0 ]] && NET_FLAG=" -n"
 DEST=/opt/photonvision/photonvision.jar
 
-[[ -x $JAVA17 ]] || { echo "Missing $JAVA17 (sudo apt install openjdk-17-jdk)" >&2; exit 1; }
+[[ -x $JAVA25 ]] || { echo "Missing $JAVA25. Install openjdk-25-jdk." >&2; exit 1; }
+java_version=$("$JAVA25" -version 2>&1)
+[[ $java_version == *'"25'* ]] || { echo "$JAVA25 is not Java 25" >&2; exit 1; }
+[[ -f $JAR ]] || { echo "Missing jar: $JAR" >&2; exit 1; }
 # Refuse truncated/corrupt jars: a bad jar here leaves the service crash-looping.
 # (No pipes here: with pipefail, `unzip -l | grep -q` fails when grep exits early.)
 if ! unzip -tq "$JAR" >/dev/null 2>&1 || ! unzip -l "$JAR" org/photonvision/Main.class >/dev/null 2>&1; then
-  echo "Refusing to install $JAR: not a valid PhotonVision jar ($(stat -c %s "$JAR") bytes)." >&2
+  echo "Refusing to install $JAR. It is not a valid PhotonVision jar." >&2
   exit 1
 fi
-[[ -f /usr/lib/lib971apriltag.so ]] || echo "WARNING: /usr/lib/lib971apriltag.so missing; CUDA pipeline will fail to load." >&2
+[[ -f /usr/lib/lib971apriltag.so ]] ||
+  echo "WARNING: /usr/lib/lib971apriltag.so is missing. CUDA pipelines will fail to load." >&2
 
 sudo systemctl stop photonvision
 
@@ -44,10 +46,12 @@ sync
 # -XX:-CreateCoredumpOnCrash: a native crash otherwise dumps core through Apport, which took
 # ~28 s (and 156 MB) before systemd could restart PhotonVision.
 sudo mkdir -p /etc/systemd/system/photonvision.service.d
-sudo tee /etc/systemd/system/photonvision.service.d/java17.conf >/dev/null <<EOF
+# The 2026 jar's drop-in would override this one.
+sudo rm -f /etc/systemd/system/photonvision.service.d/java17.conf
+sudo tee /etc/systemd/system/photonvision.service.d/java25.conf >/dev/null <<EOF
 [Service]
 ExecStart=
-ExecStart=$JAVA17 -Xmx512m -XX:-CreateCoredumpOnCrash -jar $DEST$NET_FLAG
+ExecStart=$JAVA25 -Xmx512m -XX:-CreateCoredumpOnCrash -jar $DEST$NET_FLAG
 EOF
 
 # The Match ready page (photonvision-52) runs the health check through this link, so it's always
@@ -58,9 +62,12 @@ sudo systemctl daemon-reload
 sudo systemctl start photonvision
 sleep 10
 systemctl --no-pager --lines=0 status photonvision || true
-journalctl -u photonvision --no-pager -n 300 | grep -iE "version|971|cuda|jetson|exception|error" | tail -15 || true
+journalctl -u photonvision --no-pager -n 300 |
+  grep -iE "version|971|cuda|jetson|exception|error" | tail -15 || true
 
-echo
-echo "Rollback: sudo cp /opt/photonvision/photonvision.jar.orig $DEST && \\"
-echo "  sudo rm /etc/systemd/system/photonvision.service.d/java17.conf && \\"
-echo "  sudo systemctl daemon-reload && sudo systemctl restart photonvision"
+cat <<'EOF'
+The alpha-7 jar has not passed a robot-network compatibility test.
+Keep the robot on its tested PhotonLib release until a real robot and Jetson pass the joint test.
+Rollback: sudo cp /opt/photonvision/photonvision.jar.orig /opt/photonvision/photonvision.jar
+Then remove java25.conf, reload systemd, and restart PhotonVision.
+EOF
