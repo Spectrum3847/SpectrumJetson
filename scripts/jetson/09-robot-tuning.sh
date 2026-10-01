@@ -13,14 +13,17 @@
 #                               the system log is kept on the SSD, synced every 5 s (default: RAM
 #                               only, so it vanished at every power cut, taking brownout clues).
 #                               ext4's journal keeps the filesystem itself consistent.
-#   7. Fan: quiet by default  - NVIDIA's fan control (nvfancontrol) on its "quiet" profile, which
-#                               speeds the fan up as the chip warms (~2000 rpm at 56 C).
-#                               FAN=full 09-robot-tuning.sh runs it at full speed instead
-#                               (jetson_clocks --fan, ~5,800 rpm). FAN=off is fanless (heatsink
-#                               plate): the fan stays stopped, and spectrum-fan-guard.sh runs it at
-#                               cameras capped at 60 fps from 95 C until under 88 C (the fan
-#                               stays off: sealed under our plate it moves no air; FAN_ON_HOT=1
-#                               runs it while hot, for a heatsink it can blow through).
+#   7. Cooling                - spectrum-fan.sh (/usr/local/bin/spectrum-fan), also on Settings >
+#                               Robot state (photonvision-71). quiet (the default): NVIDIA's fan
+#                               control (nvfancontrol) on its "quiet" profile, which speeds the fan
+#                               up as the chip warms (~2000 rpm at 56 C). full: full speed
+#                               (jetson_clocks --fan, ~5,800 rpm). off: fanless (heatsink plate):
+#                               the fan stays stopped, and spectrum-fan-guard.sh caps the cameras
+#                               at 60 fps from 95 C until under 88 C (sealed under our plate the fan
+#                               moves no air; FAN_ON_HOT=1 runs it while hot, for a heatsink it can
+#                               blow through). The choice is saved and applied at every boot
+#                               (spectrum-fan.service); FAN= here sets it, and without FAN= a
+#                               re-run keeps the one chosen on the Settings page.
 #   8. Recover from hangs     - hardware watchdog 30 s (NVIDIA's default 2 min), also while
 #                               rebooting (default 10 min), kernel panic -> reboot in 3 s (default:
 #                               hang forever), PhotonVision restarted on any exit (default: only on
@@ -39,8 +42,13 @@
 #                               kept resizing and encoding frames for nobody. Also applies to NT
 #                               (reconnects by itself) and SSH (a >13 s outage with data waiting
 #                               drops the session).
+#  12. Wi-Fi comes back       - every 2 min, if the Wi-Fi radio is on but the device sits
+#                               disconnected, ask NetworkManager to connect it
+#                               (spectrum-wifi-retry.sh). After an access point rejected the Jetson
+#                               twice, NetworkManager gave up for the whole boot (2 h 20 min,
+#                               2026-10-01). Nothing happens with the radio switched off (events).
 #
-# Usage: [FAN=quiet|full|off] 09-robot-tuning.sh [--undo]   (FAN defaults to quiet)
+# Usage: [FAN=quiet|full|off] 09-robot-tuning.sh [--undo]   (no FAN: keep the saved choice)
 set -euo pipefail
 # Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
 [[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
@@ -59,11 +67,28 @@ PV_RESTART_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-restart.c
 PV_OPENCV_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-opencv.conf
 USB_TMPFILES=/etc/tmpfiles.d/90-spectrum-usb.conf
 TCP_CONF=/etc/sysctl.d/90-spectrum-tcp.conf
+WIFI_RETRY=/usr/local/bin/spectrum-wifi-retry
+WIFI_RETRY_UNIT=/etc/systemd/system/spectrum-wifi-retry.service
+WIFI_RETRY_TIMER=/etc/systemd/system/spectrum-wifi-retry.timer
 FAN_GUARD=/usr/local/bin/spectrum-fan-guard
 FAN_GUARD_UNIT=/etc/systemd/system/spectrum-fan-guard.service
-FAN=${FAN:-quiet}
-[[ $FAN == quiet || $FAN == full || $FAN == off ]] || { echo "FAN must be quiet, full or off, not $FAN" >&2; exit 2; }
-if [[ $FAN == full ]]; then CLOCKS_ARGS="--fan"; else CLOCKS_ARGS=""; fi
+FAN_HELPER=/usr/local/bin/spectrum-fan
+FAN_UNIT=/etc/systemd/system/spectrum-fan.service
+# FAN=quiet|full|off sets the cooling. Empty keeps this Jetson's saved choice (Settings > Robot
+# state); without one, an install from before that is read from what it set up (the fanless guard,
+# or --fan in our clocks unit), and a fresh install is fanless (config.env).
+if [[ -z ${FAN:-} ]]; then
+  # (sudo: /data is root-only. "enabled" exactly: the guard's unit is "static" since spectrum-fan,
+  # which is-enabled also counts as success.)
+  if sudo test -f /data/settings/spectrum-fan-mode || sudo test -f /etc/spectrum-fan-mode; then FAN=keep
+  elif [[ $(systemctl is-enabled spectrum-fan-guard.service 2>/dev/null) == enabled ]]; then FAN=off
+  elif grep -q -- "--fan" "$CLOCKS_UNIT" 2>/dev/null; then FAN=full
+  elif [[ -f $CLOCKS_UNIT ]]; then FAN=quiet
+  else FAN=off; fi
+fi
+[[ $FAN == quiet || $FAN == full || $FAN == off || $FAN == keep ]] || { echo "FAN must be quiet, full or off, not $FAN" >&2; exit 2; }
+# The clocks only: the fan is spectrum-fan's (step 7), which runs jetson_clocks --fan for FAN=full.
+CLOCKS_ARGS=""
 
 sudo -n true 2>/dev/null || sudo -v   # ask for the password only if sudo needs one
 
@@ -75,8 +100,10 @@ if [[ ${1:-} == --undo ]]; then
   echo 5000 | sudo tee /sys/module/usbcore/parameters/initial_descriptor_timeout >/dev/null
   sudo sysctl -q kernel.panic=0
   sudo systemctl daemon-reexec
-  sudo systemctl disable --now spectrum-fan-guard.service 2>/dev/null || true
-  sudo rm -f "$FAN_GUARD" "$FAN_GUARD_UNIT"
+  sudo systemctl disable --now spectrum-fan.service spectrum-fan-guard.service 2>/dev/null || true
+  sudo rm -f "$FAN_GUARD" "$FAN_GUARD_UNIT" "$FAN_HELPER" "$FAN_UNIT"
+  sudo systemctl disable --now spectrum-wifi-retry.timer 2>/dev/null || true
+  sudo rm -f "$WIFI_RETRY" "$WIFI_RETRY_UNIT" "$WIFI_RETRY_TIMER"
   sudo systemctl enable nvfancontrol 2>/dev/null || true
   sudo systemctl start nvfancontrol || true   # back to NVIDIA's fan control
   sudo sysctl -q vm.dirty_expire_centisecs=3000 vm.dirty_writeback_centisecs=500
@@ -181,24 +208,15 @@ else
   sudo journalctl --flush
 fi
 
-# FAN=off's guard takes the fan away from the kernel's thermal zones (user_space policy); the other
-# modes give it back.
-give_fan_back() {
-  sudo rm -f /run/spectrum-thermal-limit   # the guard's frame-rate cap, if it was on when stopped
-  for z in /sys/class/thermal/thermal_zone*; do
-    grep -qx active "$z"/trip_point_*_type 2>/dev/null || continue
-    [[ $(cat "$z/policy") == user_space ]] && echo step_wise | sudo tee "$z/policy" >/dev/null
-  done
-  return 0
-}
-if [[ $FAN == off ]]; then
-  echo "==> 7. Fan off (fanless); cameras capped at 60 fps from 95 C until under 88 C"
-  sudo systemctl disable --now nvfancontrol
-  sudo systemctl restart jetson-clocks.service   # clocks only
-  sudo install -m 755 "$(dirname "$0")/spectrum-fan-guard.sh" "$FAN_GUARD"
-  sudo tee "$FAN_GUARD_UNIT" >/dev/null <<UNIT
+# The fan: spectrum-fan (quiet, full, off), applied now and at every boot. NVIDIA's fan control
+# stays enabled, as stock; the fanless guard isn't enabled itself: spectrum-fan starts it, and its
+# Conflicts= stops nvfancontrol. So changing the mode (Settings > Robot state) writes one file on
+# the settings partition, nothing on the system's.
+sudo install -m 755 "$(dirname "$0")/spectrum-fan-guard.sh" "$FAN_GUARD"
+sudo install -m 755 "$(dirname "$0")/spectrum-fan.sh" "$FAN_HELPER"
+sudo tee "$FAN_GUARD_UNIT" >/dev/null <<UNIT
 [Unit]
-Description=Fanless heatsink: fan off, frame-rate cap at 95 C (SpectrumJetson FAN=off)
+Description=Fanless heatsink: fan off, frame-rate cap at 95 C (SpectrumJetson; started by spectrum-fan off)
 After=nvfancontrol.service jetson-clocks.service
 Conflicts=nvfancontrol.service
 
@@ -207,25 +225,31 @@ ExecStart=$FAN_GUARD
 ExecStopPost=/bin/rm -f /run/spectrum-thermal-limit
 Restart=always
 RestartSec=2
+UNIT
+sudo tee "$FAN_UNIT" >/dev/null <<UNIT
+[Unit]
+Description=Cooling mode saved on Settings > Robot state (SpectrumJetson spectrum-fan)
+After=nvfancontrol.service jetson-clocks.service
+RequiresMountsFor=/data/settings
+
+[Service]
+Type=oneshot
+ExecStart=$FAN_HELPER boot
+RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 UNIT
-  sudo systemctl daemon-reload
-  sudo systemctl enable spectrum-fan-guard.service
-  sudo systemctl restart spectrum-fan-guard.service
-elif [[ $FAN == full ]]; then
-  sudo systemctl disable --now spectrum-fan-guard.service 2>/dev/null || true
-  give_fan_back
-  echo "==> 7. Fan at full speed (jetson_clocks --fan, in step 4's service)"
-  sudo systemctl restart jetson-clocks.service
+sudo systemctl daemon-reload
+sudo systemctl disable spectrum-fan-guard.service 2>/dev/null || true   # enabled by older installs
+sudo systemctl enable nvfancontrol spectrum-fan.service
+sudo systemctl restart jetson-clocks.service   # clocks only now
+if [[ $FAN == keep ]]; then
+  echo "==> 7. Cooling: $(sudo "$FAN_HELPER" status), as saved (Settings > Robot state; FAN= changes it)"
+  sudo "$FAN_HELPER" boot
 else
-  sudo systemctl disable --now spectrum-fan-guard.service 2>/dev/null || true
-  give_fan_back
-  echo "==> 7. Fan on NVIDIA's quiet profile (nvfancontrol)"
-  sudo systemctl restart jetson-clocks.service   # clocks only now
-  sudo systemctl enable nvfancontrol
-  sudo systemctl restart nvfancontrol
+  echo "==> 7. Cooling: $FAN (spectrum-fan; Settings > Robot state changes it)"
+  sudo "$FAN_HELPER" "$FAN"
 fi
 
 echo "==> 8. Recover from hangs"
@@ -288,6 +312,31 @@ net.ipv4.tcp_retries2 = 5
 CONF
 sudo sysctl -q --load "$TCP_CONF"
 
+echo "==> 12. Wi-Fi reconnects when NetworkManager has given up (radio on only)"
+sudo install -m 755 "$(dirname "$0")/spectrum-wifi-retry.sh" "$WIFI_RETRY"
+sudo tee "$WIFI_RETRY_UNIT" >/dev/null <<UNIT
+[Unit]
+Description=Reconnect the Wi-Fi if NetworkManager gave up on it (SpectrumJetson)
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=$WIFI_RETRY
+UNIT
+sudo tee "$WIFI_RETRY_TIMER" >/dev/null <<'UNIT'
+[Unit]
+Description=Every 2 minutes: reconnect the Wi-Fi if NetworkManager gave up on it (SpectrumJetson)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl enable --now spectrum-wifi-retry.timer
+
 echo
 echo "Summary:"
 # (|| true: systemctl is-enabled exits non-zero for disabled/masked units, which is the goal.)
@@ -307,5 +356,7 @@ echo "  fan: pwm ${fan:-?}/255, nvfancontrol $(systemctl is-active nvfancontrol 
 echo "  watchdog: $(systemctl show -p RuntimeWatchdogUSec --value) (rebooting: $(systemctl show -p RebootWatchdogUSec --value)), kernel.panic=$(sysctl -n kernel.panic)"
 echo "  USB descriptor timeout: $(cat /sys/module/usbcore/parameters/initial_descriptor_timeout) ms"
 echo "  TCP retries before giving up: $(sysctl -n net.ipv4.tcp_retries2) (~13 s at 5)"
+echo "  Wi-Fi retry: $(systemctl is-active spectrum-wifi-retry.timer) (every 2 min, radio on only)"
+echo "  cooling: $(sudo "$FAN_HELPER" status) (Settings > Robot state)"
 echo "  photonvision: Restart=$(systemctl show photonvision -p Restart --value), $(systemctl show photonvision -p Environment --value | tr ' ' '\n' | grep -c OPENCV_THREAD_POOL) OpenCV pool settings"
 echo "Reboot to apply the boot changes: sudo reboot"

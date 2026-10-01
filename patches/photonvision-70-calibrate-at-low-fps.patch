@@ -1,0 +1,33 @@
+diff --git a/photon-client/src/components/cameras/CameraCalibrationCard.vue b/photon-client/src/components/cameras/CameraCalibrationCard.vue
+index b2055f7a..ed412a8f 100644
+--- a/photon-client/src/components/cameras/CameraCalibrationCard.vue
++++ b/photon-client/src/components/cameras/CameraCalibrationCard.vue
+@@ -202,7 +202,28 @@ const isCalibrating = computed(
+   () => useCameraSettingsStore().currentCameraSettings.currentPipelineIndex === WebsocketPipelineType.Calib3d
+ );
+ 
++// SpectrumJetson (photonvision-70): calibrate at the slowest frame rate (15 fps or more) this
++// resolution and pixel format offer. Each camera's USB bandwidth is capped (11-uvcvideo-payload-cap.sh)
++// to what its frames need at full speed in a normal scene: about 85 KB a frame at 120 fps. A
++// calibration board fills the view with fine edges and makes 85-105 KB frames, which don't fit at
++// 120 fps: the camera cut out while the board was in view. At 30 fps the same cap allows ~340 KB a
++// frame, and calibrating doesn't need the frame rate. A calibration belongs to the resolution, so
++// it's used at 120 fps the same; the pipeline's own video mode comes back when calibration ends.
++const calibrationFormatIndex = (index: number): number => {
++  const formats = useCameraSettingsStore().currentCameraSettings.validVideoFormats;
++  const chosen = formats.find((f) => f.index === index) ?? formats[index];
++  if (!chosen) return index;
++  const candidates = formats.filter(
++    (f) =>
++      resolutionsAreEqual(f.resolution, chosen.resolution) && f.pixelFormat === chosen.pixelFormat && f.fps >= 15
++  );
++  if (!candidates.length) return index;
++  return candidates.reduce((slowest, f) => (f.fps < slowest.fps ? f : slowest)).index ?? index;
++};
++
+ const startCalibration = () => {
++  const calibrationData = useStateStore().calibrationData;
++  calibrationData.videoFormatIndex = calibrationFormatIndex(calibrationData.videoFormatIndex);
+   useCameraSettingsStore().startPnPCalibration({
+     squareSizeIn: squareSizeIn.value,
+     markerSizeIn: markerSizeIn.value,

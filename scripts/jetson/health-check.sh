@@ -77,24 +77,32 @@ ndet=$(wc -w <<<"$handles")
 ncam=$(ls -d /sys/bus/usb/drivers/uvcvideo/*:1.0 2>/dev/null | wc -l)
 # AprilTag cameras: plugged in, and PhotonVision's saved pipeline for them is an AprilTag one
 # (a game-piece or driver camera has no detector). Every camera if the config can't be read.
-napril=$(python3 - <<'PY' 2>/dev/null
+# Also which of them run the CPU AprilTag type, not AprilTagCuda: a slower pipeline on the CPU, and
+# no CUDA detector for that camera (it looked like "a camera stuck" below).
+IFS=$'\t' read -r napril cpu_april < <(python3 - <<'PY' 2>/dev/null
 import glob, json, re, sqlite3
 port = lambda s: (m := re.search(r"usb-0:([\d.]+):1\.0-video", s)) and m.group(1)
 here = {port(p) for p in glob.glob("/dev/v4l/by-path/*-video-index0")}
 db = sqlite3.connect("file:/opt/photonvision/photonvision_config/photon.sqlite?mode=ro", uri=True)
-n = 0
+n, cpu = 0, []
 for cfg, pipes in db.execute("select config_json, pipeline_jsons from cameras"):
     cfg, pipes = json.loads(cfg), json.loads(pipes)
     i = cfg.get("currentPipelineIndex", 0)
     if cfg.get("deactivated") or port(json.dumps(cfg.get("matchedCameraInfo", {}))) not in here or not 0 <= i < len(pipes):
         continue
     s = json.loads(pipes[i]) if isinstance(pipes[i], str) else pipes[i]
-    n += "AprilTag" in (s[0] if isinstance(s, list) else "")
-print(n)
+    kind = s[0] if isinstance(s, list) else ""
+    n += "AprilTag" in kind
+    if kind == "AprilTagPipelineSettings":
+        cpu.append(cfg.get("nickname") or cfg.get("uniqueName") or "?")
+print(n, ", ".join(cpu), sep="\t")
 PY
 )
 [[ -z $napril ]] && napril=$ncam
-if [[ $P != 0 && $ndet -gt 0 && $ndet -lt $napril ]]; then
+if [[ -n ${cpu_april:-} ]]; then
+  warn "$cpu_april: on the CPU AprilTag pipeline type, not AprilTagCuda (the GPU one): slower, and more CPU. Make an AprilTagCuda pipeline for it"
+fi
+if [[ $P != 0 && $ndet -gt 0 && $ndet -lt $napril && -z ${cpu_april:-} ]]; then
   warn "only $ndet of $napril AprilTag cameras are detecting (a camera stuck? restart PhotonVision, or replug it)"
 fi
 # A camera can get stuck sending corrupt JPEGs (seen once after rapid restarts): cscore drops them.
@@ -369,7 +377,7 @@ else
 fi
 # Thermal limit (spectrum-fan-guard, FAN=off): cameras capped while the chip is hot.
 if [[ -f /run/spectrum-thermal-limit ]]; then
-  fail "thermal limit: cameras capped ($(cat /run/spectrum-thermal-limit)); it lifts below 88 C"
+  fail "thermal limit: cameras capped ($(cat /run/spectrum-thermal-limit)); it lifts below 88 C. With the stock fan, choose Fan on Settings > Robot state (Cooling): on No fan it stays stopped"
 fi
 # Quiet mode (photonvision-56): the SSD isn't being written after a match.
 IFS=$'\t' read -r pvquiet pvquiet_err < <(timeout 5 python3 -c 'import json,urllib.request; s=json.load(urllib.request.urlopen("http://localhost:5800/api/robotState", timeout=3)); print(s.get("quietNow"), s.get("quietError") or "", sep="\t")' 2>/dev/null || true)
@@ -455,7 +463,7 @@ elif [[ ${fan:-0} -ge 100 && $rpm -lt 1000 ]]; then
 elif [[ $fanmode == "full speed (jetson_clocks)" && $rpm -lt 4500 ]]; then
   warn "fan slow: $rpm rpm at full speed, normally ~5,600-6,200 (dust or a worn bearing?)"
 elif [[ $fanmode == off* && ${fan:-0} -eq 0 ]]; then
-  pass "fan: $fanmode, pwm 0/255, $rpm rpm"
+  pass "fan: $fanmode, pwm 0/255, $rpm rpm (for a heatsink plate; with the stock fan choose Fan on Settings > Robot state)"
 elif [[ $fanmode == off* ]]; then
   warn "fan: $fanmode, but it's running (pwm ${fan}/255, $rpm rpm): FAN_ON_HOT, or something else drives it"
 elif [[ $fanmode == NVIDIA* || $fanmode == full* ]]; then
@@ -463,6 +471,12 @@ elif [[ $fanmode == NVIDIA* || $fanmode == full* ]]; then
   pass "fan: $fanmode, pwm ${fan:-?}/255, $rpm rpm"
 else
   warn "fan $fanmode and not controlled: $rpm rpm (run 09-robot-tuning.sh)"
+fi
+# photonvision-71: the cooling chosen (Settings > Robot state) should be the one running.
+if [[ -x /usr/local/bin/spectrum-fan ]]; then
+  saved=$(/usr/local/bin/spectrum-fan status 2>/dev/null)
+  running=$(case $fanmode in off*) echo off ;; NVIDIA*) echo quiet ;; full*) echo full ;; *) echo "?" ;; esac)
+  [[ -n $saved && $saved != unknown && $saved != "$running" ]] && warn "cooling set to '$saved' but '$running' is running (choose it again on Settings > Robot state, or sudo spectrum-fan $saved)"
 fi
 year=$(date -u +%Y)
 if [[ $year -ge 2026 ]]; then pass "clock: $(date -u '+%Y-%m-%d %H:%M UTC')"

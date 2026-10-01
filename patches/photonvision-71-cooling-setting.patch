@@ -1,0 +1,245 @@
+diff --git a/photon-client/src/components/settings/RobotStateCard.vue b/photon-client/src/components/settings/RobotStateCard.vue
+index f2599c13..1d545afb 100644
+--- a/photon-client/src/components/settings/RobotStateCard.vue
++++ b/photon-client/src/components/settings/RobotStateCard.vue
+@@ -8,7 +8,7 @@ import PvSelect, { type SelectItem } from "@/components/common/pv-select.vue";
+ import { useStateStore } from "@/stores/StateStore";
+ import { useCameraSettingsStore } from "@/stores/settings/CameraSettingsStore";
+ import { useTheme } from "vuetify";
+-import { loadRobotState, robotState, setRobotState, type RobotStateChange } from "@/lib/RobotState";
++import { loadRobotState, robotState, setRobotState, type CoolingMode, type RobotStateChange } from "@/lib/RobotState";
+ 
+ // photonvision-51: each pipeline number, with what every camera has there, so a profile set up at
+ // mismatched numbers shows before a match rather than during one.
+@@ -39,13 +39,25 @@ const set = async (change: RobotStateChange) => {
+   busy.value = true;
+   try {
+     await setRobotState(change);
+-  } catch {
+-    useStateStore().showSnackbarMessage({ message: "Couldn't change the robot state settings", color: "error" });
++  } catch (e: any) {
++    useStateStore().showSnackbarMessage({
++      message: e?.response?.data || "Couldn't change the robot state settings",
++      color: "error"
++    });
++    loadRobotState();
+   } finally {
+     busy.value = false;
+   }
+ };
+ 
++// photonvision-71: the cooling. A team with the stock fan that leaves it on "No fan" runs with
++// its fan stopped (and the cameras capped once the chip reaches 95 C).
++const coolingItems: SelectItem[] = [
++  { name: "Fan: NVIDIA's quiet profile (the stock heatsink and fan)", value: "quiet" },
++  { name: "Fan at full speed (coolest, loudest)", value: "full" },
++  { name: "No fan (a heatsink plate): cameras capped at 60 fps from 95 °C", value: "off" }
++];
++
+ onMounted(() => {
+   loadRobotState();
+   timer = setInterval(loadRobotState, 1000);
+@@ -190,6 +202,22 @@ onBeforeUnmount(() => clearInterval(timer));
+           {{ robotState.lastEventSwitch ? `Last: ${robotState.lastEventSwitch}` : "Not switched since PhotonVision started." }}
+         </span>
+       </div>
++      <template v-if="robotState.fanAvailable">
++        <v-divider class="my-3" />
++        <pv-select
++          :model-value="robotState.fanMode"
++          :disabled="busy"
++          label="Cooling"
++          tooltip="How this Jetson is cooled. With the stock heatsink and fan, use a Fan setting: on No fan the fan stays stopped. No fan is for a heatsink plate the fan can't blow through: the fan stays off, and if the chip reaches 95 °C every camera is capped at 60 fps until it's under 88 °C. Applies at once, and at every boot."
++          :items="coolingItems"
++          :select-cols="8"
++          data-testid="cooling"
++          @update:model-value="(v) => set({ fanMode: v as CoolingMode })"
++        />
++        <p v-if="robotState.fanError" class="text-caption pb-1 text-error">
++          Couldn't change the cooling: {{ robotState.fanError }}
++        </p>
++      </template>
+     </v-card-text>
+   </v-card>
+ </template>
+diff --git a/photon-client/src/lib/RobotState.ts b/photon-client/src/lib/RobotState.ts
+index 4811bb87..b4228c2c 100644
+--- a/photon-client/src/lib/RobotState.ts
++++ b/photon-client/src/lib/RobotState.ts
+@@ -36,8 +36,14 @@ export interface RobotState {
+   // photonvision-57
+   thermalLimitNow: boolean;
+   thermalLimitFps: number;
++  // photonvision-71: the cooling ("" without the spectrum-fan helper)
++  fanAvailable: boolean;
++  fanMode: CoolingMode | "";
++  fanError: string;
+ }
+ 
++export type CoolingMode = "quiet" | "full" | "off";
++
+ export interface RobotStateChange {
+   idleWhileDisabled?: boolean;
+   idleFps?: number;
+@@ -48,6 +54,7 @@ export interface RobotStateChange {
+   farSweepsPerSecond?: number;
+   quietAfterMatch?: boolean;
+   quietAfterDisabledSeconds?: number;
++  fanMode?: CoolingMode;
+ }
+ 
+ export const robotState = ref<RobotState | null>(null);
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/FanMode.java b/photon-core/src/main/java/org/photonvision/vision/processes/FanMode.java
+new file mode 100644
+index 00000000..6946b6e3
+--- /dev/null
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/FanMode.java
+@@ -0,0 +1,103 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.vision.processes;
++
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.Set;
++import java.util.concurrent.TimeUnit;
++import org.photonvision.common.logging.LogGroup;
++import org.photonvision.common.logging.Logger;
++
++/**
++ * SpectrumJetson (photonvision-71): the Jetson's cooling, on Settings > Robot state. "quiet": the
++ * stock fan on NVIDIA's quiet profile; "full": the fan at full speed; "off": no fan (a heatsink
++ * plate): the fan stays stopped and every camera is capped at 60 fps from 95 C until under 88 C
++ * (spectrum-fan-guard, photonvision-57). Before, the mode was fixed at install time (FAN=), and a
++ * team with the stock fan that left it at our "off" ran with its fan stopped.
++ *
++ * <p>/usr/local/bin/spectrum-fan (scripts/jetson/spectrum-fan.sh, installed by 09-robot-tuning.sh)
++ * applies a mode at once and saves it on the settings partition for the next boot.
++ */
++public final class FanMode {
++    private static final Logger logger = new Logger(FanMode.class, LogGroup.General);
++    private static final Path HELPER = Path.of("/usr/local/bin/spectrum-fan");
++    private static final Set<String> MODES = Set.of("quiet", "full", "off");
++
++    private static volatile String mode = null; // the saved mode, read from the helper once
++    private static volatile String lastError = "";
++
++    private FanMode() {}
++
++    public static boolean available() {
++        return Files.isExecutable(HELPER);
++    }
++
++    /** The saved mode (quiet, full or off), or "" without the helper. */
++    public static String mode() {
++        if (!available()) return "";
++        if (mode == null) {
++            String out = run("status");
++            mode = out != null && MODES.contains(out.strip()) ? out.strip() : "quiet";
++        }
++        return mode;
++    }
++
++    public static String error() {
++        return lastError;
++    }
++
++    /** Applies and saves a mode. Null when it worked, else why not. */
++    public static synchronized String set(String newMode) {
++        if (!MODES.contains(newMode)) return "unknown cooling mode " + newMode + " (quiet, full or off)";
++        if (!available()) return HELPER + " isn't installed (09-robot-tuning.sh)";
++        lastError = "";
++        String out = run(newMode); // on failure it leaves the helper's own message in lastError
++        if (out == null) {
++            if (lastError.isEmpty()) lastError = "spectrum-fan " + newMode + " failed (see the log)";
++            return lastError;
++        }
++        mode = newMode;
++        lastError = "";
++        logger.info("Cooling: " + out.strip());
++        return null;
++    }
++
++    /** Runs the helper; its output, or null if it failed. */
++    private static String run(String arg) {
++        try {
++            var p = new ProcessBuilder(HELPER.toString(), arg).redirectErrorStream(true).start();
++            if (!p.waitFor(20, TimeUnit.SECONDS)) {
++                p.destroyForcibly();
++                logger.error("spectrum-fan " + arg + " took over 20 s");
++                return null;
++            }
++            String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
++            if (p.exitValue() != 0) {
++                logger.error("spectrum-fan " + arg + " failed: " + out.strip());
++                lastError = out.strip();
++                return null;
++            }
++            return out;
++        } catch (Exception e) {
++            logger.error("spectrum-fan " + arg, e);
++            return null;
++        }
++    }
++}
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/IdleMode.java b/photon-core/src/main/java/org/photonvision/vision/processes/IdleMode.java
+index 524836eb..4220572d 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/IdleMode.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/IdleMode.java
+@@ -303,6 +303,10 @@ public final class IdleMode {
+         m.put("quietAfterMatch", settings.quietAfterMatch);
+         m.put("quietAfterDisabledSeconds", settings.quietAfterDisabledSeconds);
+         m.putAll(QuietMode.status());
++        // photonvision-71: the cooling mode (Settings > Robot state).
++        m.put("fanAvailable", FanMode.available());
++        m.put("fanMode", FanMode.mode());
++        m.put("fanError", FanMode.error());
+         var far = farSearchStatus();
+         if (far != null && far.length >= 8) {
+             m.put("farSearchStarved", far[1] > 0);
+diff --git a/photon-server/src/main/java/org/photonvision/server/RequestHandler.java b/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
+index c11bbb55..cd016386 100644
+--- a/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
++++ b/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
+@@ -629,7 +629,8 @@ public class RequestHandler {
+             Boolean farSearch,
+             Double farSweepsPerSecond,
+             Boolean quietAfterMatch,
+-            Integer quietAfterDisabledSeconds) {}
++            Integer quietAfterDisabledSeconds,
++            String fanMode) {}
+ 
+     /** SpectrumJetson (photonvision-50): idle mode's settings and the robot's state. */
+     public static void onRobotStateRequest(Context ctx) {
+@@ -653,6 +654,15 @@ public class RequestHandler {
+                     req.farSweepsPerSecond(),
+                     req.quietAfterMatch(),
+                     req.quietAfterDisabledSeconds());
++            // photonvision-71: the cooling (quiet, full or off), applied and saved by spectrum-fan.
++            if (req.fanMode() != null) {
++                String why = org.photonvision.vision.processes.FanMode.set(req.fanMode());
++                if (why != null) {
++                    ctx.status(400);
++                    ctx.result("Couldn't change the cooling: " + why);
++                    return;
++                }
++            }
+             // photonvision-51: "Switch now" on Settings > Robot state, to test the event profile.
+             if (Boolean.TRUE.equals(req.switchNow())) {
+                 IdleMode.switchAllTo(IdleMode.getSettings().eventPipeline, "Switch now (Settings)");

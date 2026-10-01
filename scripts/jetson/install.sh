@@ -140,7 +140,7 @@ STEPS=(
   "fieldcal-tool|1800|$HERE/13-build-fieldcal-detect.sh --install"
   "usb-watchdog|300|$HERE/14-usb-watchdog.sh --install"
   "fake-cameras|900|sudo apt-get install -y v4l2loopback-dkms v4l2loopback-utils && if [[ -f $HOME/build/bos-detector/CMakeCache.txt ]]; then cmake --build $HOME/build/bos-detector --target far_search_test --parallel 3; elif [[ -x $HOME/build/bos-detector/far_search_test ]]; then echo 'synthetic-tag generator from the prebuilt bundle'; else echo 'no synthetic-tag generator (an older bundle): fake-cameras.sh plays real Rewind recordings'; fi"
-  "robot-tuning|900|FAN=${FAN:-off} $HERE/09-robot-tuning.sh"
+  "robot-tuning|900|FAN=${FAN:-} $HERE/09-robot-tuning.sh"
   "restore-settings|300|restore_settings"
 )
 export -f restore_settings prebuilt_install; export SETTINGS PREBUILT PREBUILT_JAR HERE
