@@ -5,8 +5,6 @@
 #   scripts/jetson/make-prebuilt-bundle.sh [--jar PATH]   ->  ~/release/spectrum-jetson-prebuilt-<tag>.tar.gz
 #
 # What's in it (each where install.sh expects it):
-#   usr/local/lib/   libwpiutil.so libwpimath.so libapriltag.so   (the parts of allwpilib the
-#                    detector needs at runtime; the full build is 17 minutes)
 #   build/bos-detector/  lib971apriltag.so libspectrumnvjpg.so libspectrumtrt.so
 #   build/fieldcal-detect/fieldcal_detect
 #   build/bos-detector/far_search_test   (the synthetic-tag generator fake-cameras.sh uses)
@@ -46,9 +44,6 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 
 files=(
-  /usr/local/lib/libwpiutil.so:usr/local/lib/libwpiutil.so
-  /usr/local/lib/libwpimath.so:usr/local/lib/libwpimath.so
-  /usr/local/lib/libapriltag.so:usr/local/lib/libapriltag.so
   "$HOME/build/bos-detector/lib971apriltag.so:build/bos-detector/lib971apriltag.so"
   "$HOME/build/bos-detector/libspectrumnvjpg.so:build/bos-detector/libspectrumnvjpg.so"
   "$HOME/build/bos-detector/libspectrumtrt.so:build/bos-detector/libspectrumtrt.so"

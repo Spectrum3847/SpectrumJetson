@@ -1,10 +1,10 @@
 // Cost of TagQuality.fill (photonvision-61) per tag, on this machine's CPU: a 1280x800 camera with a
 // real-looking lens model (Thriftiest Cam calibration numbers), one tag 3 m away.
 //   java -cp /opt/photonvision/photonvision.jar Bench.java
-import edu.wpi.first.apriltag.AprilTagDetection;
-import edu.wpi.first.apriltag.AprilTagPoseEstimate;
-import edu.wpi.first.apriltag.AprilTagPoseEstimator;
-import edu.wpi.first.math.geometry.Transform3d;
+import org.wpilib.vision.apriltag.AprilTagDetection;
+import org.wpilib.vision.apriltag.AprilTagPoseEstimate;
+import org.wpilib.vision.apriltag.AprilTagPoseEstimator;
+import org.wpilib.math.geometry.Transform3d;
 import java.util.List;
 import org.opencv.core.Size;
 import org.photonvision.jni.LibraryLoader;

@@ -1,5 +1,5 @@
-# Has anything we build on changed? Weekly (and from the Actions tab), checks PhotonVision, the 4143
-# CUDA fork, frc971/bos, aos, allwpilib and NVIDIA's L4T against what this repo pins, tries our
+# Has anything we build on changed? Weekly (and from the Actions tab), checks PhotonVision (releases, and the
+# main commit we build on), frc971/bos, aos, allwpilib and NVIDIA's L4T against what this repo pins, tries our
 # patches on the newest code, and keeps one issue per upstream (label upstream-watch). See
 # scripts/ci/upstream_watch.py. A few minutes a run; free on a public repo.
 name: Upstream watch

@@ -14,7 +14,7 @@
 // 08) N seconds ahead of this Jetson's, so PhotonVision sets the Jetson's date N seconds forward;
 // FAKE_ROBOT_CLOCK_AFTER_S=T starts publishing it T seconds after PhotonVision connects. Phases
 // are timed on a monotonic clock, so that jump doesn't cut them short.
-import edu.wpi.first.networktables.NetworkTableInstance;
+import org.wpilib.networktables.NetworkTableInstance;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import org.photonvision.jni.LibraryLoader;

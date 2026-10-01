@@ -3,7 +3,7 @@
 // then correct. Run ON THE JETSON by run.sh, which makes this Jetson answer at the robot's address
 // (tests/lib/bench.sh):
 //   java -cp /opt/photonvision/photonvision.jar FakeRobotClock.java [offset_s] [seconds_each]
-import edu.wpi.first.networktables.NetworkTableInstance;
+import org.wpilib.networktables.NetworkTableInstance;
 import org.photonvision.jni.LibraryLoader;
 
 public class FakeRobotClock {

@@ -3,11 +3,12 @@
 // the capture timestamps the robot would fuse: frame-to-frame interval and its jitter. It says the
 // robot is enabled, so the cameras run at full rate.
 //   java -cp /opt/photonvision/photonvision.jar ResultTimestamps.java [seconds]
-// A result starts with its metadata (little-endian int64s): sequence id, capture timestamp (us),
-// publish timestamp (us), time since last pong.
-import edu.wpi.first.networktables.NetworkTableInstance;
-import edu.wpi.first.networktables.PubSubOption;
-import edu.wpi.first.networktables.RawSubscriber;
+// A result starts with its metadata (little-endian int64s): sequence id, capture timestamp (ns),
+// publish timestamp (ns), time since last pong.
+import org.wpilib.networktables.MultiSubscriber;
+import org.wpilib.networktables.NetworkTableInstance;
+import org.wpilib.networktables.PubSubOption;
+import org.wpilib.networktables.RawSubscriber;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.*;
@@ -31,7 +32,7 @@ public class ResultTimestamps {
             Thread.sleep(100);
         }
         // Topics are only announced to a server that subscribes: ask for everything first.
-        var all = new edu.wpi.first.networktables.MultiSubscriber(nt, new String[] {"/photonvision/"}, PubSubOption.topicsOnly(true));
+        var all = new MultiSubscriber(nt, new String[] {"/photonvision/"}, PubSubOption.TOPICS_ONLY);
         Thread.sleep(3000); // let PhotonVision publish its topics
         var subs = new TreeMap<String, RawSubscriber>();
         for (var topic : nt.getTopics("/photonvision/")) {
@@ -39,7 +40,7 @@ public class ResultTimestamps {
             if (!name.endsWith("/rawBytes")) continue;
             String camera = name.substring("/photonvision/".length(), name.length() - "/rawBytes".length());
             // Subscribe with PhotonVision's own type string (photonstruct:...), or nothing arrives.
-            subs.put(camera, nt.getRawTopic(name).subscribe(topic.getTypeString(), new byte[0], PubSubOption.sendAll(true), PubSubOption.pollStorage(512)));
+            subs.put(camera, nt.getRawTopic(name).subscribe(topic.getTypeString(), new byte[0], PubSubOption.SEND_ALL, PubSubOption.pollStorage(512)));
         }
         System.out.println("cameras: " + subs.keySet());
         if (subs.isEmpty()) for (var topic : nt.getTopics("/photonvision/")) System.out.println("  topic " + topic.getName());
@@ -59,7 +60,7 @@ public class ResultTimestamps {
             var t = e.getValue();
             var d = new ArrayList<Double>();
             for (int i = 1; i < t.size(); i++) {
-                double ms = (t.get(i) - t.get(i - 1)) / 1000.0;
+                double ms = (t.get(i) - t.get(i - 1)) / 1e6;
                 if (ms > 0 && ms < 30) d.add(ms); // a skipped frame isn't jitter
             }
             if (d.size() < 10) continue;

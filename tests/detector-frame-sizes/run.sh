@@ -6,13 +6,17 @@
 # 2560x1600 detector was past the 971 detector's 2048 px limit; far_search.cc now uses tiles).
 set -uo pipefail
 cd "$(dirname "$0")" || exit
-JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64
-CP=/usr/share/java/opencv.jar:$(ls /usr/local/java/apriltag.jar /usr/local/java/wpimath.jar /usr/local/java/wpiutil.jar | paste -sd:)
+JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk-arm64}
+CP=/opt/photonvision/photonvision.jar
+[[ -x $JAVA_HOME/bin/javac && -f $CP ]] || {
+  echo "Install PhotonVision's alpha-7 jar and openjdk-25-jdk first." >&2
+  exit 1
+}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/src/org/photonvision/jni"
 cat > "$tmp/src/org/photonvision/jni/GpuDetectorJNI.java" <<'J'
 package org.photonvision.jni;
-import edu.wpi.first.apriltag.AprilTagDetection;
+import org.wpilib.vision.apriltag.AprilTagDetection;
 public class GpuDetectorJNI {
   static { System.loadLibrary("971apriltag"); }
   public static native long createGpuDetector(int width, int height);

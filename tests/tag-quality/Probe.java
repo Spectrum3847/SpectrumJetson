@@ -5,10 +5,10 @@
 // Per camera it prints frames with tags, how many found their quality array by sequence ID, whether
 // the tag IDs agreed, the medians of each value, and the bytes each costs on the network.
 // Exit 0 when every camera that saw tags matched at least 99% of its frames with the same IDs.
-import edu.wpi.first.networktables.DoubleArraySubscriber;
-import edu.wpi.first.networktables.NetworkTableInstance;
-import edu.wpi.first.networktables.PubSubOption;
-import edu.wpi.first.networktables.RawSubscriber;
+import org.wpilib.networktables.DoubleArraySubscriber;
+import org.wpilib.networktables.NetworkTableInstance;
+import org.wpilib.networktables.PubSubOption;
+import org.wpilib.networktables.RawSubscriber;
 import java.util.*;
 import org.photonvision.common.dataflow.structures.Packet;
 import org.photonvision.jni.LibraryLoader;
@@ -26,7 +26,7 @@ public class Probe {
         LibraryLoader.loadTargeting();
         var nt = NetworkTableInstance.create();
         nt.setServer("10.85.15.2");
-        nt.startClient4("tag-quality-probe");
+        nt.startClient("tag-quality-probe");
         long giveUp = System.currentTimeMillis() + 20_000;
         while (!nt.isConnected()) {
             if (System.currentTimeMillis() > giveUp) {
@@ -36,8 +36,8 @@ public class Probe {
             Thread.sleep(100);
         }
         // Topic announcements need a subscription; a prefix one with only topics is cheap.
-        var all = new edu.wpi.first.networktables.MultiSubscriber(
-                nt, new String[] {"/photonvision/"}, PubSubOption.topicsOnly(true));
+        var all = new org.wpilib.networktables.MultiSubscriber(
+                nt, new String[] {"/photonvision/"}, PubSubOption.TOPICS_ONLY);
         Thread.sleep(2000);
         var cams = new TreeSet<String>();
         for (var t : nt.getTopics("/photonvision/")) {
@@ -48,7 +48,7 @@ public class Probe {
             System.out.println("FAIL: no cameras on NetworkTables");
             System.exit(1);
         }
-        var opts = new PubSubOption[] {PubSubOption.sendAll(true), PubSubOption.pollStorage(500), PubSubOption.periodic(0.01)};
+        var opts = new PubSubOption[] {PubSubOption.SEND_ALL, PubSubOption.pollStorage(500), PubSubOption.periodic(0.01)};
         var raw = new HashMap<String, RawSubscriber>();
         var q = new HashMap<String, DoubleArraySubscriber>();
         for (var c : cams) {

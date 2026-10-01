@@ -7,7 +7,7 @@
 # It runs every step in order, each with its own time limit and log in ~/install-logs/, and stops
 # at the first failure. Run it again and it carries on from the step that failed (finished steps
 # are recorded in ~/install-logs/done). --from STEP re-runs from a step, --only STEP runs one.
-# About an hour, most of it CUDA's download and the allwpilib build.
+# About an hour, most of it CUDA's download and the detector build.
 #
 #   --jar PATH        the PhotonVision fork jar (scripts/host/03-build-photonvision-fork.sh builds
 #                     it on a laptop). Default: the newest ~/restore/*linuxarm64.jar.
@@ -52,7 +52,7 @@ timeout 10 ping -c1 -W5 github.com >/dev/null 2>&1 || { echo "No internet: join 
 
 export PATH=$PATH:/usr/local/cuda/bin
 export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/cuda/lib64
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64/
+export JAVA_HOME=/usr/lib/jvm/java-25-openjdk-arm64/
 # apt must never stop to ask (sudo drops DEBIAN_FRONTEND, so set it in apt's and debconf's own
 # config for the install, and put it back at the end).
 APT_NOASK=/etc/apt/apt.conf.d/99spectrum-install-noninteractive
@@ -98,13 +98,13 @@ prebuilt_install() {
   grep -qx "l4t: $l4t" "$t/MANIFEST" && grep -qx "cuda: $cuda" "$t/MANIFEST" \
     || { echo "The bundle was built for $(grep -E '^(l4t|cuda):' "$t/MANIFEST" | tr '\n' ' '), this Jetson has l4t $l4t, cuda $cuda"; return 1; }
   (cd "$t" && sed -n 's/^  //p' MANIFEST | sha256sum -c --quiet) || { echo "A file in the bundle doesn't match its MANIFEST"; return 1; }
+  grep -q '^patches: .*photonvision-2027-alpha7-migration\.patch' "$t/MANIFEST" \
+    || { echo "The bundle is a WPILib 2026 build; this checkout needs an alpha-7 bundle (make-prebuilt-bundle.sh on an alpha-7 Jetson)"; return 1; }
   sed -n '1,7p' "$t/MANIFEST"
   # The runtime packages the builds would have installed.
   # build-essential: the camera driver is still compiled here, for the exact kernel.
-  sudo apt-get install -y openjdk-17-jdk libprotobuf23 libjpeg-turbo8 libtbb12 unzip build-essential >/dev/null || return 1
+  sudo apt-get install -y openjdk-25-jdk libprotobuf23 libjpeg-turbo8 libtbb12 unzip build-essential >/dev/null || return 1
   # Each copy checked: a step that half-installed must fail, not be marked done.
-  sudo install -m 755 "$t"/usr/local/lib/*.so /usr/local/lib/ || return 1
-  sudo ldconfig || return 1
   mkdir -p "$HOME/build/bos-detector" "$HOME/build/fieldcal-detect" || return 1
   install -m 755 "$t"/build/bos-detector/*.so "$HOME/build/bos-detector/" || return 1
   # The synthetic-tag generator for fake-cameras.sh (in bundles from 2026-10-01 on).

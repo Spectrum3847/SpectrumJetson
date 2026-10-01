@@ -135,8 +135,9 @@ Every frame has two timestamps:
 - `jetson_us`: the Jetson's clock, the same one PhotonVision stamps its results with, at the moment
   the frame arrived.
 - `robot_us`: the **robot's clock**, from PhotonVision's time sync with the robot. That's the
-  timebase of PhotonLib's result timestamps and of the AdvantageKit log. It's blank when no robot
-  was connected (bench recordings).
+  timebase of PhotonLib's result timestamps and of the AdvantageKit log, in microseconds (alpha-7
+  PhotonLib reports nanoseconds: divide by 1000). It's blank when no robot was connected (bench
+  recordings).
 
 Both are arrival times. A result's timestamp is earlier: the middle of the exposure, half the
 exposure (plus `SPECTRUM_CAMERA_DELAY_US`, 0 unless set) before arrival. PhotonVision logs the
