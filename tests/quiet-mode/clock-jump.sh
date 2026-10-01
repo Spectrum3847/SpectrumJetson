@@ -12,8 +12,7 @@
 #   - quiet mode started quietAfterDisabledSeconds after connecting (-2/+4 s), not at the jump,
 #   - the enable made the scratch partition writable again.
 # Internet time (NTP) is paused for the test, since PhotonVision leaves the date alone while the
-# Jetson has it. Afterwards the date is put back (from the monotonic clock), NTP is turned back on,
-# and timesyncd's clock file gets today's date again (the next boot starts from it).
+# Jetson has it, and put back afterwards with the date (tests/lib/bench.sh, ntp_pause/ntp_restore).
 # Usage: tests/quiet-mode/clock-jump.sh [OFFSET_S]. Deadline: 4 min.
 set -uo pipefail
 if [[ -z ${CLOCK_JUMP_UNDER_TIMEOUT:-} ]]; then
@@ -29,8 +28,7 @@ fails=0
 check() { if eval "$2"; then echo "  PASS  $1"; else echo "  FAIL  $1"; fails=$((fails + 1)); fi; }
 api() { python3 -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://localhost:5800/api/robotState", timeout=2))["'"$1"'"])' 2>/dev/null; }
 ro() { [[ ,$(findmnt -n -o OPTIONS /data/scratch), == *,ro,* ]]; }
-# The date minus the monotonic clock, in seconds: changes only when the date is set.
-skew() { python3 -c 'import time; print(f"{time.time() - time.monotonic():.3f}")'; }
+source "$ROOT/tests/lib/bench.sh"
 
 findmnt -n /data/scratch >/dev/null || { echo "No scratch partition: run 10-data-partition.sh first"; exit 1; }
 [[ $(api robotConnected) == False ]] || { echo "PhotonVision is connected to a robot already (or isn't answering); not running."; exit 1; }
@@ -38,31 +36,15 @@ ro && { echo "The scratch partition is already read-only: leave quiet mode first
 LIMIT=$(api quietAfterDisabledSeconds)
 [[ $LIMIT =~ ^[0-9]+$ && $LIMIT -gt 0 ]] || { echo "Quiet mode after disabled is off (quietAfterDisabledSeconds=$LIMIT): nothing to test"; exit 1; }
 
-skew0=$(skew)
-ntp=$(timedatectl show -p NTP --value)
 cleanup() {
   touch /tmp/fake-robot-stop
   wait "${robot:-}" 2>/dev/null
-  # Put the date back, from the monotonic clock: right whether or not the jump happened.
-  if python3 -c 'import sys,time; sys.exit(abs(time.time() - time.monotonic() - float(sys.argv[1])) < 1)' "$skew0"; then
-    sudo -n date -s "@$(python3 -c 'import sys,time; print(f"{time.monotonic() + float(sys.argv[1]):.3f}")' "$skew0")" >/dev/null
-    echo "Date put back: $(date -u +%FT%TZ)"
-  fi
-  if [[ $ntp == yes ]]; then
-    sudo -n timedatectl set-ntp true
-    for _ in $(seq 30); do [[ -e /run/systemd/timesync/synchronized ]] && break; sleep 1; done
-    [[ -e /run/systemd/timesync/synchronized ]] && echo "Internet time back on (synced)" || echo "Internet time back on (not synced yet)"
-  fi
-  # PhotonVision touched timesyncd's clock file to the jumped date; the next boot starts from it.
-  sudo -n touch /var/lib/systemd/timesync/clock
+  ntp_restore
   rm -f "$LOG"
 }
 trap cleanup EXIT
-if [[ $ntp == yes ]]; then
-  sudo -n timedatectl set-ntp false || { echo "Couldn't pause internet time (sudo)"; exit 1; }
-fi
-# Left by timesyncd's last sync this boot; while it's there PhotonVision won't set the date.
-sudo -n rm -f /run/systemd/timesync/synchronized
+ntp_pause
+skew0=$bench_skew0
 
 echo "== Fake robot: its clock ${OFFSET} s ahead; disabled $((LIMIT + 15)) s, then enabled 5 s (quiet after ${LIMIT} s disabled)"
 FAKE_ROBOT_CLOCK_OFFSET_S=$OFFSET timeout -k 10 $((LIMIT + 90)) "$ROOT/tests/fake-robot/run.sh" "disabled:$((LIMIT + 15))" enabled:5 > "$LOG" 2>&1 &

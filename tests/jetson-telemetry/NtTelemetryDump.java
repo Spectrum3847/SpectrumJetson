@@ -1,7 +1,7 @@
 // Bench check for PhotonVision's Jetson telemetry (patch 16) and camera mount estimate (patch 17):
 // stands in for robot code by running a NetworkTables server, then prints every value under
-// /photonvision/jetson and each camera's /health and /mount tables. Run ON THE JETSON with
-// PhotonVision's NT server address set to 127.0.0.1 (see run.sh):
+// /photonvision/jetson and each camera's /health and /mount tables. Run ON THE JETSON by run.sh,
+// which makes this Jetson answer at the robot's address (tests/lib/bench.sh):
 //   java -cp /opt/photonvision/photonvision.jar NtTelemetryDump.java [seconds]
 import edu.wpi.first.networktables.NetworkTableInstance;
 import edu.wpi.first.networktables.NetworkTableValue;
@@ -24,7 +24,7 @@ public class NtTelemetryDump {
         long deadline = System.nanoTime() + 30_000_000_000L;
         while (nt.getConnections().length == 0) {
             if (System.nanoTime() > deadline) {
-                System.out.println("PhotonVision didn't connect in 30 s: is its NT server address 127.0.0.1?");
+                System.out.println("PhotonVision didn't connect in 30 s (run.sh gives this Jetson the robot's address: is it on a robot already?)");
                 System.exit(1);
             }
             Thread.sleep(200);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck on every shell script and pyflakes on every Python file in the repo: real mistakes
+# Runs shellcheck on every shell script and pyflakes on every Python file in the repo: real mistakes
 # only (unquoted cd, unused imports, typos in variable names), not style. Run on the laptop, or by
 # .github/workflows/lint.yml on every push. Needs shellcheck and pyflakes (apt install shellcheck
 # python3-pyflakes). Exits 1 on any finding.
@@ -10,7 +10,7 @@
 #   SC1091  config.env and other sourced files aren't followed
 #   SC2024  sudo with a redirect: the file is the user's own on purpose
 set -uo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../.." || exit 2
 rc=0
 mapfile -t sh < <(git ls-files '*.sh')
 mapfile -t py < <(git ls-files '*.py')

@@ -1,7 +1,7 @@
 // Bench test for PhotonVision's RobotClockSync (patch 08): stands in for robot code by running a
 // NetworkTables server that publishes /photonvision/clock/unixMs, first OFFSET seconds wrong,
-// then correct. Run ON THE JETSON with PhotonVision's NT server address set to 127.0.0.1 (see
-// run.sh):
+// then correct. Run ON THE JETSON by run.sh, which makes this Jetson answer at the robot's address
+// (tests/lib/bench.sh):
 //   java -cp /opt/photonvision/photonvision.jar FakeRobotClock.java [offset_s] [seconds_each]
 import edu.wpi.first.networktables.NetworkTableInstance;
 import org.photonvision.jni.LibraryLoader;
