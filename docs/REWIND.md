@@ -132,10 +132,16 @@ On the robot network, set the address: `JETSON=10.85.15.15 scripts/host/rewind-p
 
 Every frame has two timestamps:
 
-- `jetson_us`: the Jetson's clock, the same one PhotonVision stamps its results with.
+- `jetson_us`: the Jetson's clock, the same one PhotonVision stamps its results with, at the moment
+  the frame arrived.
 - `robot_us`: the **robot's clock**, from PhotonVision's time sync with the robot. That's the
   timebase of PhotonLib's result timestamps and of the AdvantageKit log. It's blank when no robot
   was connected (bench recordings).
+
+Both are arrival times. A result's timestamp is earlier: the middle of the exposure, half the
+exposure (plus `SPECTRUM_CAMERA_DELAY_US`, 0 unless set) before arrival. PhotonVision logs the
+shift for each camera when it starts ("Frame timestamps moved 2.5 ms earlier, to mid-exposure"). To
+find a result's frame, subtract that shift from the frame's time.
 
 `frames.csv` has `video_s` (seconds into the video) next to `robot_s` (the robot's time), so a moment
 in the log can be found in the video and back. In AdvantageScope, open the `.mp4` in the Video tab

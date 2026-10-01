@@ -1,0 +1,22 @@
+# shellcheck and pyflakes on every push and pull request (scripts/ci/lint.sh: run it locally too).
+# Under a minute; free on a public repo.
+name: Lint
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install linters
+        run: sudo apt-get update -q && sudo apt-get install -y -q shellcheck python3-pyflakes
+      - name: Lint
+        run: scripts/ci/lint.sh

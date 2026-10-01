@@ -1,0 +1,14 @@
+diff --git a/photon-client/src/components/settings/SnapshotsCard.vue b/photon-client/src/components/settings/SnapshotsCard.vue
+index dcfb09cf..2fd611f2 100644
+--- a/photon-client/src/components/settings/SnapshotsCard.vue
++++ b/photon-client/src/components/settings/SnapshotsCard.vue
+@@ -158,7 +158,8 @@ const nameOk = computed(() => /^[\w .()-]{0,60}$/.test(newName.value));
+       <v-card v-if="confirmRestore" color="surface">
+         <v-card-title>Restore '{{ confirmRestore.name }}'?</v-card-title>
+         <v-card-text>
+-          Every camera's pipelines, settings and calibrations go back to {{ when(confirmRestore.createdAt) }}, and
++          Every camera's pipelines, settings and calibrations go back to {{ when(confirmRestore.createdAt) }}, and so do
++          the network settings (team number, addresses), the AprilTag field layout, Robot state and Rewind's settings.
+           PhotonVision restarts (cameras are back in about 20 s). The current settings are saved first as a snapshot, so
+           this can be undone.
+         </v-card-text>
