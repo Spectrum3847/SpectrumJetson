@@ -5,12 +5,14 @@
 //
 //   far_replay SESSION_DIR [--out OUT.csv] [--budget N] [--off] [--every N] [--threads N]
 //              [--calib CAMERA=fx,fy,cx,cy,k1,k2,p1,p2,k3,k4,k5,k6]... [--mwbd N] [--mse X]
+//              [--exclude ID,ID...]
 //
 // SESSION_DIR: a Rewind session (one folder per camera, docs/REWIND.md). --budget: full-size
 // searches a second (default 30, as live). --off: the far search switched off, for a baseline.
 // --every N: every Nth frame of each camera (the policy's timings stay on the recording's clock).
 // --calib: a camera's lens calibration by folder name; without one, no undistortion (as in
-// PhotonVision before a calibration).
+// PhotonVision before a calibration). --exclude: PhotonVision's excluded tags, which don't count
+// toward a good view (photonvision-69).
 //
 // OUT.csv, one row per detection: camera,frame,jetson_us,id,margin,side_px,source,x0,y0,...,x3,y3
 // (source: normal or far). Summary on stdout: tag sightings (camera x frame x tag) by the normal
@@ -78,7 +80,8 @@ int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   if (argc < 2) {
     std::cerr << "usage: far_replay SESSION_DIR [--out OUT.csv] [--budget N] [--off] [--every N] [--threads N]"
-                 " [--calib CAMERA=fx,fy,cx,cy,k1,k2,p1,p2,k3,k4,k5,k6]... [--mwbd N] [--mse X]\n";
+                 " [--calib CAMERA=fx,fy,cx,cy,k1,k2,p1,p2,k3,k4,k5,k6]... [--mwbd N] [--mse X]"
+                 " [--exclude ID,ID...]\n";
     return 2;
   }
   const fs::path session = fs::path(argv[1]).lexically_normal().string().back() == '/'
@@ -90,6 +93,7 @@ int main(int argc, char **argv) {
   int every = 1, threads = 5;
   double mwbd = EnvOr("SPECTRUM_971_MIN_WHITE_BLACK_DIFF", 5), mse = EnvOr("SPECTRUM_971_MAX_LINE_FIT_MSE", 10);
   std::map<std::string, std::vector<double>> calibs;
+  std::vector<int> excluded;
   for (int i = 2; i < argc; ++i) {
     const std::string a = argv[i];
     const char *v = i + 1 < argc ? argv[i + 1] : "";
@@ -101,6 +105,12 @@ int main(int argc, char **argv) {
     else if (a == "--threads") threads = std::max(1, std::atoi(v)), ++i;
     else if (a == "--mwbd") mwbd = std::atof(v), ++i;
     else if (a == "--mse") mse = std::atof(v), ++i;
+    else if (a == "--exclude") {
+      std::stringstream ss(v);
+      std::string t;
+      while (std::getline(ss, t, ',')) excluded.push_back(std::atoi(t.c_str()));
+      ++i;
+    }
     else if (a == "--calib") {
       const std::string c = v;
       const auto eq = c.find('=');
@@ -174,6 +184,7 @@ int main(int argc, char **argv) {
     std::printf("  %s: %zu frames %dx%d%s\n", c.name.c_str(), c.frames.size(), c.width, c.height,
                 calibs.count(c.name) ? ", calibrated" : "");
   far_search::SetConfig({!off, budget});
+  far_search::SetExcluded(excluded);
 
   std::ofstream out;
   if (!out_path.empty()) {

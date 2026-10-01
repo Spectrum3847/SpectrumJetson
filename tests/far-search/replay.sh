@@ -5,7 +5,8 @@
 # Extra far_replay options (--calib CAMERA=..., --budget N, --every N) go in FAR_REPLAY_ARGS.
 # The check: a synthetic session (far_search_test --write-session) where CamA sees near tags for the
 # first and last second and a far 14 px tag all along. far_replay must find the far tag on frames the
-# normal search misses (only while no camera has a good view), and nothing extra with --off.
+# normal search misses (only while no camera has a good view), nothing extra with --off, and with the
+# near tags excluded (--exclude, photonvision-69) the far search runs while they're in view too.
 set -uo pipefail
 OUT=${OUT:-$HOME/build/bos-detector}
 [[ -f $OUT/build.ninja ]] || { echo "Build the detector first: scripts/jetson/07-build-bos-detector.sh" >&2; exit 1; }
@@ -26,6 +27,11 @@ check "with --off, nothing extra" 'grep -q "(+0.0%)" <<<"$off"'
 # Far detections only in the middle second (1.25-2.0 s after the start: no good view).
 bad=$(awk -F, 'NR > 1 && $7 == "far" && ($3 < 2250000 || $3 > 3000000) {n++} END {print n + 0}' "$S/on.csv")
 check "far detections only while no camera has a good view ($bad outside it)" '[[ $bad -eq 0 ]]'
+# photonvision-69: excluded tags (left out of multi-tag) don't make a good view. With the near
+# tags 1 and 2 excluded there's never one, so the far search runs in the first second too.
+timeout 300 "$OUT/far_replay" "$S/session" --exclude 1,2 --out "$S/ex.csv" 2>&1 | quiet >/dev/null
+early=$(awk -F, 'NR > 1 && $7 == "far" && $3 < 2000000 {n++} END {print n + 0}' "$S/ex.csv")
+check "with the near tags excluded they don't make a good view: far detections in the first second ($early)" '[[ $early -ge 10 ]]'
 
 for session in "$@"; do
   echo; echo "== $session"

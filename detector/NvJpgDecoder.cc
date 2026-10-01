@@ -264,13 +264,27 @@ int Finish(SnjDecoder *d, const char *what) {
   return SNJ_OK;
 }
 
+// A copy that couldn't even be queued (a bad argument, a stale mapping): the error comes back
+// from the call, not from the sync in Finish, so unchecked the copy silently didn't happen and
+// the caller got whatever its buffer held before (a stale frame).
+int QueueFailed(SnjDecoder *d, cudaError_t e, const char *what) {
+  // Anything queued before it (CopyGrayDev's first copy) may still be reading the mapped buffer.
+  cudaStreamSynchronize(d->stream);
+  cudaGetLastError();
+  Unregister(d);
+  return Fail(d, SNJ_CUDA, std::string(what) + " failed: " + cudaGetErrorString(e));
+}
+
 // Copies the Y plane of libnvjpeg's buffer `fd` into gray with CUDA.
 int CopyGray(SnjDecoder *d, int fd, uint8_t *gray, int width, int height, size_t stride) {
   NvBufSurface *surf;
   Buffer *b;
   if (int rc = MapBuffer(d, fd, width, height, &surf, &b); rc != SNJ_OK) return rc;
-  cudaMemcpy2DAsync(gray, stride, b->frame.frame.pPitch[0], b->frame.pitch, width, height,
-                    cudaMemcpyDeviceToHost, d->stream);
+  if (cudaError_t e = cudaMemcpy2DAsync(gray, stride, b->frame.frame.pPitch[0], b->frame.pitch,
+                                        width, height, cudaMemcpyDeviceToHost, d->stream);
+      e != cudaSuccess) {
+    return QueueFailed(d, e, "CUDA copy");
+  }
   return Finish(d, "CUDA copy");
 }
 
@@ -281,10 +295,16 @@ int CopyGrayDev(SnjDecoder *d, int fd, uint8_t *gray, int width, int height, siz
   NvBufSurface *surf;
   Buffer *b;
   if (int rc = MapBuffer(d, fd, width, height, &surf, &b); rc != SNJ_OK) return rc;
-  cudaMemcpy2DAsync(gray_dev, width, b->frame.frame.pPitch[0], b->frame.pitch, width, height,
-                    cudaMemcpyDeviceToDevice, d->stream);
-  cudaMemcpy2DAsync(gray, stride, gray_dev, width, width, height, cudaMemcpyDeviceToHost,
-                    d->stream);
+  if (cudaError_t e = cudaMemcpy2DAsync(gray_dev, width, b->frame.frame.pPitch[0], b->frame.pitch,
+                                        width, height, cudaMemcpyDeviceToDevice, d->stream);
+      e != cudaSuccess) {
+    return QueueFailed(d, e, "CUDA copy");
+  }
+  if (cudaError_t e = cudaMemcpy2DAsync(gray, stride, gray_dev, width, width, height,
+                                        cudaMemcpyDeviceToHost, d->stream);
+      e != cudaSuccess) {
+    return QueueFailed(d, e, "CUDA copy");
+  }
   return Finish(d, "CUDA copy");
 }
 
@@ -322,8 +342,12 @@ int CopyBgr(SnjDecoder *d, int fd, uint8_t *bgr, int width, int height, size_t s
     cudaGetLastError();
     return Fail(d, SNJ_CUDA, std::string("BGR kernel launch failed: ") + cudaGetErrorString(e));
   }
-  cudaMemcpy2DAsync(bgr, stride, d->bgr, d->bgr_pitch, static_cast<size_t>(width) * 3, height,
-                    cudaMemcpyDeviceToHost, d->stream);
+  if (cudaError_t e = cudaMemcpy2DAsync(bgr, stride, d->bgr, d->bgr_pitch,
+                                        static_cast<size_t>(width) * 3, height,
+                                        cudaMemcpyDeviceToHost, d->stream);
+      e != cudaSuccess) {
+    return QueueFailed(d, e, "CUDA BGR copy");
+  }
   return Finish(d, "CUDA BGR conversion");
 }
 

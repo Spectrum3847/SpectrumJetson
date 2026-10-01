@@ -53,6 +53,13 @@ struct Config {
 void SetConfig(const Config &c);
 Config GetConfig();
 
+// Tags that don't count toward a good view: PhotonVision's excluded tags (photonvision-22). They're
+// left out of the multi-tag solve, so seeing them doesn't give the robot the solid pose a good view
+// stands for. Before, two excluded tags in view turned the far search off. Set from Java
+// (GpuDetectorJNI.setFarSearchExcluded, photonvision-69); kept apart from Config so the two
+// setters can't overwrite each other's values.
+void SetExcluded(const std::vector<int> &ids);
+
 // Counters since start, for the stats line and /api/farSearch.
 struct Counters {
   long sweeps = 0;       // full-size searches run
@@ -87,6 +94,6 @@ constexpr int kGoodTags = 2;
 constexpr double kGoodSidePx = 40;
 constexpr float kGoodMargin = 30;
 constexpr int64_t kStarveUs = 250'000;
-bool GoodView(const std::vector<Det> &dets);
+bool GoodView(const std::vector<Det> &dets, const std::vector<int> &excluded = {});
 
 }  // namespace far_search

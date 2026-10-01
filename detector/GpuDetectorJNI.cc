@@ -38,6 +38,7 @@
 #include <mutex>
 #include <pthread.h>
 #include <shared_mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -487,18 +488,20 @@ void RecordStats(Stats &st, jlong handle, const cv::Mat &img, const zarray_t *de
   }
   double window = std::chrono::duration<double>(t2 - st.start).count();
   if (window >= 1.0) {
-    std::cout << "971 stats h" << handle << " " << img.cols << "x" << img.rows << ": "
-              << st.frames / window << " calls/s, detect avg " << st.detect_ms / st.frames
-              << " ms max " << st.max_ms << " ms, jni " << st.jni_ms / st.frames
-              << " ms, tags/frame " << double(st.tags) / st.frames;
-    if (st.tags) {
-      std::cout << ", margin avg " << st.margin / st.tags << " min " << st.min_margin;
-    }
-    if (st.errors) std::cout << ", errors " << st.errors;
-    if (st.lock_wait_ms > 0) std::cout << ", gpu lock wait " << st.lock_wait_ms / st.frames << " ms";
-    if (st.gpu_input) std::cout << ", gpu input " << 100 * st.gpu_input / st.frames << "%";
-    if (st.ages) std::cout << ", frame age at result " << st.age_ms / st.ages << " ms";
-    std::cout << " [bos]" << std::endl;
+    // Built whole, then written in one go: written piece by piece, two cameras' lines could
+    // interleave mid-line, and health-check.sh and the tests parse them.
+    std::ostringstream line;
+    line << "971 stats h" << handle << " " << img.cols << "x" << img.rows << ": "
+         << st.frames / window << " calls/s, detect avg " << st.detect_ms / st.frames << " ms max "
+         << st.max_ms << " ms, jni " << st.jni_ms / st.frames << " ms, tags/frame "
+         << double(st.tags) / st.frames;
+    if (st.tags) line << ", margin avg " << st.margin / st.tags << " min " << st.min_margin;
+    if (st.errors) line << ", errors " << st.errors;
+    if (st.lock_wait_ms > 0) line << ", gpu lock wait " << st.lock_wait_ms / st.frames << " ms";
+    if (st.gpu_input) line << ", gpu input " << 100 * st.gpu_input / st.frames << "%";
+    if (st.ages) line << ", frame age at result " << st.age_ms / st.ages << " ms";
+    line << " [bos]\n";
+    std::cout << line.str() << std::flush;
     st = Stats{};
   }
 }
@@ -1482,6 +1485,19 @@ JNIEXPORT void JNICALL Java_org_photonvision_jni_GpuDetectorJNI_setFarSearch(JNI
                                                                             jboolean enabled,
                                                                             jdouble sweeps_per_s) {
   far_search::SetConfig({enabled == JNI_TRUE, sweeps_per_s});
+}
+
+// SpectrumJetson (photonvision-69): GpuDetectorJNI.setFarSearchExcluded(int[] ids), PhotonVision's
+// excluded tags (ExcludedTags), which don't count toward the far search's good view.
+JNIEXPORT void JNICALL Java_org_photonvision_jni_GpuDetectorJNI_setFarSearchExcluded(JNIEnv *env,
+                                                                                    jclass,
+                                                                                    jintArray ids) {
+  std::vector<int> v;
+  if (ids) {
+    v.resize(static_cast<size_t>(env->GetArrayLength(ids)));
+    if (!v.empty()) env->GetIntArrayRegion(ids, 0, static_cast<jsize>(v.size()), v.data());
+  }
+  far_search::SetExcluded(v);
 }
 
 // double[] farSearchStatus(): {enabled, starved now, full-size searches, crops, far tags returned,

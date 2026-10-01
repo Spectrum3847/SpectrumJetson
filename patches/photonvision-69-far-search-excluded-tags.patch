@@ -1,0 +1,56 @@
+diff --git a/photon-core/src/main/java/org/photonvision/vision/objects/GpuDetectorJNI.java b/photon-core/src/main/java/org/photonvision/vision/objects/GpuDetectorJNI.java
+index 42609ed5..a7dbb783 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/objects/GpuDetectorJNI.java
++++ b/photon-core/src/main/java/org/photonvision/vision/objects/GpuDetectorJNI.java
+@@ -62,6 +62,12 @@ public class GpuDetectorJNI {
+      */
+     public static native void setFarSearch(boolean enabled, double sweepsPerSecond);
+ 
++    /**
++     * SpectrumJetson (photonvision-69): the excluded tags (ExcludedTags), which don't count toward
++     * the far search's good view: they're left out of the multi-tag solve.
++     */
++    public static native void setFarSearchExcluded(int[] ids);
++
+     /**
+      * {enabled, starved now, full-size searches, crops, far tags returned, seconds starved, ms in
+      * full-size searches, ms in crops}, since PhotonVision started.
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/IdleMode.java b/photon-core/src/main/java/org/photonvision/vision/processes/IdleMode.java
+index e88df2b7..524836eb 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/IdleMode.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/IdleMode.java
+@@ -184,9 +184,34 @@ public final class IdleMode {
+         }
+     }
+ 
++    // photonvision-69: the excluded tags, for the far search's good view; null until sent.
++    private static volatile java.util.Set<Integer> farSearchExcludedSent = null;
++    private static volatile long farSearchExcludedCheckMs = 0;
++    private static volatile boolean farSearchExcludedUnsupported = false;
++
++    /**
++     * Sends the excluded tags (ExcludedTags) to the far search when they change, at most every
++     * 500 ms. Only after applyFarSearch worked: the library is loaded then, by the camera threads.
++     */
++    private static void applyFarSearchExcluded() {
++        long now = System.nanoTime() / 1_000_000;
++        if (farSearchExcludedUnsupported || now - farSearchExcludedCheckMs < 500) return;
++        farSearchExcludedCheckMs = now;
++        var excluded = org.photonvision.vision.target.ExcludedTags.getInstance().active();
++        if (excluded.equals(farSearchExcludedSent)) return;
++        try {
++            org.photonvision.jni.GpuDetectorJNI.setFarSearchExcluded(
++                    excluded.stream().mapToInt(Integer::intValue).toArray());
++            farSearchExcludedSent = excluded;
++        } catch (UnsatisfiedLinkError e) {
++            farSearchExcludedUnsupported = true; // an older lib971apriltag.so without it
++        }
++    }
++
+     /** True while frames are limited: idle (a disabled robot), or the thermal limit. */
+     public static boolean active() {
+         if (!farSearchApplied) applyFarSearch();
++        else applyFarSearchExcluded();
+         if (!listening) startListening(); // the GC on disable runs with idle off too
+         return idleNow() || thermalLimitNow();
+     }

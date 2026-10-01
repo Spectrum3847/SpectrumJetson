@@ -118,6 +118,7 @@ struct Camera {
 std::mutex state_mu;
 Config config;
 Counters counters;
+std::vector<int> excluded_ids;  // SetExcluded: they don't count toward a good view
 Camera cameras[kMaxCameras];
 int64_t last_good_us = -1;       // any camera's last good view
 int64_t last_any_sweep_us = -1;  // for the sweeps-a-second budget
@@ -211,12 +212,22 @@ std::vector<Det> Copy(const zarray_t *detections) {
   return out;
 }
 
-bool GoodView(const std::vector<Det> &dets) {
+bool GoodView(const std::vector<Det> &dets, const std::vector<int> &excluded) {
   int n = 0;
   for (const auto &d : dets) {
-    if (!d.far && d.side() >= kGoodSidePx && d.margin >= kGoodMargin) ++n;
+    if (d.far || d.side() < kGoodSidePx || d.margin < kGoodMargin) continue;
+    if (std::find(excluded.begin(), excluded.end(), d.id) != excluded.end()) continue;
+    ++n;
   }
   return n >= kGoodTags;
+}
+
+void SetExcluded(const std::vector<int> &ids) {
+  std::lock_guard<std::mutex> lock(state_mu);
+  if (ids == excluded_ids) return;
+  excluded_ids = ids;
+  std::cout << "971 far search: " << ids.size() << " excluded tag(s) don't count toward a good view"
+            << std::endl;
 }
 
 void SetConfig(const Config &c) {
@@ -267,7 +278,7 @@ std::vector<Det> Process(int camera, const cv::Mat &gray, const std::vector<Det>
     std::lock_guard<std::mutex> lock(state_mu);
     cam.last_frame_us = now_us;
     if (last_good_us < 0) last_good_us = now_us;  // start as if just good: no sweep in the first 250 ms
-    if (GoodView(normal)) last_good_us = now_us;
+    if (GoodView(normal, excluded_ids)) last_good_us = now_us;
     starved = config.enabled && now_us - last_good_us > kStarveUs;
     if (last_starve_check_us >= 0 && counters.starved && now_us > last_starve_check_us) {
       counters.starved_ms += (now_us - last_starve_check_us) / 1000;

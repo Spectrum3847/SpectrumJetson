@@ -146,7 +146,7 @@ std::vector<Det> Decode(Detector &d, double box_thresh, double nms_thresh, int n
       dets.push_back({r[0], r[1], r[2] - r[0], r[3] - r[1], r[4], static_cast<int>(r[5])});
     }
     // Already NMS'd by the model.
-  } else if (dims.nbDims == 3) {
+  } else if (dims.nbDims == 3 && dims.d[1] >= 5) {  // the load refuses other shapes
     const int c = static_cast<int>(dims.d[1]);  // 4 + nc
     const int n = static_cast<int>(dims.d[2]);
     const int nc = std::max(1, std::min(num_classes > 0 ? num_classes : c - 4, c - 4));
@@ -269,6 +269,19 @@ JNIEXPORT jlong JNICALL Java_org_photonvision_jni_TensorRtJNI_create(JNIEnv *env
   if (d->in_name.empty() || d->out_name.empty() || d->in_w <= 0 || d->in_h <= 0) {
     std::cout << "TensorRT: could not find the input/output tensors" << std::endl;
     return 0;
+  }
+  // A YOLO detection head: [1, K, 6] (end to end: x1 y1 x2 y2 score class, already NMS'd) or
+  // [1, 4 + classes, N]. Anything else (a classifier, a segmentation model, boxes with no score)
+  // would be decoded past the end of the output buffer.
+  {
+    const auto &od = d->out_dims;
+    const bool e2e = od.nbDims == 3 && od.d[2] == 6;
+    const bool raw = od.nbDims == 3 && od.d[1] >= 5 && od.d[2] > 0;
+    if (!e2e && !raw) {
+      std::cout << "TensorRT: output " << d->out_name << " " << DimsStr(od)
+                << " isn't a YOLO detection head ([1, K, 6] or [1, 4 + classes, N])" << std::endl;
+      return 0;
+    }
   }
   const bool in_half = d->in_type == nvinfer1::DataType::kHALF;
   const bool out_half = d->out_type == nvinfer1::DataType::kHALF;
