@@ -1,0 +1,62 @@
+diff --git a/photon-client/src/components/app/photon-log-view.vue b/photon-client/src/components/app/photon-log-view.vue
+index 5d219fc1..bc9eea95 100644
+--- a/photon-client/src/components/app/photon-log-view.vue
++++ b/photon-client/src/components/app/photon-log-view.vue
+@@ -20,12 +20,16 @@ const selectedLogLevels = ref({
+   [LogLevel.DEBUG]: false
+ });
+ 
+-const logs = computed<LogMessage[]>(() =>
+-  useStateStore()
++// SpectrumJetson (photonvision-73): only while the log window is open. This component is always
++// mounted, and the filter went over every line kept at each new line, with the window closed too.
++const logs = computed<LogMessage[]>(() => {
++  if (!useStateStore().showLogModal) return [];
++  const query = searchQuery.value?.toLowerCase() || "";
++  return useStateStore()
+     .logMessages.filter(
+       (message) =>
+         selectedLogLevels.value[message.level] &&
+-        message.message.toLowerCase().includes(searchQuery.value?.toLowerCase() || "") &&
++        (query === "" || message.message.toLowerCase().includes(query)) &&
+         (timeInput.value === undefined ||
+           message.timestamp.getTime() >=
+             new Date().setHours(
+@@ -34,8 +38,8 @@ const logs = computed<LogMessage[]>(() =>
+               parseInt(timeInput.value.substring(6, 8))
+             ))
+     )
+-    .map((item, index) => ({ ...item, index: index }))
+-);
++    .map((item, index) => ({ ...item, index: index }));
++});
+ 
+ watch(logs, () => {
+   if (!logList.value) return;
+diff --git a/photon-client/src/stores/StateStore.ts b/photon-client/src/stores/StateStore.ts
+index df28b328..0363797d 100644
+--- a/photon-client/src/stores/StateStore.ts
++++ b/photon-client/src/stores/StateStore.ts
+@@ -10,6 +10,9 @@ import type {
+   WebsocketPipelineResultUpdate
+ } from "@/types/WebsocketDataTypes";
+ 
++// SpectrumJetson (photonvision-73): lines of log the dashboard keeps.
++const kMaxClientLogs = 2000;
++
+ export interface NTConnectionStatus {
+   connected: boolean;
+   address?: string;
+@@ -127,6 +130,12 @@ export const useStateStore = defineStore("state", {
+         message: data.logMessage.logMessage,
+         timestamp: new Date()
+       });
++      // SpectrumJetson (photonvision-73): keep the newest kMaxClientLogs lines. The list had no
++      // bound, and an unplugged camera logs a reconnect burst at every settings change: a
++      // dashboard open for a while got slower and slower (Download fetches the full log).
++      if (this.logMessages.length > kMaxClientLogs + kMaxClientLogs / 4) {
++        this.logMessages.splice(0, this.logMessages.length - kMaxClientLogs);
++      }
+     },
+     updateNTConnectionStatusFromWebsocket(data: WebsocketNTUpdate) {
+       this.ntConnectionStatus = {

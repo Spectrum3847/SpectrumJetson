@@ -274,6 +274,10 @@ StartLimitIntervalSec=0
 [Service]
 Restart=always
 RestartSec=1
+# A stop takes 3-7 s; the settings are saved in the first second. Twice on 2026-10-01 the
+# process hung in its native exit, after the shutdown hooks, until the default 90 s kill
+# (docs/AUDIT-2026-10.md): every camera and the dashboard were down that long.
+TimeoutStopSec=15
 CONF
 sudo systemctl daemon-reexec   # picks up the watchdog setting
 
