@@ -7,8 +7,8 @@
 //    decision margin of at least kGoodMargin (near tags: a solid multi-tag pose).
 //  - When no camera has had a good view for kStarveMs, the cameras are *starved*: one camera at a
 //    time (round robin, at most sweeps_per_s across all of them) runs a full-size search of its
-//    frame (a 2x nearest-neighbour upscale through a shared 2560x1600 detector; the half-size
-//    search then sees every pixel). Tags it finds that the normal search didn't are tracked with
+//    frame (a 2x nearest-neighbour upscale through a shared detector, in tiles of at most 1024
+//    frame px a side, the 971 detector's limit; the half-size search then sees every pixel). Tags it finds that the normal search didn't are tracked with
 //    full-size crops (160x160 upscaled to 320x320, one detector per camera) on that camera's
 //    following frames.
 //  - As soon as any camera has a good view again, all of it stops: cameras cost what they did.

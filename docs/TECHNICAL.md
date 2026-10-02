@@ -1491,8 +1491,10 @@ when the robot is short of a good pose:
   cameras don't have yet). No good view on any camera for 250 ms = *starved*: then one camera at a
   time (round robin: the active camera whose last full-size search is oldest), at most
   `farSweepsPerSecond` (30) across all, runs a **full-size search**: its frame upscaled 2x
-  (nearest neighbour, plain C++), through one shared 2560x1600 971 detector, so the half-size
-  search sees every pixel. Tags it finds that the normal search didn't are **tracked** with
+  (nearest neighbour, plain C++), through one shared 971 detector, so the half-size search sees
+  every pixel. It goes in tiles: the 971 detector keeps point coordinates in 10 bits of the
+  half-size image, so its input is at most 2048 px a side, and a 1280x800 frame is searched as
+  two 672x800 tiles (1344x1600 upscaled) that overlap by 64 px. Tags it finds that the normal search didn't are **tracked** with
   160x160 crops upscaled to 320x320 (a detector per camera), one crop per camera frame, until
   they're 24 px or more in the normal search's results or unseen for 300 ms. The moment any
   camera has a good view, no searches or crops, and the tracks are dropped.

@@ -36,6 +36,15 @@ constexpr int kMaxCropsPerFrame = 1;
 constexpr int64_t kTrackTimeoutUs = 300'000;  // drop a track not seen for this long
 constexpr int64_t kActiveUs = 1'000'000;      // a camera counts for the round robin for this long
 constexpr size_t kMaxDetectorPixels = 1u << 22;  // the 971 detector's limit
+// The 971 detector keeps each boundary point's x and y in 10 bits of the half-size image
+// (QuadBoundaryPoint), so a detector's input can be at most 2048 px on a side. The full-size
+// search upscales 2x, so it searches the frame in tiles of at most 1024 frame pixels a side.
+// Before (2026-10-01), a 1280x800 frame went in whole, as 2560x1600: points right of frame
+// column 1024 wrapped round, so far tags there were found in the wrong place or not at all, and a
+// frame of fine noise broke the CUDA context (every camera down while PhotonVision restarted).
+constexpr int kMaxTileSide = 1024;
+// Tiles overlap by this much, so a far tag (under ~kNormalRangePx) fits whole in one of them.
+constexpr int kTileOverlap = 64;
 
 struct Track {
   int id = 0;
@@ -174,6 +183,26 @@ frc::apriltag::CameraMatrix Scaled(frc::apriltag::CameraMatrix cm, double x0, do
   return cm;
 }
 
+// The tile size, and the tiles' origins along one side of the frame: one tile if the side fits,
+// else as few equal tiles as fit, overlapping by at least kTileOverlap (a multiple of 4, so the
+// upscaled tile is a multiple of 8, as the detector needs).
+struct Tiles {
+  int size = 0;
+  std::vector<int> origins;
+};
+Tiles TilesAlong(int side) {
+  Tiles t;
+  if (side <= kMaxTileSide) {
+    t.size = side;
+    t.origins = {0};
+    return t;
+  }
+  const int n = (side - kTileOverlap + (kMaxTileSide - kTileOverlap) - 1) / (kMaxTileSide - kTileOverlap);
+  t.size = std::min(kMaxTileSide, ((side + (n - 1) * kTileOverlap + n - 1) / n + 3) / 4 * 4);
+  for (int i = 0; i < n; ++i) t.origins.push_back(i == n - 1 ? side - t.size : i * (side - t.size) / (n - 1));
+  return t;
+}
+
 bool Has(const std::vector<Det> &dets, int id) {
   return std::any_of(dets.begin(), dets.end(), [&](const Det &d) { return d.id == id; });
 }
@@ -269,9 +298,10 @@ std::vector<Det> Process(int camera, const cv::Mat &gray, const std::vector<Det>
   Camera &cam = cameras[camera];
   // Build the shared full-size detector on the first frame (PhotonVision starting), not on the
   // first search: building it takes ~200 ms, which would stall a camera just as it lost its view.
+  const Tiles tx = TilesAlong(gray.cols), ty = TilesAlong(gray.rows);
   if (config.enabled) {
     std::unique_lock<std::mutex> lock(full_mu, std::try_to_lock);
-    if (lock.owns_lock() && !full.gpu) full.Ensure(2 * gray.cols, 2 * gray.rows, td, Scaled(cm, 0, 0), dc);
+    if (lock.owns_lock() && !full.gpu) full.Ensure(2 * tx.size, 2 * ty.size, td, Scaled(cm, 0, 0), dc);
   }
   bool starved, sweep;
   {
@@ -359,18 +389,21 @@ std::vector<Det> Process(int camera, const cv::Mat &gray, const std::vector<Det>
   }
   cam.tracks = kept;
 
-  // A full-size search of the whole frame, on this camera's turn.
+  // A full-size search of the whole frame, tile by tile (TilesAlong), on this camera's turn. A tag
+  // in two tiles' overlap is kept once (the Has check).
   if (sweep) {
     std::lock_guard<std::mutex> lock(full_mu);
     auto t0 = clk::now();
-    if (full.Ensure(2 * W, 2 * H, td, Scaled(cm, 0, 0), dc)) {
-      Upscale2x(gray.ptr<uint8_t>(), gray.step, 0, 0, W, H, full.up.data());
-      full.gpu->SetCameraMatrix(Scaled(cm, 0, 0));
+    for (int y0 : ty.origins)
+    for (int x0 : tx.origins) {
+      if (!full.Ensure(2 * tx.size, 2 * ty.size, td, Scaled(cm, x0, y0), dc)) break;
+      Upscale2x(gray.ptr<uint8_t>(), gray.step, x0, y0, tx.size, ty.size, full.up.data());
+      full.gpu->SetCameraMatrix(Scaled(cm, x0, y0));
       full.gpu->SetDistortionCoefficients(dc);
       if (full.gpu->Detect(full.up.data(), nullptr).ok()) {
         for (const auto &d : Copy(full.gpu->Detections())) {
           if (Has(normal, d.id) || Has(extras, d.id)) continue;
-          Det o = Unscale(d, 0, 0);
+          Det o = Unscale(d, x0, y0);
           extras.push_back(o);
           auto it = std::find_if(cam.tracks.begin(), cam.tracks.end(), [&](const Track &t) { return t.id == o.id; });
           if (it != cam.tracks.end()) {

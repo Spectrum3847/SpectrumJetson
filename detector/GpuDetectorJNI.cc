@@ -1267,6 +1267,19 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
     }
     return nullptr;
   }
+  if (img.cols > 2048 || img.rows > 2048) {
+    // The 971 detector keeps boundary points' x and y in 10 bits of the half-size image
+    // (QuadBoundaryPoint), so past 2048 px they wrap round: wrong detections, and on a busy frame
+    // a GPU memory fault that takes every camera down. Refuse such frames instead.
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      std::cout << "processimage: " << img.cols << "x" << img.rows
+                << " is over the detector's 2048 px limit; skipping (use a smaller video mode)"
+                << std::endl;
+    }
+    return nullptr;
+  }
 
   DetectorSlot *s = Slot(handle);
   if (!s) {

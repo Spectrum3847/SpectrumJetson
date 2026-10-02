@@ -2,8 +2,8 @@
 # Run ON THE JETSON: feed the detector library synthetic frames at several resolutions and
 # count failed frames per resolution. LIBDIR=<dir> tests an uninstalled lib971apriltag.so;
 # FAR_SEARCH=off runs it without the far-tag search. Exits 1 on any failed frame.
-# Known failure (2026-10-01, docs/AUDIT-2026-10.md, Native): with the far search on, the noise
-# frames break the CUDA context in its 2560x1600 detector. FAR_SEARCH=off passes.
+# Noise frames are the hard case: with the far search on, they once broke the CUDA context (its
+# 2560x1600 detector was past the 971 detector's 2048 px limit; far_search.cc now uses tiles).
 set -uo pipefail
 cd "$(dirname "$0")" || exit
 JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64

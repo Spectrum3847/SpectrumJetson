@@ -18,8 +18,8 @@
     "fieldcal-synth": {
       "about": "Rendered 4-camera field-calibration drive (tools/fieldcal), real lens calibration, truth.json has the true tag poses; 2628 frames",
       "blessed": {
-        "commit": "5ac6c42+regression-wip",
-        "date": "2026-10-01",
+        "commit": "69976a84b48465b26cd6c5991c2e0b0feca1a53e-dirty",
+        "date": "2026-10-02",
         "detections": 3314
       },
       "bytes": 348301720,

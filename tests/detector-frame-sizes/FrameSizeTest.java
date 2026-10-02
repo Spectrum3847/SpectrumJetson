@@ -10,7 +10,8 @@ import org.photonvision.jni.GpuDetectorJNI;
 public class FrameSizeTest {
   public static void main(String[] args) throws Exception {
     System.loadLibrary("opencv_java454d");
-    int[][] sizes = {{1280, 800}, {640, 480}, {320, 240}, {800, 600}, {1280, 720}, {1280, 800}};
+    // 2560x1600 is over the detector's 2048 px limit: refused (no detections), not a GPU fault.
+    int[][] sizes = {{1280, 800}, {640, 480}, {320, 240}, {800, 600}, {1280, 720}, {2560, 1600}, {1280, 800}};
     // FAR_SEARCH=off: without the far-tag search (it runs here: noise never gives a good view).
     if ("off".equals(System.getenv("FAR_SEARCH"))) {
       GpuDetectorJNI.setFarSearch(false, 30);
