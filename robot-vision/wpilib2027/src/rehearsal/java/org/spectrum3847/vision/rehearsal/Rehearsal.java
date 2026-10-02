@@ -59,11 +59,18 @@ import org.wpilib.vision.apriltag.AprilTagFields;
  * can be off by tens of ms for a moment. None of that happens on the robot's Ethernet. So over
  * Wi-Fi the latency, loss and time-sync numbers are printed but not judged; wired (run.sh --wired)
  * or over USB they are. Latency and loss only while enabled: disabled, idle mode runs the cameras at
- * ~30 fps on purpose, and a result waits for its idle tick (~35-40 ms over USB against ~28 enabled).
+ * ~30 fps on purpose, and a result waits for its idle tick (~35-40 ms over USB).
+ *
+ * <p>The latency is measured where robot code sees a result: in the loop after it arrives, so it
+ * includes the wait for that loop, half a period on average (10 ms at the default 20 ms; we mean to
+ * run SystemCore at 10 ms). Over USB with 4 cameras at 121 fps (2026-10-01): ~14 ms on the Jetson to
+ * the detector's result, ~3 ms PhotonVision, NetworkTables and the link, ~3 ms for the far-tag
+ * search (always searching on a bench with no tags; off whenever a camera has a good view), then
+ * the loop: p50 ~31 ms at 20 ms. The limit is {@link #LATENCY_LIMIT_MS}.
  *
  * <p>System properties: rehearsal.jetson (the Jetson's address, for its web API), rehearsal.link
- * (wired, usb or wifi) and rehearsal.phases (default {@link #DEFAULT_PHASES}). Exits 0 if every
- * check passed.
+ * (wired, usb or wifi), rehearsal.phases (default {@link #DEFAULT_PHASES}) and rehearsal.periodMs
+ * (the robot loop, default 20). Exits 0 if every check passed.
  */
 public class Rehearsal extends TimedRobot {
     // After the match, quiet mode (if on) makes the scratch partition read-only, and with no robot
@@ -118,6 +125,10 @@ public class Rehearsal extends TimedRobot {
     }
 
     static final double PLACEHOLDER_MS = 10_000; // a "frame" this old never existed
+    static final double PERIOD_MS = Double.parseDouble(System.getProperty("rehearsal.periodMs", "20"));
+    // Enabled p50 latency: ~20 ms before robot code's loop (see above), 2 ms of margin, and the wait
+    // for the loop, half a period.
+    static final double LATENCY_LIMIT_MS = 22 + PERIOD_MS / 2;
 
     final List<Phase> phases = new ArrayList<>();
     final List<PhaseStats> stats = new ArrayList<>();
@@ -143,6 +154,7 @@ public class Rehearsal extends TimedRobot {
     boolean idleWhileDisabled = true, quietAfterMatch = false;
 
     public Rehearsal() {
+        super(PERIOD_MS / 1000.0);
         for (String p : System.getProperty("rehearsal.phases", DEFAULT_PHASES).split(",")) {
             String[] s = p.trim().split(":");
             phases.add(new Phase(s[0], Double.parseDouble(s[1])));
@@ -321,8 +333,8 @@ public class Rehearsal extends TimedRobot {
             Boolean idle = flag(state, "idleWhileDisabled");
             idleWhileDisabled = idle == null || idle;
             quietAfterMatch = Boolean.TRUE.equals(flag(state, "quietAfterMatch"));
-            System.out.printf("rehearsal: Jetson connected after %.1f s; cameras %s; idle while disabled %s; quiet after a match %s%n",
-                    now - start, names, idleWhileDisabled, quietAfterMatch);
+            System.out.printf("rehearsal: Jetson connected after %.1f s; cameras %s; idle while disabled %s; quiet after a match %s; %.0f ms loop%n",
+                    now - start, names, idleWhileDisabled, quietAfterMatch, PERIOD_MS);
             var field = AprilTagFieldLayout.loadField(AprilTagFields.kDefaultField);
             // No drivetrain here: accepted measurements are counted (stats) and dropped.
             var b = VisionSystem.builder(field).readJetsonExcludedTags(true).sink((pose, t, std) -> {});
@@ -434,9 +446,10 @@ public class Rehearsal extends TimedRobot {
                 } else if (cs.maxPongMicros > 5_000_000) {
                     sayln("   FAIL  " + e.getKey() + ": time sync stopped (no pong for over 5 s)");
                     fails++;
-                } else if (judgeTiming && (cs.negative > 0 || (p.enabled() && p50 > 30))) {
+                } else if (judgeTiming && (cs.negative > 0 || (p.enabled() && p50 > LATENCY_LIMIT_MS))) {
                     sayln("   FAIL  " + e.getKey() + ": time sync or latency (" + cs.negative
-                            + " results from the future, p50 " + String.format("%.1f", p50) + " ms)");
+                            + " results from the future, p50 " + String.format("%.1f", p50) + " ms, limit "
+                            + String.format("%.0f", LATENCY_LIMIT_MS) + " ms at a " + String.format("%.0f", PERIOD_MS) + " ms loop)");
                     fails++;
                 } else if (judgeTiming && p.enabled() && lostPct > 0.5) {
                     sayln("   FAIL  " + e.getKey() + String.format(": %.2f%% of results lost on the way", lostPct));

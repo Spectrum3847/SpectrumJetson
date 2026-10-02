@@ -7,11 +7,15 @@
 #   run.sh --wired DEV       over an Ethernet cable from this laptop's DEV (a USB Ethernet adapter,
 #                            say) to the Jetson's Ethernet port: the way the robot connects. Judges
 #                            latency, loss and time sync too, which Wi-Fi can't.
-#   run.sh --tags ...        with fake cameras playing a synthetic session with tags, so SpectrumVision's
-#                            pose path and the Jetson's tag quality are exercised as well.
+#   run.sh --tags ...        with fake cameras playing a synthetic session with tags, so the Jetson's
+#                            per-tag quality reaches the robot side too. (Not yet SpectrumVision's
+#                            pose path: 0 candidates on 2026-10-01, likely because the fake cameras
+#                            have no lens calibration, so PhotonVision sends no 3D poses.)
 #                            (scripts/jetson/fake-cameras.sh: PhotonVision restarts on throwaway
 #                            settings; the real cameras and settings are back afterwards.)
 #   run.sh --cleanup [JETSON_IP]   remove the redirect, if a run was killed
+#   REHEARSAL_PERIOD_MS=10 run.sh ...   the robot loop at 10 ms (default 20): the latency limit
+#                            follows it (half a period of it is the wait for robot code's loop)
 #
 # The robot program (robot-vision/wpilib2027/src/rehearsal, Rehearsal.java) plays a match with
 # the simulated Driver Station. It checks what PhotonVision decodes from the real 2027 control word
@@ -75,9 +79,12 @@ if [[ $cleanup_only == 1 ]]; then
   exit
 fi
 
-redirected=0 addr_added=0 fakes=0
+redirected=0 addr_added=0 fakes=0 ntp_paused=0
 cleanup() {
   [[ $redirected == 1 ]] && unredirect
+  if [[ $ntp_paused == 1 ]]; then
+    "${SSH[@]}" 'sudo -n timedatectl set-ntp true' || echo "  WARNING: NTP is still off on the Jetson (sudo timedatectl set-ntp true)"
+  fi
   if [[ $fakes == 1 ]]; then
     echo "Putting the real cameras back"
     "${SSH[@]}" '~/SpectrumJetson/scripts/jetson/fake-cameras.sh stop' >/dev/null || echo "  WARNING: fake-cameras.sh stop failed: run it on the Jetson"
@@ -105,6 +112,15 @@ state=$("${SSH[@]}" 'curl -s -m 3 localhost:5800/api/robotState') || { echo "Can
 grep -q '"robotConnected":false' <<<"$state" || { echo "PhotonVision is connected to a robot already; not running." >&2; exit 2; }
 LAPTOP=$(ip -4 route get "$JETSON" | grep -oP 'src \K\S+')
 [[ -n $LAPTOP ]] || { echo "No route to $JETSON" >&2; exit 2; }
+
+# As at an event: no internet time on the Jetson during the run, and the clock at its own rate
+# (tests/lib/bench.sh, clock_rate_reset: timesyncd's slewing made the latency climb).
+if [[ $("${SSH[@]}" 'timedatectl show -p NTP --value') == yes ]]; then
+  ntp_paused=1
+  "${SSH[@]}" 'sudo -n timedatectl set-ntp false && source ~/SpectrumJetson/tests/lib/bench.sh && clock_rate_reset' \
+    || { echo "Couldn't pause internet time on the Jetson (sudo)" >&2; exit 2; }
+  echo "Internet time paused on the Jetson for the run"
+fi
 
 if [[ $tags == 1 ]]; then
   echo "Starting fake cameras with tags on the Jetson (PhotonVision restarts)"
@@ -137,7 +153,8 @@ export JAVA_HOME=${JAVA_HOME:-${paths[0]}}
 out=$(mktemp)
 ./gradlew -q --console=plain -Dorg.gradle.java.installations.paths="$(IFS=,; echo "${paths[*]}")" \
   -Dorg.gradle.java.installations.auto-download=false \
-  -Prehearsal.jetson="$JETSON" -Prehearsal.link="$link" -Prehearsal.phases="$PHASES" :wpilib2027:rehearsal 2>&1 \
+  -Prehearsal.jetson="$JETSON" -Prehearsal.link="$link" -Prehearsal.phases="$PHASES" \
+  -Prehearsal.periodMs="${REHEARSAL_PERIOD_MS:-20}" :wpilib2027:rehearsal 2>&1 \
   | grep --line-buffered -v -E "^NT: |sim-natives/.*: changed " | tee "$out"
 rc=${PIPESTATUS[0]}
 # The robot program's own verdict: WPILib exits 0 even when robot code throws.

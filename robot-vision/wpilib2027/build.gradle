@@ -133,7 +133,7 @@ tasks.register('rehearsal', JavaExec) {
     systemProperty 'java.library.path', natives.get().asFile.path
     environment 'LD_LIBRARY_PATH', natives.get().asFile.path
     jvmArgs jdk25Quiet
-    ['rehearsal.jetson', 'rehearsal.link', 'rehearsal.phases'].each { k ->
+    ['rehearsal.jetson', 'rehearsal.link', 'rehearsal.phases', 'rehearsal.periodMs'].each { k ->
         if (project.hasProperty(k)) systemProperty k, project.property(k)
     }
 }

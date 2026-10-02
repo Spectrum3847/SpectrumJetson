@@ -13,6 +13,12 @@
 # "synchronized" flag. restore puts the date back from the monotonic clock (right whether or not
 # it was moved), turns NTP back on if it was, and gives timesyncd's clock file today's date (the
 # next boot starts from it). Call restore from the EXIT trap.
+#
+# clock_rate_reset: the kernel's clock back to its own rate, with no correction left to apply
+# (adjtimex: frequency 0, offset 0). Turn NTP off first, or timesyncd sets them again. After the
+# clock tests, timesyncd on internet time slewed the clock at up to 500 ppm (2026-10-01), and
+# PhotonVision's time sync lags that: latency read ~0.5 ms higher every second. At an event there's
+# no internet time, and the rate is the kernel's own from boot.
 
 BENCH_ROBOT_IP=10.85.15.2
 bench_added_address=0
@@ -33,6 +39,18 @@ robot_address_del() {
     sudo -n ip addr del "$BENCH_ROBOT_IP/32" dev lo 2>/dev/null
     bench_added_address=0
   fi
+}
+
+clock_rate_reset() {
+  sudo -n python3 - <<'PY'
+import ctypes, ctypes.util, sys
+class Timex(ctypes.Structure):  # struct timex: modes, offset, freq, then fields left unset
+    _fields_ = [("modes", ctypes.c_uint), ("offset", ctypes.c_long), ("freq", ctypes.c_long),
+                ("rest", ctypes.c_byte * 192)]
+ADJ_OFFSET, ADJ_FREQUENCY = 0x0001, 0x0002
+t = Timex(modes=ADJ_OFFSET | ADJ_FREQUENCY)
+sys.exit(0 if ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True).adjtimex(ctypes.byref(t)) >= 0 else 1)
+PY
 }
 
 # The date minus the monotonic clock, in seconds: it changes only when the date is set.
