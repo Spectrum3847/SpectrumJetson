@@ -20,24 +20,17 @@ if [[ -z ${FAKE_ROBOT_UNDER_TIMEOUT:-} ]]; then
   [[ $rc == 124 ]] && echo "TIMEOUT: the fake-robot test didn't finish in $total s" >&2
   exit "$rc"
 fi
-ROBOT_IP=10.85.15.2
 LOG=/tmp/fake-robot.log
 TEGRA=/tmp/fake-robot-tegrastats.log
+source "$HERE/../lib/bench.sh"
 
-connected=$(python3 -c 'import json,urllib.request;print(json.load(urllib.request.urlopen("http://localhost:5800/api/rewind"))["robotConnected"])')
-[[ $connected == False ]] || { echo "PhotonVision is connected to a robot already; not running." >&2; exit 1; }
-
-added=0
+robot_address_add   # refuses if PhotonVision is connected to a robot already
 cleanup() {
   [[ -n ${tegra_pid:-} ]] && sudo tegrastats --stop 2>/dev/null || true
   [[ -n ${robot_pid:-} ]] && kill "$robot_pid" 2>/dev/null || true
-  [[ $added == 1 ]] && sudo ip addr del "$ROBOT_IP/32" dev lo 2>/dev/null || true
+  robot_address_del
 }
 trap cleanup EXIT
-if ! ip -4 addr show dev lo | grep -q "$ROBOT_IP/"; then
-  sudo ip addr add "$ROBOT_IP/32" dev lo
-  added=1
-fi
 
 start=$(date +%s)
 sudo rm -f "$TEGRA"
@@ -45,7 +38,7 @@ sudo tegrastats --interval 1000 --logfile "$TEGRA" >/dev/null 2>&1 &
 tegra_pid=$!
 "$JAVA" -cp /opt/photonvision/photonvision.jar "$HERE/FakeRobot.java" "${PHASES[@]}" 2>&1 | grep --line-buffered -v "^\[" > "$LOG" &   # line-buffered: watchers read the phases as they happen
 robot_pid=$!
-echo "Fake robot at $ROBOT_IP: ${PHASES[*]}"
+echo "Fake robot at $BENCH_ROBOT_IP: ${PHASES[*]}"
 wait "$robot_pid" || true
 robot_pid=""
 # Killing sudo leaves tegrastats running (and holding this script's output open): --stop ends it.

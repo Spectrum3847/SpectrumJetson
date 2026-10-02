@@ -11,6 +11,11 @@ public class FrameSizeTest {
   public static void main(String[] args) throws Exception {
     System.loadLibrary("opencv_java454d");
     int[][] sizes = {{1280, 800}, {640, 480}, {320, 240}, {800, 600}, {1280, 720}, {1280, 800}};
+    // FAR_SEARCH=off: without the far-tag search (it runs here: noise never gives a good view).
+    if ("off".equals(System.getenv("FAR_SEARCH"))) {
+      GpuDetectorJNI.setFarSearch(false, 30);
+      System.out.println("far search off");
+    }
     long h = GpuDetectorJNI.createGpuDetector(640, 480);
     for (int[] s : sizes) {
       for (String kind : new String[] {"blank", "noise"}) {

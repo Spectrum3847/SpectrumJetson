@@ -6,10 +6,12 @@
 # on the date, so the jump started it about a second after connecting. photonvision-65 times it on
 # a monotonic clock.
 #
-# A fake robot (tests/fake-robot) publishes a clock OFFSET seconds ahead (default 3600) and stays
-# disabled for quietAfterDisabledSeconds + 15 s, then enables for 5 s. Checks:
+# A fake robot (tests/fake-robot) enables for 3 s (which restarts the disabled-for timer: a robot
+# that left disabled earlier would otherwise count), stays disabled for quietAfterDisabledSeconds
+# + 15 s, then enables for 5 s. 3 s into the disabled stretch it starts publishing a clock OFFSET
+# seconds ahead (default 3600), so the date jumps while quiet mode is timing it. Checks:
 #   - PhotonVision set the date forward (the jump happened),
-#   - quiet mode started quietAfterDisabledSeconds after connecting (-2/+4 s), not at the jump,
+#   - quiet mode started quietAfterDisabledSeconds after the disable (-2/+4 s), not at the jump,
 #   - the enable made the scratch partition writable again.
 # Internet time (NTP) is paused for the test, since PhotonVision leaves the date alone while the
 # Jetson has it, and put back afterwards with the date (tests/lib/bench.sh, ntp_pause/ntp_restore).
@@ -46,11 +48,12 @@ trap cleanup EXIT
 ntp_pause
 skew0=$bench_skew0
 
-echo "== Fake robot: its clock ${OFFSET} s ahead; disabled $((LIMIT + 15)) s, then enabled 5 s (quiet after ${LIMIT} s disabled)"
-FAKE_ROBOT_CLOCK_OFFSET_S=$OFFSET timeout -k 10 $((LIMIT + 90)) "$ROOT/tests/fake-robot/run.sh" "disabled:$((LIMIT + 15))" enabled:5 > "$LOG" 2>&1 &
+echo "== Fake robot: its clock ${OFFSET} s ahead; enabled 3 s, disabled $((LIMIT + 15)) s, enabled 5 s (quiet after ${LIMIT} s disabled)"
+FAKE_ROBOT_CLOCK_OFFSET_S=$OFFSET FAKE_ROBOT_CLOCK_AFTER_S=8 timeout -k 10 $((LIMIT + 95)) "$ROOT/tests/fake-robot/run.sh" enabled:3 "disabled:$((LIMIT + 15))" enabled:5 > "$LOG" 2>&1 &
 robot=$!
 
-# Watch 5 times a second, on the monotonic clock: connected, the jump, quiet on, writable again.
+# Watch 5 times a second, on the monotonic clock: connected, the jump, the disable after the first
+# enable, quiet on, writable again. The jump is timed from connecting, the rest from the disable.
 read -r t_connect jump t_jump t_quiet reason t_rw < <(python3 - "$skew0" "$LIMIT" <<'PY'
 import json, sys, time, urllib.request
 skew0, limit = float(sys.argv[1]), int(sys.argv[2])
@@ -66,9 +69,9 @@ def ro():
             return "ro" in f[3].split(",")
     return False
 t0 = time.monotonic()
-connect = jump = t_jump = quiet = rw = None
+connect = jump = t_jump = enabled_seen = disabled = quiet = rw = None
 reason = "-"
-while time.monotonic() - t0 < limit + 60:
+while time.monotonic() - t0 < limit + 70:
     now = time.monotonic()
     s = state()
     if connect is None and s.get("robotConnected"):
@@ -76,21 +79,25 @@ while time.monotonic() - t0 < limit + 60:
     j = time.time() - time.monotonic() - skew0
     if t_jump is None and abs(j) > 60:
         jump, t_jump = j, now
-    if connect is not None and quiet is None and s.get("quietNow"):
+    if connect is not None and s.get("enabled"):
+        enabled_seen = True
+    if enabled_seen and disabled is None and s.get("robotConnected") and s.get("enabled") is False:
+        disabled = now
+    if disabled is not None and quiet is None and s.get("quietNow"):
         quiet, reason = now, (s.get("quietReason") or "-").replace(" ", "_")
     if quiet is not None and rw is None and not s.get("quietNow") and not ro():
         rw = now
         break
     time.sleep(0.2)
-rel = lambda t: "-" if t is None or connect is None else f"{t - connect:.1f}"
-print(rel(connect) if connect is not None else "-", f"{jump:.0f}" if jump is not None else "-", rel(t_jump), rel(quiet), reason, rel(rw))
+since = lambda t, base: "-" if t is None or base is None else f"{t - base:.1f}"
+print(since(connect, t0), f"{jump:.0f}" if jump is not None else "-", since(t_jump, connect), since(quiet, disabled), reason, since(rw, disabled))
 PY
 )
 [[ $t_connect == - ]] && echo "  PhotonVision never connected to the fake robot"
-echo "  after connecting: date jumped ${jump} s at +${t_jump} s; quiet at +${t_quiet} s (${reason//_/ }); writable again at +${t_rw} s"
+echo "  date jumped ${jump} s, ${t_jump} s after connecting; after the disable: quiet at +${t_quiet} s (${reason//_/ }), writable again at +${t_rw} s"
 check "PhotonVision set the date from the robot's clock (forward ~${OFFSET} s)" \
       "[[ \$jump != - ]] && (( \${jump#-} > OFFSET - 60 && \${jump#-} < OFFSET + 60 ))"
-# Disabled from the moment it connected: quiet at about +LIMIT s.
+# Quiet at about LIMIT s after the disable.
 check "quiet mode started after ${LIMIT} s disabled, not at the jump" \
       "[[ \$t_quiet != - ]] && python3 -c 'import sys; sys.exit(not ${LIMIT} - 2 <= float(sys.argv[1]) <= ${LIMIT} + 4)' \"\$t_quiet\""
 check "the enable made the scratch partition writable again" "[[ \$t_rw != - ]] && ! ro"

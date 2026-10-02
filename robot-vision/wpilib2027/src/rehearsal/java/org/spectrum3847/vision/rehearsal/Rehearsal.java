@@ -58,7 +58,8 @@ import org.wpilib.vision.apriltag.AprilTagFields;
  * latency is ~50 ms with ~150 ms spikes, NetworkTables drops results during stalls, and time sync
  * can be off by tens of ms for a moment. None of that happens on the robot's Ethernet. So over
  * Wi-Fi the latency, loss and time-sync numbers are printed but not judged; wired (run.sh --wired)
- * they are.
+ * or over USB they are. Latency and loss only while enabled: disabled, idle mode runs the cameras at
+ * ~30 fps on purpose, and a result waits for its idle tick (~35-40 ms over USB against ~28 enabled).
  *
  * <p>System properties: rehearsal.jetson (the Jetson's address, for its web API), rehearsal.link
  * (wired, usb or wifi) and rehearsal.phases (default {@link #DEFAULT_PHASES}). Exits 0 if every
@@ -433,11 +434,11 @@ public class Rehearsal extends TimedRobot {
                 } else if (cs.maxPongMicros > 5_000_000) {
                     sayln("   FAIL  " + e.getKey() + ": time sync stopped (no pong for over 5 s)");
                     fails++;
-                } else if (judgeTiming && (cs.negative > 0 || p50 > 30)) {
+                } else if (judgeTiming && (cs.negative > 0 || (p.enabled() && p50 > 30))) {
                     sayln("   FAIL  " + e.getKey() + ": time sync or latency (" + cs.negative
                             + " results from the future, p50 " + String.format("%.1f", p50) + " ms)");
                     fails++;
-                } else if (judgeTiming && lostPct > 0.5) {
+                } else if (judgeTiming && p.enabled() && lostPct > 0.5) {
                     sayln("   FAIL  " + e.getKey() + String.format(": %.2f%% of results lost on the way", lostPct));
                     fails++;
                 }

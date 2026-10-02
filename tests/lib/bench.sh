@@ -57,12 +57,14 @@ ntp_restore() {
     sudo -n date -s "@$(python3 -c 'import sys,time; print(f"{time.monotonic() + float(sys.argv[1]):.3f}")' "$bench_skew0")" >/dev/null
     echo "Date put back: $(date -u +%FT%TZ)"
   fi
+  # PhotonVision gave timesyncd's clock file the date it set. Fix it before timesyncd starts again:
+  # it moves the clock forward to that file's date when it starts (and at the next boot), which put
+  # the jump straight back on a Jetson without internet time to correct it.
+  sudo -n touch /var/lib/systemd/timesync/clock
   if [[ $bench_ntp == yes ]]; then
     sudo -n timedatectl set-ntp true
     for _ in $(seq 30); do [[ -e /run/systemd/timesync/synchronized ]] && break; sleep 1; done
-    [[ -e /run/systemd/timesync/synchronized ]] && echo "Internet time back on (synced)" || echo "Internet time back on (not synced yet)"
+    [[ -e /run/systemd/timesync/synchronized ]] && echo "Internet time back on (synced)" || echo "Internet time back on (not synced yet: no internet?)"
   fi
-  # PhotonVision touched timesyncd's clock file to the date it set; the next boot starts from it.
-  sudo -n touch /var/lib/systemd/timesync/clock
   bench_skew0=""
 }

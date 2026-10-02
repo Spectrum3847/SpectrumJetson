@@ -11,8 +11,9 @@
 // 2027 does, the /FMSInfo/ControlWord struct; FAKE_ROBOT_WPILIB=2026 as a roboRIO on 2026 does,
 // the /FMSInfo/FMSControlData integer. PhotonVision reads both (photonvision-62).
 // FAKE_ROBOT_CLOCK_OFFSET_S=N also publishes the robot's clock (/photonvision/clock/unixMs, patch
-// 08) N seconds ahead of this Jetson's, so PhotonVision sets the Jetson's date N seconds forward.
-// Phases are timed on a monotonic clock, so that jump doesn't cut them short.
+// 08) N seconds ahead of this Jetson's, so PhotonVision sets the Jetson's date N seconds forward;
+// FAKE_ROBOT_CLOCK_AFTER_S=T starts publishing it T seconds after PhotonVision connects. Phases
+// are timed on a monotonic clock, so that jump doesn't cut them short.
 import edu.wpi.first.networktables.NetworkTableInstance;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -71,8 +72,12 @@ public class FakeRobot {
         long clockBaseMs = System.currentTimeMillis() + (offset == null ? 0 : (long) (Double.parseDouble(offset) * 1000));
         java.util.function.LongSupplier monoMs = () -> System.nanoTime() / 1_000_000;
         long clockBaseMono = monoMs.getAsLong();
+        String after = System.getenv("FAKE_ROBOT_CLOCK_AFTER_S");
+        long clockAfterMs = after == null ? 0 : (long) (Double.parseDouble(after) * 1000);
+        long[] connectedMono = {Long.MAX_VALUE};
         Runnable tick = () -> {
-            if (clock != null) clock.set(clockBaseMs + monoMs.getAsLong() - clockBaseMono);
+            long now = monoMs.getAsLong();
+            if (clock != null && now - connectedMono[0] >= clockAfterMs) clock.set(clockBaseMs + now - clockBaseMono);
         };
         if (clock != null) System.out.println("robot clock " + offset + " s ahead of this Jetson's");
         System.out.println("waiting for PhotonVision to connect");
@@ -86,6 +91,7 @@ public class FakeRobot {
             Thread.sleep(100);
         }
         System.out.println("connected " + System.currentTimeMillis());
+        connectedMono[0] = monoMs.getAsLong();
         for (long until = monoMs.getAsLong() + 2000; monoMs.getAsLong() < until; Thread.sleep(100)) tick.run();
         for (int i = 0; i < args.length; i++) {
             String[] p = args[i].split(":");
