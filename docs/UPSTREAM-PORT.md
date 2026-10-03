@@ -8,8 +8,8 @@ build script and bench-tested on the Jetson. For the setup itself, see the [READ
 
 - **`photonvision-00-upstream-v2026.3.4.patch`:** the full diff from the 4143 fork (`d8c9e8e`) to
   a merge of upstream **v2026.3.4**, 41 upstream commits. It still speaks the exact same
-  NetworkTables format: all six serde hashes are unchanged (table below), so PhotonLib
-  v2027.0.0-alpha-2 on the robot still works.
+  NetworkTables format: all six serde hashes are unchanged (table below), which matches
+  PhotonLib v2027.0.0-alpha-2. The robot-network integration test is still pending.
 - **Our 01–10** are regenerated on top of it. Only 05 and 07 changed in content: upstream #2407
   changed how the UI checks for dark mode.
 - **`photonvision-11-set-enabled.patch`:** the server side of PhotonLib's
@@ -37,6 +37,8 @@ build script and bench-tested on the Jetson. For the setup itself, see the [READ
 | TargetCorner | 16f6ac0dedc8eaccb951f4895d9e18b6 | same |
 
 `photon-serde/` and `photon-targeting/src/generated/` are byte-identical to d8c9e8e.
+These are the pre-alpha-7 hashes for the current 2026 fork and alpha-2 client.
+They do not describe the later PhotonVision source merged by PR #2566.
 
 ## Patch 00: upstream v2026.3.4
 
@@ -92,6 +94,20 @@ Plus two that upstream still has:
 
 Skipped: the lifecycle refactor, the calibration rework (tangled with 2027 changes) and pipelines
 we don't use.
+
+## WPILib 2027 alpha-7 migration
+
+The current fork and robot pins remain on the 2026-era configuration described
+above. PhotonVision `v2027.0.0-alpha-2` is the current released tag and pins
+WPILib 2027.0.0-alpha-6. The audited main source revision
+[`1f419c9d`](https://github.com/PhotonVision/photonvision/commit/1f419c9de3a6a0787571648d18211537a83fdca9)
+pins 2027.0.0-alpha-7, but it is source material, not a release. PhotonVision PR
+[#2566](https://github.com/PhotonVision/photonvision/pull/2566) also changes the
+timestamp field names and serde hashes. The CUDA port is a separate PR, and it
+needs a real Jetson and robot-network test.
+
+See [WPILIB-2027-ALPHA-7.md](WPILIB-2027-ALPHA-7.md) for the migration order and
+compatibility limits.
 
 ## Patch 21: Thriftiest Cam support (#2478)
 
