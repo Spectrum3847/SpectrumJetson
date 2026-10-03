@@ -274,12 +274,13 @@ Site.chapter('finale', (root) => {
       ['How does the robot\'s gyro help vision?', ['It measures distance to tags', 'Its very accurate heading lets the solver fix the heading and reject wrong poses', 'It cleans the lens', 'It replaces odometry'], 1, 'Heading-constrained solves (like MegaTag2) hold the heading to the gyro and only solve position.', 'gyro', 'full'],
       ['A robot drives 4 m/s and treats a 15 ms old vision pose as "now." How far off is it?', ['0.6 mm', '6 cm', '60 cm', '6 m'], 1, '4 m/s × 0.015 s = 0.06 m. The fix: addVisionMeasurement(pose, timestamp).', 'latency'],
       ['In NetworkTables 4, where does the server run?', ['On the Jetson', 'In the robot program on the SystemCore', 'On the driver station', 'In the cloud'], 1, 'PhotonVision and dashboards are clients that connect on port 5810 and publish or subscribe to topics.', 'networktables'],
+      ['On a WPILib 2027 robot, our cameras would have idled at 30 fps through whole matches. Why?', ['The SystemCore\'s Ethernet is slower', 'WPILib 2027 publishes the robot\'s control word on a new topic, so PhotonVision thought the robot was always disabled', 'The Jetson overheated', 'PhotonLib 2027 asks for 30 fps'], 1, 'WPILib 2027 moved it to the /FMSInfo/ControlWord struct. photonvision-62 reads both formats, and the SystemCore rehearsal tests it against a real 2027 robot program.', 'networktables', 'full'],
       ['What does the Jetson\'s hardware watchdog do?', ['Resets the board if Linux stops "petting" it for 30 s', 'Checks lens focus', 'Watches for other robots', 'Cools the GPU'], 0, 'systemd pets it regularly. If Linux freezes, the petting stops and the hardware resets the Jetson.', 'failsafes'],
       ['Our power-cut test passed, yet the SSD died after 21 power cuts. What did the test miss?', ['The Jetson never booted', 'The drive\'s own count of media errors, which kept climbing', 'The fan speed', 'The camera settings'], 1, 'The filesystem survived each cut, but the cheap drive was damaging its own flash. Now the system partition isn\'t written during matches, and health-check.sh reads the drive\'s error count.', 'failsafes', 'full'],
     ];
     // spread the right answers across positions: rotate each question's options by a fixed amount
     QS.forEach((q, i) => { const r = (i * 3 + 2) % 4, o = q[1]; q[1] = o.map((_, j) => o[(j + r) % o.length]); q[2] = (q[2] - r + o.length) % o.length; });
-    const KEY = 'spectrum-vision-quiz-v2';
+    const KEY = 'spectrum-vision-quiz-v3'; // v3: a question inserted, so saved answers by index no longer line up
     let ans = {};
     try { ans = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { ans = {}; }
     const save = () => { try { localStorage.setItem(KEY, JSON.stringify(ans)); } catch (e) { /* storage blocked: answers just aren't kept */ } };

@@ -172,8 +172,8 @@
       <ol>
         <li><strong>PhotonVision</strong> (the official project, "upstream") runs AprilTags on the CPU.</li>
         <li><strong>FRC Team 4143</strong> made a 2026 fork that adds the <em>AprilTagCuda</em> pipeline, using the CUDA detector from FRC 971.</li>
-        <li><strong>We</strong> started from 4143's version, merged in upstream's newest 2026 release (v2026.3.4, our patch 00), and added patches 01–60.</li>
-        <li>The detector itself is <strong>Austin Schuh's</strong> current code, built from 971's <code>frc971/bos</code> repo, with eight patches (<code>bos-01</code> to <code>bos-08</code>) and our own wrapper.</li>
+        <li><strong>We</strong> started from 4143's version, merged in upstream's newest 2026 release (v2026.3.4, our patch 00), and added patches 01–73.</li>
+        <li>The detector itself is <strong>Austin Schuh's</strong> current code, built from 971's <code>frc971/bos</code> repo, with nine patches (<code>bos-01</code> to <code>bos-09</code>) and our own wrapper.</li>
       </ol>
       <p>We don't copy their code into our repo. We keep <em>patches</em>: small files that say exactly what we changed (<a href="#linux">chapter 06</a> shows one), applied fresh at every build. That keeps the credit clear and makes it easy to take the next upstream fix.</p>
     </div>
@@ -210,11 +210,12 @@
   <div class="callout spectrum"><h5>What we added: safe deploys</h5><p>Once, a copy step moved only the first <strong>228 KB of a 76 MB jar</strong>. PhotonVision couldn't start, and systemd gave up after 5 tries. Worse, we first believed it was fine, because we read a log line from the <em>old</em> process. Now <code>06-install-fork-jar.sh</code> refuses any jar that isn't a valid zip, keeps the last working one as <code>photonvision.jar.prev</code>, and every check looks at the running process's own ID.</p></div>
   <p class="prose"><strong>You don't have to build it.</strong> Each GitHub release has a prebuilt bundle with our jar and everything slow to compile: the CUDA detector, the three allwpilib libraries it needs, and the TensorRT and JPEG-hardware libraries. <code>setup-jetson.sh --prebuilt</code> installs it in about 35 minutes instead of an hour, after checking every file against the bundle's <code>MANIFEST</code>. It refuses a bundle built for another L4T or CUDA version.</p>
   <p class="prose"><strong>After installing a new build,</strong> run <code>tests/ui/run.sh</code> on the laptop. It drives the dashboard in Chrome and checks that every slider, switch and menu changes the page, PhotonVision and a second dashboard, then puts each one back. It works on a temporary copy of a pipeline, so your settings aren't touched, and takes about a minute and a half. No cameras on the bench? <code>scripts/jetson/fake-cameras.sh start</code> makes virtual cameras (<code>v4l2loopback</code>) that play a Rewind recording over and over (<code>photonvision-60</code>). PhotonVision opens them like USB cameras, on throwaway settings, so the real cameras' settings are never touched; <code>fake-cameras.sh stop</code> puts everything back. Fake cameras have no exposure or gain controls and no USB bandwidth, so those can't be tested this way.</p>
+  <p class="prose full"><strong>Did the detector change?</strong> <code>tests/regression/run.sh</code>, on the Jetson, replays a fixed set of recordings through the detector as built now and compares every detection with the last accepted answer: lost, new, or moved more than 0.001 px. The set is a rendered 4-camera drive (3,314 detections), a near-and-far test (361), and real cameras facing the shop ceiling (0 false detections). The whole set takes 18 s, and a release bundle won't build if anything changed. Does it catch real changes? Lowering one detector setting (min white-black diff, 20 → 5) reported 24 tags lost, 16 new and 3 moved. <code>tests/run-all.sh</code> runs every test that needs no one at the bench (about 30 minutes) and prints one table. And on every push, GitHub runs <code>scripts/ci/lint.sh</code>, which checks the repo's shell and Python scripts for common mistakes (shellcheck, pyflakes).</p>
 
   <!-- ───────────── Gallery ───────────── -->
   <h3>Every change we made</h3>
   <div class="full">
-  <p class="prose">Here are all of our patches: 61 to PhotonVision (00–60), 11 to the detectors, and two to Linux's camera driver. Filter by what they're for. Cards with a <strong>story</strong> link have a closer look below.</p>
+  <p class="prose">Here are all of our patches: 74 to PhotonVision (00–73), 12 to the detectors, and two to Linux's camera driver. Filter by what they're for. Cards with a <strong>story</strong> link have a closer look below.</p>
   <p class="do">Click a group to filter the cards.</p>
   <div class="filters" id="pv-filters"></div>
   <div class="gallery" id="pv-gallery"></div>
@@ -269,6 +270,7 @@
     <li>The focus score (patch 34): <a href="#camera">chapter 03</a>.</li>
     <li>Tag contrast and the hidden gain slider (patch 54): <a href="#settings">chapter 04</a>. Masks, profiles, the event pipeline and snapshots (40, 46–47, 51, 53): <a href="#camsetup">chapter 20</a>.</li>
     <li>Match Ready, idling while disabled, quiet mode and the thermal cap (49, 50, 52, 56, 57): <a href="#pit">chapter 21</a>.</li>
+    <li>The far search in tiles, and excluded tags (69): <a href="#apriltags">chapter 02</a> and <a href="#cuda">chapter 08</a>. Calibrating at a low frame rate (70): <a href="#calibration">chapter 11</a>. What a restore replaces, and Start from (63, 68): <a href="#camsetup">chapter 20</a>.</li>
   </ul>
   </div>
 
@@ -303,7 +305,7 @@
     <h5>Chapter 9 recap</h5>
     <ul>
       <li>PhotonVision runs one VisionRunner thread per camera: grab a frame, run the pipeline (detect, then pose), publish the result to NetworkTables, and feed the dashboard stream.</li>
-      <li>Ours is FRC 4143's CUDA fork, merged with upstream v2026.3.4, plus our patches 01–60, running Austin Schuh's detector from frc971/bos.</li>
+      <li>Ours is FRC 4143's CUDA fork, merged with upstream v2026.3.4, plus our patches 01–73, running Austin Schuh's detector from frc971/bos.</li>
       <li>It works with 2027 robot code because the message hash matches. Don't upgrade the robot's PhotonLib past alpha-6.</li>
       <li>The build applies every patch to a pinned commit, and the installer refuses a broken jar.</li>
       <li>The best fixes came from measuring: a hidden color decode, a silent 320×240 camera, frozen frames, a leak that only showed after minutes.</li>

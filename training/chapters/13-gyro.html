@@ -133,6 +133,10 @@
     </table>
   </div>
   <p class="caption full">MT1 is still useful: it's how the robot finds its heading in the first place (seeding), and how it checks the gyro hasn't drifted. From our <code>docs/LIMELIGHT-COMPARISON.md</code>.</p>
+  <div class="callout spectrum full">
+    <h5>What SpectrumVision does with one tag</h5>
+    <p>Our robot library (<a href="#photonlib">chapter 18</a>) takes the trig idea one step further. A single tag's two flipped answers disagree about where the <em>robot</em> is, but they agree about where the <em>tag</em> is. So its <code>TAG_TRIG</code> solver takes just the tag's position from the camera, and the heading from the gyro at the frame's capture time. The flip can't reach it, and it's the most accurate single-tag position at range. It's cheap, too: a little geometry, no PnP solve on the SystemCore. Its heading is the gyro's own, so it gets no heading weight. Full-pose answers still get checked: the <code>headingAgreesWithGyro</code> gate drops any that disagree with the gyro by more than 15° (a flipped tag, a wrong mount, or a wrong tag map).</p>
+  </div>
 
   <details class="deep">
     <summary>Pitfalls in PhotonLib 2027 alpha-2</summary>
@@ -189,6 +193,7 @@ var est = estimator.estimateConstrainedSolvepnpPose(result,
       <li>Heading-constrained solves (MegaTag2) take heading from the gyro, leaving 2 unknowns. One tag, even two corners, gives a stable position, and the flip can't happen.</li>
       <li>Use the heading at the frame's capture time (<a href="#latency">chapter 14</a>).</li>
       <li class="full">MT1 = full pose from tags (PhotonLib multi-tag / lowest ambiguity). MT2 = heading held (constrained solvePnP / trig solve).</li>
+      <li class="full">SpectrumVision's <code>TAG_TRIG</code>: one tag's position + the gyro heading. Immune to the flip.</li>
     </ul>
   </div>
 </div>

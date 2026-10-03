@@ -177,6 +177,7 @@
   <div class="callout spectrum full">
     <h5>What we fixed: the lens model was cut short</h5>
     <p>PhotonVision's calibration produces OpenCV's 8-coefficient "rational" lens model: <code>k1 k2 p1 p2 k3 k4 k5 k6</code>. The CUDA detector uses the lens model while it refines each tag's corners: it straightens the tag's edges, fits the lines, then bends the corners back. But the 4143 fork passed it only the first 5 numbers. The missing three matter most near the edges of the image, so corners there came out slightly wrong. Our patch <code>photonvision-04</code> adds a <code>setparams8</code> call that passes all 8, and the log now says "(8 dist coeffs)" for each camera.</p>
+    <p>One more: when a calibration was deleted (or the camera switched to a resolution without one), the CUDA pipeline kept the old lens model and went on straightening tag edges with it. Now it sends zero distortion, which straightens nothing (<code>photonvision-66</code>).</p>
   </div>
 
   <details class="deep">
@@ -309,6 +310,11 @@
       <div class="card"><div class="icon">📐</div><h4>Tilt and vary distance</h4><p>Tilt up to about 45°, near and far. Flat, same-distance shots can't separate focal length from distance.</p></div>
       <div class="card"><div class="icon">💡</div><h4>Exposure ~150</h4><p>Only for calibration: the board is still, so blur doesn't matter. Never copy it into a vision pipeline.</p></div>
     </div>
+  </div>
+  <div class="callout spectrum full">
+    <h5>What we fixed: a camera that cut out while the board was in view</h5>
+    <p>Another team reported it on Oct 1: during calibration, the camera cut out whenever the board was in view. Calibration ran at the camera's fastest mode, 120 fps, where our USB bandwidth cap leaves about <strong>85 KB a frame</strong> (<a href="#speed">chapter 10</a>). An ordinary scene is 45–67 KB. But a ChArUco board filling the view is sharp black-and-white edges everywhere, which JPEG can't shrink much: our estimate is <strong>85–105 KB</strong> a frame. Now calibration runs at the slowest frame rate that resolution offers, 15 fps or more (<code>photonvision-70</code>): about 340 KB a frame at 30 fps. The pipeline's own mode comes back afterwards. On an older build, the long calibration exposure does the same, because it lowers the frame rate. It hasn't been checked yet with a real board in front of a camera.</p>
+    <p>Board never found, or only some corners? <code>tests/charuco-board-check/check_board.py</code> tries both orientations and OpenCV's old and new marker layouts on a live frame, and says which one matches.</p>
   </div>
 
   <h3 class="full">Our real calibration: TopLeft's 43 snapshots</h3>

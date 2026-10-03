@@ -36,7 +36,7 @@
 
   <div class="prose">
     <p><span class="term">PhotonLib</span> is PhotonVision's library for robot code. It subscribes to each camera's results over <span class="term">NetworkTables</span> (<a href="#networktables">chapter 15</a>) and turns the bytes back into Java objects. You never talk to the Jetson directly: you make a camera object with the right name, and PhotonLib does the rest.</p>
-    <p class="full">Our robot code (<code>Spectrum3847/2026-FM-SystemCore</code>, WPILib 2027 alpha-6 on the SystemCore) has no vision code yet. So everything here is "how to write it", checked against the exact PhotonLib version the robot uses.</p>
+    <p class="full">Our robot code (<code>Spectrum3847/2026-FM-SystemCore</code>, WPILib 2027 alpha-6 on the SystemCore) has a <code>Vision.java</code>, but at the October audit it still asked for cameras named <code>orin-front</code>, <code>orin-left</code> and <code>orin-right</code>, so as written they never connect to this Jetson. Most of this chapter is "how to write it yourself", checked against the exact PhotonLib version the robot uses. At the end is <a href="#photonlib-sv">SpectrumVision</a>, our library that does all of it, tested.</p>
   </div>
 
   <div class="steps4 reveal">
@@ -329,7 +329,7 @@ for (var e : estimators) e.addHeadingData(Timer.getMonotonicTimestamp(), drivetr
   <details class="deep">
     <summary>CTRE swerve and other pose estimators</summary>
     <div>
-      <p>The <code>Sink</code> shape <code>(Pose2d, double, Matrix&lt;N3, N1&gt;)</code> matches WPILib's <code>SwerveDrivePoseEstimator.addVisionMeasurement</code>. CTRE's swerve drivetrain has a method with the same shape, but it keeps time on its own clock and wants the timestamp converted with <code>Utils.fpgaToCurrentTime(...)</code>. Whichever you use, do the clock check above.</p>
+      <p>The <code>Sink</code> shape <code>(Pose2d, double, Matrix&lt;N3, N1&gt;)</code> matches WPILib's <code>SwerveDrivePoseEstimator.addVisionMeasurement</code>. CTRE's swerve drivetrain has a method with the same shape, but it keeps time on its own clock, so the timestamp needs converting. Phoenix 2026 has <code>Utils.fpgaToCurrentTime(...)</code> for that; <b>Phoenix 2027 dropped it</b>. SpectrumVision's <code>ClockBridge</code> converts by reading both clocks, and works on both. (Phoenix 2027 also renamed the swerve state's <code>Speeds</code> to <code>Velocity</code>.) Whichever you use, do the clock check above.</p>
       <p>A turret camera needs one more step: before each estimate, call <code>estimator.setRobotToCameraTransform(...)</code> with the turret angle <em>at the result's timestamp</em>, not the current angle.</p>
     </div>
   </details>
@@ -347,10 +347,61 @@ visionSim.addCamera(new PhotonCameraSim(topLeft, props), MOUNTS.get("TopLeft"));
   </details>
   </div>
 
+  <h3 id="photonlib-sv">SpectrumVision: all of this, done and tested</h3>
+  <div class="split top">
+    <div class="prose">
+      <p>The 60-line subsystem above is the idea. <span class="term" data-def="Spectrum's robot-side vision library, in robot-vision/ of the SpectrumJetson repo. It wraps PhotonLib: reads every camera, solves, gates, sets trust, and feeds the pose estimator.">SpectrumVision</span> (<code>robot-vision/</code> in the SpectrumJetson repo) is the full version, written on 2026-10-01. It sits on top of PhotonLib, not instead of it, so PhotonLib's time sync, version check and simulation all still work.</p>
+      <p>One source, two builds: <b>WPILib 2026</b> (roboRIO, PhotonLib v2026.3.x) and <b>WPILib 2027 alpha-6</b> (SystemCore, PhotonLib v2027.0.0-alpha-2). <code>robot-vision/install.sh &lt;robot project&gt; 2027</code> copies the right one into a robot project. It works with stock PhotonVision too; with our Jetson it also uses the per-tag quality, health topics and excluded tags.</p>
+      <p>Each loop it reads every camera's every frame, solves each into a robot pose, rejects bad ones with named gates, gives the rest a standard deviation, and sends them to the estimator <b>oldest first</b>, across all cameras. (WPILib's estimator throws away a measurement older than one it already used.)</p>
+    </div>
+<pre class="java" aria-label="Java: SpectrumVision for two cameras">vision = VisionSystem.builder(LAYOUT)
+    .camera("TopLeft",  ROBOT_TO_TOP_LEFT)
+    .camera("TopRight", ROBOT_TO_TOP_RIGHT)
+    .sink(PoseSink.wpilib(poseEstimator))
+    .currentEstimate(poseEstimator::getEstimatedPosition)
+    .build();
+
+// robotPeriodic(), after the odometry update:
+vision.addMotion(Timer.getTimestamp(), gyroYaw,
+    yawRateRadPerSec, speedMetersPerSec);
+vision.periodic();   // ~40 µs a loop, 4 cameras (laptop)</pre>
+  </div>
+
+  <div class="gates reveal">
+    <div class="card"><h4>One tag: position + gyro</h4><p>A single tag's two flipped answers disagree about the robot, but agree about where the <em>tag</em> is. So the <code>TAG_TRIG</code> solver takes the tag's position plus the gyro heading (<a href="#gyro">chapter 13</a>). Ambiguity can't touch it. Two or more tags: the Jetson's multi-tag solve.</p></div>
+    <div class="card"><h4>14 named gates</h4><p>Time sync, age, excluded tags, on the field, height and tilt, ambiguity, distance, reprojection, spin rate, heading vs gyro, and a jump check. Each rejection is counted by its reason, so you tune from evidence: <code>maxDistance 60, maxYawRate 29</code>.</p></div>
+    <div class="card"><h4>Trust from quality</h4><p><code>TrustModel</code>: 0.02 × d² / n meters, times factors for a tag near the image edge, reprojection error, a low decision margin, ambiguity, and how fast the robot moves. Per-tag numbers come from the Jetson's <code>tagQuality</code> topic (<a href="#networktables">chapter 15</a>).</p></div>
+  </div>
+
+  <div class="prose full">
+    <p>The AOS lessons above are built in. <b>Watch for detections stopping:</b> <code>VisionHealth</code> raises Driver Station alerts when a camera disconnects, the message format doesn't match, time sync goes stale, fps drops below 20 while enabled, the Jetson throttles or stays quiet while enabled, or every pose gets rejected for 3 s. <b>Check the gyro against vision:</b> the <code>headingAgreesWithGyro</code> gate (15°). <b>Careful with resets:</b> the <code>innovation</code> gate refuses a jump of over 1 m or 30° unless 3 frames in a row agree with each other within 1 s; while disabled everything passes, so a robot placed on the field finds itself at once.</p>
+  </div>
+
+  <div class="full">
+  <details class="deep">
+    <summary>Testing it without a robot</summary>
+    <div>
+      <p><b>Synthetic cameras.</b> <code>SyntheticCamera</code> and <code>VisionScenario</code> run the whole <code>VisionSystem</code> against a fake robot and fake cameras, in plain Java: no robot, no PhotonVision, no OpenCV. You can add corner noise, ambiguity and flipped solutions, then assert the worst error stays under 10 cm. <code>examples/VisionTuningTest.java</code> is a test to copy into a robot project; it runs in the library's own suite against the real 2026 field.</p>
+      <p><b>Simulation.</b> <code>VisionSim</code> uses PhotonLib's own <code>VisionSystemSim</code>. The simulation test runs the real chain: simulated camera → real <code>PhotonCamera</code> → SpectrumVision → <code>SwerveDrivePoseEstimator</code>. A robot placed <b>1.12 m wrong</b> while disabled ends within <b>1 mm</b>. Driving enabled with odometry <b>10% wrong</b>, the estimate stays within <b>8 cm</b>.</p>
+      <p><b>Real output.</b> On the Jetson, <code>tests/robot-vision-live</code> fed the library real PhotonVision results: 419 of 419 frames with tags got the Jetson's tag quality matched. 27 tests run on each build.</p>
+    </div>
+  </details>
+  <details class="deep">
+    <summary>Examples, CTRE, and logging with AdvantageKit</summary>
+    <div>
+      <p>The examples (WPILib swerve with an EKF beside it, CTRE swerve, AdvantageKit) compile against the real CTRE and AdvantageKit libraries in both builds. That's how we found Phoenix 2027's changes before a student did: no <code>Utils.fpgaToCurrentTime</code>, and <code>Velocity</code> instead of <code>Speeds</code>. <code>ClockBridge</code> fixes the clock on both:</p>
+<pre class="java">var phoenix = new ClockBridge(Utils::getCurrentTimeSeconds);
+// ...
+.sink(PoseSink.convertingTime(drivetrain::addVisionMeasurement, phoenix::toOther))</pre>
+      <p><b>Logging:</b> don't log raw PhotonLib results. They're 0.3–0.9 MB/s at 5 cameras × 120 fps, and AdvantageKit sends whatever you log to every dashboard, over the radio. <code>ObservationCodec</code> packs each frame into one compact <code>double[]</code>, about a tenth of the size. In replay the same solvers, gates and trust run on it, so you can change a gate and replay a match.</p>
+    </div>
+  </details>
+  </div>
+
   <div class="callout spectrum">
     <h5>Our extras on NetworkTables</h5>
-    <p>Our PhotonVision publishes more than stock: per-camera health (<code>/photonvision/TopLeft/health/fps</code>, <code>latencyMs</code>, <code>problem</code>…), Jetson temperatures and throttling, <code>settingsJson</code> snapshots for the log, and controls like Rewind recording and excluded tags. Robot code reads them with plain NetworkTables subscribers and can raise Driver Station alerts from them. The full topic tree is in <a href="#networktables">chapter 15</a>.</p>
-    <p class="full">Three things change what robot code receives. <b>While the robot is disabled</b>, each camera sends about 30 results a second instead of 120 (<code>photonvision-49</code>), and full rate is back within 5 ms of enable; no robot code needed. It reads the Driver Station's state from NetworkTables, which isn't checked with 2027 robot code yet; if that's missing, the cameras just stay at full rate. <b>When the field connects</b>, with <b>Event pipeline when the field connects</b> on, every camera switches to the event pipeline once (<code>photonvision-51</code>); a <code>setPipelineIndex</code> after that sticks. <b>After a match</b>, quiet mode stops Rewind (<code>photonvision-56</code>); robot code can override it with <code>/photonvision/jetson/quiet</code> (true or false), and the Jetson publishes <code>quietNow</code> and <code>quietReason</code>. A recording robot code asks for on <code>/photonvision/rewind/record</code> always wins.</p>
+    <p>Our PhotonVision publishes more than stock: per-camera health (<code>/photonvision/TopLeft/health/fps</code>, <code>latencyMs</code>, <code>problem</code>…), how much to trust each tag (<code>/photonvision/TopLeft/tagQuality</code>), Jetson temperatures and throttling, <code>settingsJson</code> snapshots for the log, and controls like Rewind recording and excluded tags. Robot code reads them with plain NetworkTables subscribers and can raise Driver Station alerts from them. The full topic tree is in <a href="#networktables">chapter 15</a>.</p>
+    <p class="full">Three things change what robot code receives. <b>While the robot is disabled</b>, each camera sends about 30 results a second instead of 120 (<code>photonvision-49</code>), and full rate is back within 5 ms of enable; no robot code needed. It reads the robot's control word from NetworkTables, in both the 2026 and the 2027 format (<code>photonvision-62</code>, <a href="#networktables">chapter 15</a>); if none has arrived, the cameras stay at full rate. <b>When the field connects</b>, with <b>Event pipeline when the field connects</b> on, every camera switches to the event pipeline once (<code>photonvision-51</code>); a <code>setPipelineIndex</code> after that sticks. <b>After a match</b>, quiet mode stops Rewind (<code>photonvision-56</code>); robot code can override it with <code>/photonvision/jetson/quiet</code> (true or false), and the Jetson publishes <code>quietNow</code> and <code>quietReason</code>. A recording robot code asks for on <code>/photonvision/rewind/record</code> always wins.</p>
   </div>
 
   <div class="deeper full">
@@ -372,6 +423,7 @@ visionSim.addCamera(new PhotonCameraSim(topLeft, props), MOUNTS.get("TopLeft"));
       <li><code>getAllUnreadResults()</code> once per loop, and use every result. Check <code>hasTargets()</code> first.</li>
       <li>2D: <code>turn = kP × (0 − yaw)</code>; positive yaw is right. An off-centre camera needs an offset setpoint.</li>
       <li>3D: <code>PhotonPoseEstimator(AndyMark layout, robotToCamera)</code>, multi-tag then lowest ambiguity, filter, then <code>addVisionMeasurement(pose, timestamp, stdDevs)</code>.</li>
+      <li>SpectrumVision (<code>robot-vision/</code>) does all of this, tested: every frame, gyro-based single tags, named gates, trust, alerts.</li>
     </ul>
   </div>
   <div class="recap reveal full">
@@ -384,7 +436,8 @@ visionSim.addCamera(new PhotonCameraSim(topLeft, props), MOUNTS.get("TopLeft"));
       <li>Targets: id, yaw (right = positive), pitch (up = positive), area %, ambiguity, camera-to-tag transform, corners. <code>getBestTarget()</code> is null without targets.</li>
       <li>2D aim with a P controller: too low creeps, too high wobbles (the camera delay makes it worse). Offset cameras aim at <code>atan(offset / distance)</code>. Range from pitch with <code>calculateDistanceToTargetMeters</code>, camera tilt up positive.</li>
       <li>3D: <code>k2026RebuiltAndymark</code> (the default is welded), <code>robotToCamera</code>, one method per strategy, filters for off-field, ambiguity and distance-scaled std devs.</li>
-      <li>Check once that vision timestamps and <code>Timer.getMonotonicTimestamp()</code> share a clock.</li>
+      <li>Check once that vision timestamps and <code>Timer.getMonotonicTimestamp()</code> share a clock. For CTRE on Phoenix 2027, convert with <code>ClockBridge</code>.</li>
+      <li>SpectrumVision: multi-tag, or one tag's position + the gyro (<code>TAG_TRIG</code>, immune to ambiguity); 14 gates counted by reason; trust from distance and tag quality; alerts; compact AdvantageKit logs. Simulated: 1.12 m wrong → 1 mm.</li>
     </ul>
   </div>
 </div>

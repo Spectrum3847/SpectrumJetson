@@ -67,7 +67,7 @@ Site.chapter('pit', (root) => {
       ],
       confirm: 'A box on the tag in the dashboard, and <code>tags/frame</code> above 0 in the <code>971 stats</code> log line.',
       why: ['#settings', 'Chapter 4: Camera settings'],
-      more: 'The pipeline type for our GPU detector is the CUDA AprilTag one. If the health check says "CUDA detector not loaded", no camera is on it.',
+      more: 'The pipeline type for our GPU detector is the CUDA AprilTag one. If the health check says "CUDA detector not loaded", no camera is on it. Match Ready names any camera on the CPU AprilTag type.',
     },
 
     /* missing camera */
@@ -155,7 +155,7 @@ Site.chapter('pit', (root) => {
       cause: 'The throttle reason says why: <code>OVER-CURRENT</code> when the supply sagged, <code>HIGH TEMP</code> when it\'s too hot, or a capped clock.',
       steps: [
         '<code>OVER-CURRENT</code>: swap in a fresh battery, and check the Jetson\'s power wiring and connector.',
-        '<code>HIGH TEMP</code>: is the fan spinning? Is anything blocking the airflow? The health check reads the fan\'s real speed.',
+        '<code>HIGH TEMP</code>: is the fan spinning? Is anything blocking the airflow? The health check reads the fan\'s real speed. Check <b>Settings › Robot state › Cooling</b> too: a stock fan left on No fan never spins.',
         '<code>Prev. over-current (N)</code> only means it happened earlier. It isn\'t throttling now.',
       ],
       confirm: 'CPU Throttling says <code>None</code>, and fps is back to ~120.',
@@ -167,7 +167,7 @@ Site.chapter('pit', (root) => {
       steps: [
         'Check each camera\'s exposure: about 5 ms, auto exposure off.',
         'Run the health check. It should say <code>power mode MAXN SUPER</code> and <code>clocks locked</code>, and name any camera under 30 fps.',
-        'All of them at about 60 fps, on a fanless Jetson? That\'s the thermal cap (<code>photonvision-57</code>): at 95 °C every camera is capped at 60 fps until the chip is under 88 °C. Match Ready and Settings › Robot state show it. Let it cool, and get it some air.',
+        'All of them at about 60 fps, on a fanless Jetson? That\'s the thermal cap (<code>photonvision-57</code>): at 95 °C every camera is capped at 60 fps until the chip is under 88 °C. Match Ready and Settings › Robot state show it. Let it cool, and get it some air. With the stock fan, set Cooling to a Fan setting.',
         'Restart PhotonVision (Settings › Device Control › Restart Software).',
       ],
       confirm: 'Every camera reads ~120 fps; the <code>971 stats</code> lines say about 120 calls/s.',
@@ -376,7 +376,7 @@ Site.chapter('pit', (root) => {
       title: 'Restore a settings snapshot',
       cause: 'Every change in the dashboard is saved right away, with no undo. A slider dragged by mistake, or an experiment on the match pipeline, sticks.',
       steps: [
-        'On the Settings page, open <b>Settings snapshots</b> and <b>Restore</b> the last good one. Every camera\'s pipelines, settings and calibrations come back, and PhotonVision restarts.',
+        'On the Settings page, open <b>Settings snapshots</b> and <b>Restore</b> the last good one. Every camera\'s pipelines, settings and calibrations come back, and PhotonVision restarts. So do the network settings, the field layout, Robot state and Rewind\'s settings: the dialog lists them.',
         'Not sure which? PhotonVision saves one by itself the first time the field connects each day. And a restore first saves the current settings as "Before restoring …", so it can be undone.',
         'Only one camera wrong, and another still has good settings? <b>Copy settings from…</b> in the pipeline menu (☰) copies them over.',
         'Next time, duplicate the pipeline (☰) before experimenting, and try things on the copy.',
@@ -506,10 +506,10 @@ Site.chapter('pit', (root) => {
       '== System',
       '  PASS  power mode MAXN SUPER',
       '  PASS  clocks locked (CPU 1728 MHz, GPU 1020 MHz)',
-      '  PASS  hottest sensor gpu-thermal 58 C',
+      '  PASS  hottest sensor gpu-thermal 81 C',
       '  PASS  memory available 4630 MB',
       '  PASS  disk 12% used',
-      '  PASS  fan: NVIDIA fan control, quiet profile, pwm 118/255, 2690 rpm',
+      '  PASS  fan: off (fanless), cameras capped at 95 C, pwm 0/255, 0 rpm (for a heatsink plate; with the stock fan choose Fan on Settings > Robot state)',
       '  PASS  clock: 2026-10-17 16:42 UTC',
       '  PASS  filesystem: no ext4 errors recorded',
       `  PASS  system log kept across power cuts (${boots} boot(s) on file)`,
@@ -560,8 +560,8 @@ Site.chapter('pit', (root) => {
         'event pipeline 0': 'every camera has an Event pipeline at number 0, so the switch on field connect works for all of them',
         'quiet mode': 'the last match ended, so the SSD isn\'t written until the next enable. Recording is paused on purpose',
         'SSD: no media errors': 'any media error is a FAIL: replace the SSD. Media errors killed our first one',
-        'hottest sensor': 'WARN at 70 C, FAIL at 85 C',
-        'fan: NVIDIA': 'read from the fan\'s speed sensor: it really spins',
+        'hottest sensor': 'fanless, like ours: WARN at 90 C, FAIL at 95 C. With a fan: WARN at 70, FAIL at 85',
+        'fan: off': 'our fan is sealed under a plate, so No fan is right. With a fan it reads the speed sensor, so a dead fan FAILs, and it WARNs if the running cooling isn\'t the one saved',
         'READY': 'good to go. (A clean run still prints "0 warning(s)")',
       },
       hit: {

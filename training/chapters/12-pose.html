@@ -261,7 +261,7 @@ Pose3d robotPose = camPose.transformBy(robotToCamera.inverse());</div>
 
   <div class="callout spectrum full">
     <h5>What we did: multi-tag on by default, bad tags left out</h5>
-    <p><b>On by default</b> (<code>photonvision-06</code>): a new camera starts with multi-tag on, and 3D turns itself on as soon as a calibration is saved for its resolution. We added this after finding that both bench cameras had multi-tag off. <b>Leaving bad tags out</b> (<code>photonvision-22</code>): if a tag is mounted wrong at an event, type its number on the Settings page (or robot code publishes it on <code>/photonvision/excludedTags</code>) and every camera's multi-tag solve ignores it. The tag is still reported with its own single-tag pose. Try the "mounted 15 cm off" box above to see why this matters: one bad tag drags every multi-tag answer.</p>
+    <p><b>On by default</b> (<code>photonvision-06</code>): a new camera starts with multi-tag on, and 3D turns itself on as soon as a calibration is saved for its resolution. We added this after finding that both bench cameras had multi-tag off. <b>Leaving bad tags out</b> (<code>photonvision-22</code>): if a tag is mounted wrong at an event, type its number on the Settings page (or robot code publishes it on <code>/photonvision/excludedTags</code>) and every camera's multi-tag solve ignores it. The tag is still reported with its own single-tag pose. Try the "mounted 15 cm off" box above to see why this matters: one bad tag drags every multi-tag answer. <b>Spotting the bad tag</b> (<code>photonvision-61</code>): each tag's reprojection error under the multi-tag pose is now sent too. In a test, two rendered tags fit to 0.24 and 0.13 px; moving one tag 5 cm in the field layout raised its error to 4.8 px.</p>
   </div>
 
   <h3>On the robot</h3>
@@ -275,6 +275,7 @@ Pose3d robotPose = camPose.transformBy(robotToCamera.inverse());</div>
       <p>A vision pose isn't simply right or wrong. It's a best guess with some spread, and the spread grows fast with distance (you saw why: fewer pixels per tag) and shrinks with more tags. Robot code tells the pose estimator how much to trust each measurement with <strong><span class="term" data-term="standard deviation">standard deviations</span></strong>: a small number means "trust this a lot".</p>
       <p>The robot's drivetrain pose estimator blends vision with <span class="term">odometry</span> using the idea behind a <span class="term">Kalman filter</span>. Each source is a guess with a spread. The blend leans toward whichever is more certain, and the combined guess is more certain than either alone.</p>
       <p>A common rule of thumb, from team 6328 and listed in our research notes: standard deviation ≈ <code>0.01 × distance² / tags²</code> meters. PhotonVision itself doesn't publish standard deviations, so this lives in robot code.</p>
+      <p>Distance isn't the only clue. Our Jetson also sends, for every tag in every frame, how much to trust it (<code>photonvision-61</code>, on <code>/photonvision/&lt;camera&gt;/tagQuality</code>): the detector's <b>decision margin</b> (how clearly the bits read), how close the tag is to the <b>image edge</b> (where the lens model is weakest), how far undistortion <b>moved its corners</b>, and the <b>reprojection error</b> of its best and alternate poses. Our robot library, SpectrumVision (<a href="#photonlib">chapter 18</a>), starts from 0.02 × d² / n and multiplies in each of those.</p>
     </div>
     <div class="lab" style="margin:0">
       <div class="lab-head"><span class="tag">Lab</span><h4>Blending two guesses</h4></div>
@@ -302,7 +303,7 @@ Pose3d robotPose = camPose.transformBy(robotToCamera.inverse());</div>
         e.timestampSeconds, VecBuilder.fill(xy, xy, theta));
   });
 }</div>
-      <p>Three details matter. <b>Every frame:</b> <code>getAllUnreadResults()</code> returns about 2 frames per camera per 20 ms loop at 90 fps, so none are dropped. <b>The timestamp</b> is when the frame was captured, not when it arrived, so the estimator can apply it to the right moment in the past (chapter 14). <b>Gates:</b> our off-season robot code already rejects bad poses and uses std-dev tiers; those move over, retuned, because PhotonVision computes ambiguity differently from Limelight.</p>
+      <p>Three details matter. <b>Every frame:</b> <code>getAllUnreadResults()</code> returns about 2 frames per camera per 20 ms loop at 90 fps, so none are dropped. <b>The timestamp</b> is when the frame was captured, not when it arrived, so the estimator can apply it to the right moment in the past (chapter 14). <b>Gates:</b> our off-season robot code already rejects bad poses and uses std-dev tiers; those move over, retuned, because PhotonVision computes ambiguity differently from Limelight. SpectrumVision (<a href="#photonlib">chapter 18</a>) has 14 named gates, and counts every rejection by its reason, so tuning starts from evidence.</p>
     </div>
   </details>
   <div class="deeper full">

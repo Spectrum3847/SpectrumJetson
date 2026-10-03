@@ -80,6 +80,7 @@
   </div>
 
   <div class="callout spectrum full"><h5>What we measured</h5><p>A result is ready about <strong>14.5 ms</strong> after the middle of the exposure (the dashboard shows 14.3–15.2 ms per camera), down from 44 ms at the start. We timed each step with the camera driver's own log: half the 5 ms exposure (2.5 ms), then <strong>8.1 ms for the camera to send the frame</strong>, 0.15 ms until our decoder starts, 2.8 ms of JPEG decode, and 1.2 ms of detection. The camera streams each frame out while its sensor reads out, so neither USB nor PhotonVision is what's slow. How we got the rest down (exposure, decode, USB caps) is the story of <a href="#speed">chapter 10</a>.</p></div>
+  <div class="callout idea full"><h5>Measured from robot code: add the wait for the loop</h5><p>The SystemCore rehearsal runs a real WPILib 2027 robot program, with the real Jetson as its coprocessor, and measures latency where it matters: in robot code's loop. There a result also waits for the loop to come round, on average <strong>half a loop period</strong>. Over USB with 4 cameras the middle value (p50) was <strong>30–31 ms with a 20 ms loop</strong> and <strong>25 ms with a 10 ms loop</strong> (the SystemCore is meant to run at 10 ms). With the far search off, about 3 ms less. The Jetson's own frame age in the same run: about 15 ms. The timestamp still makes the wait harmless; it just shows up in the number.</p></div>
   <figure class="full" style="margin:0 0 30px;max-width:var(--prose)">
 <pre class="code" aria-label="Real PhotonVision log lines">971 stats h1 1280x800: 122.405 calls/s, detect avg 0.905398 ms max 1.48748 ms, jni 0.0038643 ms, tags/frame 0 [bos]
 971 jpeg 10 s: nvjpg 362.13 frames/s (2.58713 ms), libjpeg-turbo 0 frames/s; checks since start 19925 ok, 0 differ</pre>
@@ -219,6 +220,7 @@
     </div>
   </div>
   <div class="callout spectrum full"><h5>Rewind uses the robot's clock too</h5><p>Every frame Rewind records to the SSD is stamped twice: <code>jetson_us</code> (the Jetson's clock) and <code>robot_us</code> (the robot's clock, from time sync). Because <code>robot_us</code> is the same timebase as the AdvantageKit log, you can line up a video frame with exactly what the robot code was doing at that moment.</p></div>
+  <div class="callout pitfall full"><h5>The latency that kept climbing</h5><p>One rehearsal failed: latency grew by about <strong>0.5 ms every second</strong>, with nothing wrong in the vision code. The Jetson had internet time back after a clock test, and Linux's time service (timesyncd) was <em>slewing</em> its clock: running it 500 ppm fast to catch up, instead of jumping. Slewing does move the monotonic clock's rate, and PhotonVision's time sync lags behind a clock that's changing speed. At an event there's no internet time, and setting the date from the robot jumps the wall clock without touching the monotonic one. So the rehearsal now runs like an event: internet time paused, and the clock back at its own rate. On shop Wi-Fi it can still happen for a few minutes after boot.</p></div>
 
   <div class="deeper full">
     <a class="video" href="https://www.youtube.com/watch?v=BAo5C2qbLq8" target="_blank" rel="noopener">Computerphile: Network Time Protocol (10:40)</a>
@@ -299,7 +301,7 @@
         <div><small>Average age</small><b id="l-f2">19 ms</b></div>
         <div><small>New per 20 ms loop</small><b id="l-f3">2.4</b></div>
       </div>
-      <p class="hint">Assumes 15 ms latency.</p>
+      <p class="hint">Assumes 15 ms latency, the Jetson's own measured frame age. This is the age at the Jetson. Robot code only looks at its next loop, which adds about half a loop period: measured from robot code, 30–31 ms with a 20 ms loop.</p>
     </div>
   </div>
 
@@ -321,7 +323,8 @@
       <li>Our timestamps come from the camera's own clock and mark the middle of the exposure (<code>photonvision-13</code>). The camera's own delay before sending is still to be measured.</li>
       <li class="full">Most of the ~14.5 ms is the camera sending the frame (8.1 ms), not USB or PhotonVision.</li>
       <li>Time sync puts Jetson timestamps on the robot's clock.</li>
-      <li class="full">The monotonic clock times vision; the wall clock only names files.</li>
+      <li class="full">Measured in robot code's loop, latency adds half a loop period: 30–31 ms (p50) with a 20 ms loop, 25 ms with 10 ms.</li>
+      <li class="full">The monotonic clock times vision; the wall clock only names files. A clock being slewed by internet time made latency climb 0.5 ms a second.</li>
       <li class="full">The same lookup gives the gyro heading at capture time: <code>addHeadingData</code> keeps a 1 s buffer of headings.</li>
       <li class="full">Higher fps means fresher data and more samples.</li>
     </ul>

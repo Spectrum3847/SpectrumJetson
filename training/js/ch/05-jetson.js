@@ -44,7 +44,7 @@ const MATS = {
 
 // Clickable labels. Each covers one or more nodes.
 const HOTS = [
-  ['fan', 'Fan', ['fan'], 'Pulls air through the heatsink. On NVIDIA\'s quiet profile it turned at 775 rpm on our bench (43 °C). FAN=full runs it at about 5,600 rpm.'],
+  ['fan', 'Fan', ['fan'], 'Pulls air through the heatsink. On NVIDIA\'s quiet profile it turned at 775 rpm on our bench (43 °C). Full speed is about 5,600 rpm. Settings › Robot state › Cooling picks quiet, full or no fan; ours is sealed under a plate, so it\'s on No fan.'],
   ['heatsink', 'Heatsink', ['heatsink'], 'Metal fins spread the chip\'s heat into the air. A leaf spring presses it onto the module.'],
   ['module', 'Orin Nano module', ['module', 'module_screws'], 'The computer itself, 69.6 × 45 mm: the SoC (CPU, GPU, engines) and 8 GB of LPDDR5.'],
   ['sodimm', 'SO-DIMM socket', ['sodimm'], '260 pins, the shape laptops use for RAM. Power, PCIe, USB, Ethernet and camera signals all pass through it.'],

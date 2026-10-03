@@ -14,7 +14,7 @@
 #                               only, so it vanished at every power cut, taking brownout clues).
 #                               ext4's journal keeps the filesystem itself consistent.
 #   7. Cooling                - spectrum-fan.sh (/usr/local/bin/spectrum-fan), also on Settings >
-#                               Robot state (photonvision-71). quiet (the default): NVIDIA's fan
+#                               Robot state (photonvision-71). quiet (stock fan):  NVIDIA's fan
 #                               control (nvfancontrol) on its "quiet" profile, which speeds the fan
 #                               up as the chip warms (~2000 rpm at 56 C). full: full speed
 #                               (jetson_clocks --fan, ~5,800 rpm). off: fanless (heatsink plate):

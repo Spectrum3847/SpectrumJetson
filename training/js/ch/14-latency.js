@@ -85,7 +85,7 @@ Site.chapter('latency', (root) => {
       { n: 'GPU detect', ms: 1.2, k: 'm', d: 'The CUDA detector finds every tag and its four corners on the GPU: about 1.2 ms per frame with 4 cameras, 2.1 ms with 5 cameras facing bright ceiling lights (more candidate blobs to check).' },
       { n: 'Pose solve', ms: 0.5, k: 'e', d: 'PhotonVision solves the camera\'s pose from the corners (single-tag and multi-tag PnP) and packs the result. A fraction of a millisecond; our estimate, not separately measured.' },
       { n: 'NetworkTables', ms: 0.5, k: 'e', d: 'The result goes over Ethernet to the SystemCore. On a wired network that\'s well under a millisecond (estimate). PhotonVision\'s latency readout stops at publish.' },
-      { n: 'Robot loop', ms: 20, k: 'r', d: 'Robot code runs every 20 ms and reads new results when it next runs: anywhere from 0 to 20 ms later. With the timestamp, this wait doesn\'t add error: the estimator knows exactly how old the measurement is.' },
+      { n: 'Robot loop', ms: 20, k: 'r', d: 'Robot code runs every 20 ms and reads new results when it next runs: anywhere from 0 to 20 ms later. With the timestamp, this wait doesn\'t add error: the estimator knows exactly how old the measurement is. On average it\'s half a loop: measured in robot code, results were 30–31 ms old with a 20 ms loop, 25 ms with a 10 ms loop.' },
     ];
     let t0 = 0; S.forEach((s) => { s.a = t0; t0 += s.ms; s.b = t0; });
     const RL = S.length - 1; // the robot loop row

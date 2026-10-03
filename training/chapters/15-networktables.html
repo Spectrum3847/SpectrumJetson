@@ -149,7 +149,7 @@
     </div>
   </div>
 
-  <div class="callout pitfall full"><h5>Versions: the one rule</h5><p>Our Jetson runs 2026 PhotonVision and the robot runs 2027 PhotonLib. That works because the message layout (its fingerprint hash) is identical in both, as we checked in the source (<a href="#photonvision">chapter 9</a>). So <strong>don't upgrade the robot's PhotonLib past alpha-6</strong>: later versions changed the layout, and the robot code would throw an error reading from this Jetson.</p></div>
+  <div class="callout pitfall full"><h5>Versions: the one rule</h5><p>Our Jetson runs 2026 PhotonVision and the robot runs 2027 PhotonLib. That works because the message layout (its fingerprint hash) is identical in both, as we checked in the source (<a href="#photonvision">chapter 9</a>). So for October <strong>the robot stays on PhotonLib v2027.0.0-alpha-2 and WPILib 2027 alpha-6</strong>. PhotonLib after alpha-7 changed the layout, and the robot code would throw an error reading from this Jetson. WPILib alpha-7 is sneakier: it changes the time units inside time sync, with no error at all, so every timestamp would be wrong.</p></div>
 
   <details class="deep"><summary>What's inside a PhotonPipelineResult</summary><div>
     <p>Field names from PhotonVision's message definitions (<code>photon-serde/messages.yaml</code>, v2026.3.4). PhotonLib turns these into Java objects with getters like <code>getYaw()</code> and <code>getBestCameraToTarget()</code>.</p>
@@ -219,11 +219,29 @@
   <div class="cards dir-cards full">
     <div class="card"><div class="icon">🕐</div><h4>The time</h4><p>The robot is the time sync server (UDP 5810), so Jetson timestamps can be converted to robot time. It also publishes its date on <code>/photonvision/clock/unixMs</code> so the Jetson's logs and recordings get real dates.</p><span class="chip">photonvision-08</span></div>
     <div class="card"><div class="icon">⏺️</div><h4>Record Rewind</h4><p>Set <code>/photonvision/rewind/record</code> true and every camera is saved to the SSD. Our robot code will do it for each FMS match, named by the match (in progress). A recording asked for this way always wins over quiet mode.</p><span class="chip">photonvision-07</span></div>
-    <div class="card"><div class="icon">💤</div><h4>Rest while disabled</h4><p>Nothing to send: PhotonVision reads the Driver Station's control word, and while the robot is disabled each camera processes 30 frames a second instead of 122 (7.8 W instead of 9.7 W with 5 cameras). It's back to full rate within 5 ms of enable. <code>camera.setEnabled(false)</code> still stops one camera completely.</p><span class="chip">photonvision-49, -11</span></div>
+    <div class="card"><div class="icon">💤</div><h4>Rest while disabled</h4><p>Nothing to send: PhotonVision reads the robot's control word (2026 and 2027 formats), and while the robot is disabled each camera processes 30 frames a second instead of 122 (7.8 W instead of 9.7 W with 5 cameras). It's back to full rate within 5 ms of enable. <code>camera.setEnabled(false)</code> still stops one camera completely.</p><span class="chip">photonvision-49, -11, -62</span></div>
     <div class="card"><div class="icon">🤫</div><h4>Quiet after a match</h4><p>After each match the Jetson stops writing to its SSD, so the power cut that follows can't hurt it (<a href="#failsafes">chapter 16</a>). Any enable ends it. Robot code can decide instead with <code>/photonvision/jetson/quiet</code> (true or false); the Jetson reports <code>quietNow</code> and <code>quietReason</code>.</p><span class="chip">photonvision-56</span></div>
     <div class="card"><div class="icon">🎚️</div><h4>Switch profiles</h4><p>Every camera has the same pipelines at the same numbers (say 0 = event field, 1 = practice field). Robot code can switch them all with <code>setPipelineIndex</code>, and the log records which was active.</p><span class="chip">pipelineIndexRequest</span></div>
     <div class="card"><div class="icon">📐</div><h4>Where each camera is</h4><p>Robot code publishes each camera's mount, <code>robotToCamera</code>, from CAD. Field calibration uses it, and sends back the measured mount on <code>fieldcal/robotToCamera</code>.</p><span class="chip">photonvision-30</span></div>
     <div class="card"><div class="icon">🚫</div><h4>Leave out a bad tag</h4><p>If a tag is mounted wrong at an event, robot code can list it on <code>/photonvision/excludedTags</code>, and every camera's multi-tag solve ignores it.</p><span class="chip">photonvision-22</span></div>
+  </div>
+
+  <div class="callout pitfall full">
+    <h5>The robot that was always disabled</h5>
+    <p>Idle mode needs to know when the robot is enabled. A 2026 roboRIO publishes that as a number on <code>/FMSInfo/FMSControlData</code>. WPILib 2027 publishes a struct on a new topic, <code>/FMSInfo/ControlWord</code>, instead. Our PhotonVision only read the old one, so a SystemCore robot looked disabled forever, and <strong>every camera would have idled at about 30 fps through whole matches</strong>. Nothing crashed and nothing warned. The October 1 code audit found it.</p>
+    <p>The fix (<code>photonvision-62</code>) reads both formats, and if no control word has arrived at all, it counts the robot as enabled, so the safe mistake is full speed. Then we proved it without a SystemCore: <code>tests/systemcore-rehearsal</code> runs a real WPILib 2027 alpha-6 robot program on a laptop, the real Jetson connects to it, and it plays a match. PhotonVision read enabled, auto and FMS correctly in every phase. The lesson: when the robot's software changes years, test against the real thing, not a fake that publishes last year's topics.</p>
+  </div>
+
+  <h3 class="full">How much fits through the radio</h3>
+  <div class="prose full">
+    <p>The wired Ethernet between the Jetson and the SystemCore has plenty of room. In the rehearsal, all of PhotonVision's traffic to the robot was <strong>90 kbit/s while disabled and 370 kbit/s enabled</strong>, with 4 cameras and no tags in view. Each frame is about 0.5 KB with one tag and 1.5 KB with four.</p>
+    <p>What has to stay small is what crosses the <strong>radio</strong> to the driver station laptop, shared with every other robot's traffic:</p>
+    <ul>
+      <li><strong>Elastic</strong> is safe: it only asks for the topics it has widgets for.</li>
+      <li><strong>AdvantageScope</strong> on the field: set Live Mode to <strong>Low Bandwidth</strong>. "Logging" pulls every value of everything; that's for the pit tether.</li>
+      <li><strong>AdvantageKit</strong> sends whatever robot code logs to every dashboard. Raw PhotonLib results are 0.3–0.9 MB/s at 5 cameras × 120 fps, and much of each tag's bytes are always empty or copied twice. So log <strong>one compact record per observation</strong> (SpectrumVision's <code>ObservationCodec</code>), about a tenth of the size, and still enough to replay a match with a changed gate.</li>
+      <li>Don't turn on <strong>"Publish protobuf"</strong> in PhotonVision's networking settings: it sends every result a second time.</li>
+    </ul>
   </div>
 
   <div class="deeper full">
@@ -247,7 +265,9 @@
       <li>The Jetson (<code>10.85.15.15</code>, static) and SystemCore (<code>10.85.15.2</code>) share the robot's Ethernet network. Data travels in packets.</li>
       <li>NetworkTables 4 is a publish/subscribe whiteboard. The server lives in the robot code; PhotonVision and dashboards are clients on port 5810.</li>
       <li>Each camera publishes a <code>PhotonPipelineResult</code> on <code>rawBytes</code>: targets, corners, candidate poses, ambiguity, multi-tag result, timestamps.</li>
-      <li class="full">A matching layout hash lets our 2026 PhotonVision talk to 2027 PhotonLib. Don't upgrade PhotonLib past alpha-6.</li>
+      <li class="full">A matching layout hash lets our 2026 PhotonVision talk to 2027 PhotonLib. For October: PhotonLib alpha-2, WPILib alpha-6.</li>
+      <li class="full">WPILib 2027 moved the robot's control word to <code>/FMSInfo/ControlWord</code>; <code>photonvision-62</code> reads both. Before it, cameras idled at ~30 fps all match.</li>
+      <li class="full">Wired, vision is 90–370 kbit/s. Over the radio, keep dashboards on Low Bandwidth and log compact observations, not raw results.</li>
       <li>Robot code: <code>PhotonCamera("TopLeft")</code> → <code>getAllUnreadResults()</code> → <code>PhotonPoseEstimator</code> → <code>addVisionMeasurement(pose, timestamp)</code>.</li>
       <li class="full">The robot talks back: time, Rewind, <code>setEnabled</code>, pipeline profiles, camera mounts, excluded tags.</li>
     </ul>

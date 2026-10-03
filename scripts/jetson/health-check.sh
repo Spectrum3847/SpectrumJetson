@@ -467,7 +467,7 @@ elif [[ $fanmode == off* && ${fan:-0} -eq 0 ]]; then
 elif [[ $fanmode == off* ]]; then
   warn "fan: $fanmode, but it's running (pwm ${fan}/255, $rpm rpm): FAN_ON_HOT, or something else drives it"
 elif [[ $fanmode == NVIDIA* || $fanmode == full* ]]; then
-  # The quiet profile (09-robot-tuning.sh's default) speeds up as the chip warms; FAN=full is full speed.
+  # The quiet profile (for a stock fan) speeds up as the chip warms; FAN=full is full speed.
   pass "fan: $fanmode, pwm ${fan:-?}/255, $rpm rpm"
 else
   warn "fan $fanmode and not controlled: $rpm rpm (run 09-robot-tuning.sh)"

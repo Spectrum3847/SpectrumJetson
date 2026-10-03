@@ -271,7 +271,7 @@
         <li>Hold a tag up close (24 px or bigger) and read the tag contrast line above the camera controls on the Input tab, e.g. "white 205, black 38 (contrast 167), 0% clipped: good". If it doesn't end in <b>good</b>, it says what to change.</li>
         <li>At an event, run <code>tests/flicker-check/run.sh</code> under the real lights. If frames pulse by several percent, go to exposure 83 (8.3 ms).</li>
       </ul>
-      <p class="full">At an event, the <b>Field Calibration</b> page can tune each camera under the field's lights: turn the robot so that camera faces tags near and far, press <b>Tune</b>, then <b>Apply recommended</b>. It picks the shortest exposure that still finds every tag.</p>
+      <p class="full">At an event, the <b>Field Calibration</b> page can tune each camera under the field's lights: turn the robot so that camera faces tags near and far, press <b>Tune</b>, then <b>Apply recommended</b>. It picks the shortest exposure that still finds every tag. Apply goes to the pipeline that was tuned, even if the camera has switched pipelines since (before <code>photonvision-63</code> it went to whichever one was running).</p>
       <p class="full">There's no <b>Camera Gain</b> slider: our cameras have no gain control, so PhotonVision hides it (<code>photonvision-54</code>). Contrast, Gamma, Sharpness and Backlight Compensation keep the value you set (before <code>photonvision-39</code> their sliders snapped back).</p>
       <details class="deep">
         <summary>Masks: ignore part of the picture</summary>
@@ -317,6 +317,8 @@
             <li><b>Nearly black image:</b> you forgot the exposure in the calibration card.</li>
             <li><b>Check it:</b> <code>tests/calibration-check/check_calibration.py</code> reads the saved calibration and reports the error, outliers and coverage.</li>
             <li><b>8 distortion numbers:</b> the calibration fits 8 distortion coefficients. Our GPU detector uses all 8 (<code>photonvision-04</code>); its stock interface only took 5 and dropped the rest. PhotonLib's <code>getDistCoeffs()</code> hands the robot all 8 too.</li>
+            <li><b>The camera cuts out only while the board is in view:</b> a board filling the view makes JPEG frames too big for the camera's USB bandwidth at 120 fps. Our build calibrates at a low frame rate, which should fix it (<code>photonvision-70</code>, not yet checked with a real board); on an older build, the long calibration exposure does the same. More in <a href="#calibration">chapter 11</a>.</li>
+            <li><b>Board never found, or only some corners:</b> <code>tests/charuco-board-check/check_board.py</code> tries both orientations and OpenCV's old and new marker layouts on a live frame, and says which matches. Set the same on the calibration card (the old layout is its "Old OpenCV Pattern" switch).</li>
             <li><b>Keep the calibration exposure out of the pipelines.</b> 15 ms is fine for a board held still, and a blur disaster on a moving robot.</li>
           </ul>
         </div>
@@ -355,7 +357,7 @@
         <li>Or copy into the same pipeline number on every other camera at once.</li>
         <li>Check it worked: <code>/photonvision/&lt;camera&gt;/settingsJson</code> on NetworkTables holds each camera's full settings as actually set.</li>
       </ul>
-      <p class="full">Never copied: orientation, names, and each camera's exposure limits. Resolution only copies between cameras with the same video modes. <strong>Calibration is never copied</strong>: every camera needs its own from step 6. The <code>settingsJson</code> topics are also recorded in every robot log, so after a match you can see exactly what each camera was set to (<code>photonvision-24</code>).</p>
+      <p class="full">Never copied: orientation, names, and each camera's exposure limits. Resolution only copies between cameras with the same video modes. Every group is checked before anything is copied, so a bad one can't leave a copy half done (<code>photonvision-63</code>). <strong>Calibration is never copied</strong>: every camera needs its own from step 6. The <code>settingsJson</code> topics are also recorded in every robot log, so after a match you can see exactly what each camera was set to (<code>photonvision-24</code>).</p>
       <div class="cs-meta">
         <span class="cs-pass"><b>Pass:</b> the two cameras' <code>settingsJson</code> match, apart from name, calibration and orientation.</span>
         <a class="cs-why" href="#photonvision">Our patches: chapter 9</a>
@@ -373,7 +375,7 @@
         <li><b>Distance:</b> tags found, steadily, at the nearest and farthest distances you care about.</li>
         <li><b>Pose:</b> put the robot on a spot you measured with a tape. Each camera's pose should land where the robot really is, and all cameras should agree with each other. Turn the robot: the pose should turn with it, not jump.</li>
         <li><b>Field layout:</b> the Settings page says <b>2026 Rebuilt AndyMark</b>, the same layout robot code uses. The excluded-tags box is empty, unless a tag at the event is mounted wrong.</li>
-        <li><b>Snapshot:</b> on the Settings page, <b>Settings snapshots</b>, save one with a name ("tuned exposure"). It holds every camera's pipelines, settings and calibrations. <b>Restore</b> brings them all back and restarts PhotonVision.</li>
+        <li><b>Snapshot:</b> on the Settings page, <b>Settings snapshots</b>, save one with a name ("tuned exposure"). It holds every camera's pipelines, settings and calibrations. <b>Restore</b> brings them all back and restarts PhotonVision. It also replaces the network settings (team number, addresses), the field layout, Robot state and Rewind's settings, and the dialog now says so (<code>photonvision-68</code>).</li>
         <li><b>Back up:</b> Settings → Device Control → <b>Export Settings</b> saves every camera's settings and calibration in one file. Keep it on the team drive.</li>
       </ul>
       <div class="callout pitfall">
@@ -396,7 +398,7 @@
         <p>A <span class="term">pipeline</span> is one saved set of settings for a camera: its type (AprilTagCuda, object detection…), exposure, resolution, detector settings. A camera can have several, numbered from 0, and runs one at a time. Robot code picks one with <code>camera.setPipelineIndex(n)</code>, which goes over NetworkTables as <code>pipelineIndexRequest</code>.</p>
         <p><strong>Profiles</strong> are our habit of giving every camera the same pipelines at the same numbers: 0 = event field, 1 = practice field. Robot code then switches all cameras together, and the robot log records which one was active. Tune one camera's pipeline, then Copy settings (step 8) fills in the rest.</p>
         <ul>
-          <li><b>Making one</b> (<code>photonvision-46</code>): in the new-pipeline dialog (☰ → +), <b>Start from</b> a copy of any camera's pipeline, and tick <b>Create on every camera</b>. Each camera gets it as its next number, and the message says which number each got. A copy from another camera keeps each camera's own orientation, exposure limits and mask.</li>
+          <li><b>Making one</b> (<code>photonvision-46</code>): in the new-pipeline dialog (☰ → +), <b>Start from</b> a copy of any camera's pipeline, and tick <b>Create on every camera</b>. Each camera gets it as its next number, and the message says which number each got. A copy from another camera keeps each camera's own orientation, exposure limits, mask and video mode. (Until <code>photonvision-63</code> it didn't: the new pipeline got the defaults, though these docs said otherwise. The browser test only checked "not the source camera's", which the default passed too. Now it checks for the camera's own.)</li>
           <li><b>Switching from the dashboard:</b> ☰ → <b>Switch every camera to pipeline N</b> moves every camera to the number you're on. A camera without that number stays where it is, and the message lists it.</li>
           <li><b>Numbers everywhere</b> (<code>photonvision-47</code>): the Pipeline dropdown and the Camera Matching page show each pipeline as "N: name", so a mismatched profile is easy to spot.</li>
           <li><b>At events</b> (<code>photonvision-51</code>): in Settings &gt; Robot state, turn on <b>Event pipeline when the field connects</b> and pick the number. When the field (FMS) connects, every camera switches to it, once. After that anything sticks: a switch on the dashboard, or robot code choosing a pipeline. <b>Switch now</b> tries it without a field, and <code>health-check.sh</code> warns if a camera lacks that pipeline or has a different one there.</li>

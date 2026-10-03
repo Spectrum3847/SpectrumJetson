@@ -206,6 +206,7 @@
       <h4 style="margin-top:0">What happens when a camera is squeezed</h4>
       <p>A camera can't send more than its allocation: the host only lets it use its slice of each microframe. So what does it do when a frame won't fit in time? We tested it by giving two cameras less than they were sending. Both kept their frame rate. They <strong>compressed harder</strong> instead: smaller, lower-quality JPEGs, taking longer to cross USB.</p>
       <p>For AprilTag cameras we keep them out of the squeeze (under 90% used) with room to spare ("fits" 1.3× or more). The price of going smaller is latency: a 60 KB frame takes 5.9 ms to cross at 1,280 bytes, and 8.0 ms at 944. At our 1,280-byte cap, measured with 4 cameras, it costs nothing: the camera spreads each frame over about 8 ms anyway while its sensor reads out (<a href="#latency">chapter 14</a>). It doesn't hurt timestamp accuracy either: each frame is stamped by the camera's own clock.</p>
+      <p class="full">The cap does have an edge. At 120 fps it leaves a camera about 85 KB a frame, and an ordinary scene is 45–67 KB. A calibration board filling the view makes 85–105 KB frames, and another team's camera cut out whenever the board was in view. Calibration now runs at a low frame rate instead (<a href="#calibration">chapter 11</a>).</p>
     </div>
     <div class="table-wrap">
       <table class="data">
@@ -251,6 +252,7 @@
       <h4 style="margin-top:0">The hardware decoder that froze</h4>
       <p>The obvious way to call NVIDIA's JPEG library (the way another FRC codebase does it) looked amazing in a speed test. It also returned the <strong>first frame, over and over</strong>, while reporting success every time. We only caught it by decoding every frame both ways and comparing them <em>pixel by pixel</em>.</p>
       <p>We call it differently now. And because a mistake here would be invisible, a safety net stays on forever: every ~2 s, one frame per camera is decoded again on the CPU and compared. Any difference switches the hardware off. On Sept 25 the log read <code>checks since start 19925 ok, 0 differ</code>.</p>
+      <p class="full">The same trap turned up once more in October's code audit. Our decoder didn't check whether each copy off the hardware was really queued, and a copy that wasn't failed silently and handed back the previous frame. Now every copy is checked. The JPEG hardware test then decoded 11,432 gray and 11,296 color frames identical to the CPU's.</p>
     </div>
     <div class="lab" style="margin:0">
       <div class="lab-head"><span class="tag">Lab</span><h4>Spot the frozen frames</h4></div>
