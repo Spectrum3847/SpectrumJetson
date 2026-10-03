@@ -94,11 +94,13 @@ def report_fork():
 
 def report_photonvision():
     pinned = re.search(r"photonvision-00-upstream-(v[\d.]+)\.patch", " ".join(os.listdir(os.path.join(REPO, "patches")))).group(1)
+    next_reviewed = pin("scripts/ci/upstream-pins.env", r"^PV_NEXT_REVIEWED=(v[\w.-]+)")
     rels = api("repos/PhotonVision/photonvision/releases?per_page=40")
-    newer = [r for r in rels if not r["draft"] and version_key(r["tag_name"]) > version_key(pinned)
+    newer = [r for r in rels if not r["draft"] and not r["prerelease"] and version_key(r["tag_name"]) > version_key(pinned)
              and r["tag_name"].startswith(pinned[:6])]          # same season (v2026.)
     nextyear = [r for r in rels if not r["draft"] and not r["tag_name"].startswith(pinned[:6])
-                and version_key(r["tag_name"])[:1] > version_key(pinned)[:1]]
+                and version_key(r["tag_name"])[:1] > version_key(pinned)[:1]
+                and version_key(r["tag_name"]) > version_key(next_reviewed)]
     if not newer and not nextyear:
         return None
     lines = []
@@ -111,7 +113,8 @@ def report_photonvision():
     return {
         "key": "pv:" + ",".join(r["tag_name"] for r in newer + nextyear),
         "title": "Upstream: PhotonVision releases",
-        "body": "\n".join(lines) + "\n\nTo take a release: regenerate patch 00 (the upstream merge) and rebuild; the 4143 fork may need the same merge.",
+        "body": "\n".join(lines) + "\n\nTo take a release: regenerate patch 00 (the upstream merge) and rebuild; the 4143 fork may need the same merge."
+                + (f" Once next season's are reviewed, set `PV_NEXT_REVIEWED={nextyear[0]['tag_name']}` in `scripts/ci/upstream-pins.env`." if nextyear else ""),
     }
 
 
@@ -154,9 +157,11 @@ def report_aos():
 
 def report_allwpilib():
     pinned = pin("scripts/jetson/04-build-allwpilib.sh", r"^TAG=\$\{1:-(v[\d.]+)\}")
+    reviewed = pin("scripts/ci/upstream-pins.env", r"^ALLWPILIB_REVIEWED=(v[\d.]+)")
+    seen = max(pinned, reviewed, key=version_key)
     tags = [t["name"] for t in api("repos/wpilibsuite/allwpilib/tags?per_page=100")]
     newer = sorted({t for t in tags if t.startswith(pinned[:6]) and re.fullmatch(r"v[\d.]+", t)
-                    and version_key(t) > version_key(pinned)}, key=version_key)
+                    and version_key(t) > version_key(seen)}, key=version_key)
     if not newer:
         return None
     return {
@@ -164,7 +169,8 @@ def report_allwpilib():
         "title": "Upstream: allwpilib (the detector's runtime libraries)",
         "body": f"We build `{pinned}` (`scripts/jetson/04-build-allwpilib.sh`). Newer tags this season: "
                 + ", ".join(f"`{t}`" for t in newer)
-                + "\n\nThe detector only uses wpiutil, wpimath and apriltag; a point release rarely matters. PhotonVision itself bundles its own WPILib.",
+                + "\n\nThe detector only uses wpiutil, wpimath and apriltag; a point release rarely matters. PhotonVision itself bundles its own WPILib."
+                  f" Once reviewed, set `ALLWPILIB_REVIEWED={newer[-1]}` in `scripts/ci/upstream-pins.env`.",
     }
 
 
