@@ -226,9 +226,9 @@ double meters = PhotonUtils.calculateDistanceToTargetMeters(
   <h3>Sanity filters every team needs</h3>
   <div class="prose"><p>A bad vision pose can teleport the robot's estimate across the field in one frame. Three cheap checks catch nearly all of them before they reach the pose estimator:</p></div>
   <div class="gates reveal">
-    <div class="card"><h4>On the field, on the floor</h4><p>Reject a pose outside the field (16.52 × 8.04 m, plus a small margin), or more than about 25 cm above or below the floor. A robot can't be in the stands or flying.</p></div>
-    <div class="card"><h4>No ambiguous single tags</h4><p>With only one tag, reject it if <code>getPoseAmbiguity()</code> is above about 0.2. That's the flip from <a href="#pose">chapter 12</a>. Multi-tag answers don't flip.</p></div>
-    <div class="card"><h4>Trust falls with distance</h4><p>Scale the <span class="term" data-term="standard deviation">standard deviations</span> up with distance², down with more tags, and don't trust a single tag's heading at all. The starting rule: 0.01 × distance² ÷ tags² meters.</p></div>
+    <div class="card"><h4>On the field, on the floor</h4><p>Reject a pose outside the field (16.52 × 8.04 m, plus a small margin), or more than about 30 cm above or below the floor. A robot can't be in the stands or flying.</p></div>
+    <div class="card"><h4>No ambiguous single tags</h4><p>With only one tag, reject it if <code>getPoseAmbiguity()</code> is above about 0.3 (PhotonVision's docs say 0.2; SpectrumVision uses 0.3 and then weighs ambiguity into the trust). That's the flip from <a href="#pose">chapter 12</a>. Multi-tag answers don't flip.</p></div>
+    <div class="card"><h4>Trust falls with distance</h4><p>Scale the <span class="term" data-term="standard deviation">standard deviations</span> up with distance², down with more tags, and don't trust a single tag's heading at all. The starting rule, SpectrumVision's default: 0.02 × distance² ÷ tags meters, never under 0.02 m. (6328's older rule of thumb, in <a href="#pose">chapter 12</a>, divides by tags² instead.)</p></div>
   </div>
   <p class="prose full">These numbers are starting points, not tuned values. PhotonVision computes ambiguity differently from Limelight, so thresholds carried over from old Limelight code need retesting (<code>docs/LIMELIGHT-COMPARISON.md</code>). Rewind recordings replayed through the robot code are the way to tune them.</p>
 
@@ -294,17 +294,17 @@ double meters = PhotonUtils.calculateDistanceToTargetMeters(
     // 1. On the field, on the floor
     if (pose.getX() &lt; -0.5 || pose.getX() &gt; LAYOUT.getFieldLength() + 0.5
         || pose.getY() &lt; -0.5 || pose.getY() &gt; LAYOUT.getFieldWidth() + 0.5
-        || Math.abs(pose.getZ()) &gt; 0.25) return;
+        || Math.abs(pose.getZ()) &gt; 0.3) return;
 
     // 2. A single tag must not be ambiguous
-    if (tags == 1 &amp;&amp; est.targetsUsed.get(0).getPoseAmbiguity() &gt; 0.2) return;
+    if (tags == 1 &amp;&amp; est.targetsUsed.get(0).getPoseAmbiguity() &gt; 0.3) return;
 
     // 3. Trust falls with distance, rises with more tags
     double dist = est.targetsUsed.stream()
         .mapToDouble(t -&gt; t.getBestCameraToTarget().getTranslation().getNorm())
         .average().orElse(10);
-    double xy = Math.max(0.02, 0.01 * dist * dist / (tags * tags));
-    double heading = tags &gt; 1 ? xy * 2 : 1e6;   // one tag: ignore its heading
+    double xy = Math.max(0.02, 0.02 * dist * dist / tags);
+    double heading = tags &gt; 1 ? Math.max(0.026, 0.06 * dist * dist / tags) : 1e6;   // one tag: ignore its heading
 
     sink.accept(pose.toPose2d(), est.timestampSeconds, VecBuilder.fill(xy, xy, heading));
   }
@@ -313,7 +313,7 @@ double meters = PhotonUtils.calculateDistanceToTargetMeters(
 
   <div class="callout pitfall">
     <h5>Check the clock once</h5>
-    <p><code>est.timestampSeconds</code> is the capture time on the robot's clock, courtesy of time sync. WPILib 2027's pose estimator expects the clock of <code>Timer.getMonotonicTimestamp()</code>. On the first day with the robot, log <code>Timer.getMonotonicTimestamp() - result.getTimestampSeconds()</code>: it should be a small positive number, the latency (about 0.01 to 0.03 s). If it's huge or negative, the clocks don't match and every vision measurement lands at the wrong moment.</p>
+    <p><code>est.timestampSeconds</code> is the capture time on the robot's clock, courtesy of time sync. WPILib 2027's pose estimator expects the clock of <code>Timer.getMonotonicTimestamp()</code>. <code>Timer.getTimestamp()</code>, which SpectrumVision and its examples use, returns that same clock unless robot code changes its time base. On the first day with the robot, log <code>Timer.getMonotonicTimestamp() - result.getTimestampSeconds()</code>: it should be a small positive number, the latency (about 0.01 to 0.03 s). If it's huge or negative, the clocks don't match and every vision measurement lands at the wrong moment.</p>
   </div>
 
   <div class="full">

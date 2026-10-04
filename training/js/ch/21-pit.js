@@ -381,7 +381,7 @@ Site.chapter('pit', (root) => {
         'Only one camera wrong, and another still has good settings? <b>Copy settings from…</b> in the pipeline menu (☰) copies them over.',
         'Next time, duplicate the pipeline (☰) before experimenting, and try things on the copy.',
       ],
-      confirm: 'PhotonVision is back (about 10 s) with every camera on its pipeline, and the values you expect.',
+      confirm: 'PhotonVision is back (cameras in about 20 s) with every camera on its pipeline, and the values you expect.',
       why: ['#camsetup', 'Chapter 20: Setting up a camera'],
       more: 'The settings from any earlier match are also in that match\'s robot log (<code>/photonvision/&lt;camera&gt;/settingsJson</code>) and in any Rewind recording\'s <code>session.json</code>.',
     },

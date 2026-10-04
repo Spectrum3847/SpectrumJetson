@@ -303,7 +303,7 @@ Pose3d robotPose = camPose.transformBy(robotToCamera.inverse());</div>
         e.timestampSeconds, VecBuilder.fill(xy, xy, theta));
   });
 }</div>
-      <p>Three details matter. <b>Every frame:</b> <code>getAllUnreadResults()</code> returns about 2 frames per camera per 20 ms loop at 90 fps, so none are dropped. <b>The timestamp</b> is when the frame was captured, not when it arrived, so the estimator can apply it to the right moment in the past (chapter 14). <b>Gates:</b> our off-season robot code already rejects bad poses and uses std-dev tiers; those move over, retuned, because PhotonVision computes ambiguity differently from Limelight. SpectrumVision (<a href="#photonlib">chapter 18</a>) has 14 named gates, and counts every rejection by its reason, so tuning starts from evidence.</p>
+      <p>Three details matter. <b>Every frame:</b> <code>getAllUnreadResults()</code> returns 2–3 frames per camera per 20 ms loop at 120 fps, so none are dropped. <b>The timestamp</b> is when the frame was captured, not when it arrived, so the estimator can apply it to the right moment in the past (chapter 14). <b>Gates:</b> our off-season robot code already rejects bad poses and uses std-dev tiers; those move over, retuned, because PhotonVision computes ambiguity differently from Limelight. SpectrumVision (<a href="#photonlib">chapter 18</a>) has 14 named gates, and counts every rejection by its reason, so tuning starts from evidence.</p>
     </div>
   </details>
   <div class="deeper full">
