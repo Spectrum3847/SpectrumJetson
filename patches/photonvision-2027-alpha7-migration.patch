@@ -16615,7 +16615,7 @@ index 790883cc..af30578e 100644
      VisionModuleManager() {}
  
 diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
-index fc86012d..25975afb 100644
+index fc86012d..39f1a11e 100644
 --- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
 +++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
 @@ -48,6 +48,10 @@ import org.wpilib.util.Alert.Level;
@@ -16675,7 +16675,7 @@ index fc86012d..25975afb 100644
                  }
              }
              return;
-@@ -248,89 +258,148 @@ public class VisionRunner implements AutoCloseable {
+@@ -248,89 +258,152 @@ public class VisionRunner implements AutoCloseable {
              }
          }
  
@@ -16860,6 +16860,10 @@ index fc86012d..25975afb 100644
 +            } catch (VirtualMachineError e) {
 +                throw e;
 +            } catch (Throwable t) {
++                // A frame provider can wrap the stop interrupt (FileFrameProvider does).
++                for (Throwable c = t; c != null; c = c.getCause()) {
++                    if (c instanceof InterruptedException) return;
++                }
 +                long now = System.nanoTime() / 1_000_000;
 +                if (now - lastLoopErrorLogMs > 5000) {
 +                    lastLoopErrorLogMs = now;
