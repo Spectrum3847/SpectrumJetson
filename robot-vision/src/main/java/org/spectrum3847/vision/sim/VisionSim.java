@@ -29,10 +29,10 @@ public class VisionSim {
         this.sim = sim;
     }
 
-    /** Properties like a Thriftiest Cam at 1280x800 (~70° horizontal FOV), 100 fps, ~15 ms latency. */
+    /** Properties like a Thriftiest Cam at 1280x800 (~91° diagonal, ~82° horizontal FOV, from our bench calibration), 100 fps, ~15 ms latency. */
     public static SimCameraProperties thriftiestCam() {
         return new SimCameraProperties()
-                .setCalibration(1280, 800, Rotation2d.fromDegrees(80))
+                .setCalibration(1280, 800, Rotation2d.fromDegrees(91))
                 .setCalibError(0.35, 0.10)
                 .setFPS(100)
                 .setAvgLatencyMs(15)

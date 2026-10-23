@@ -44,10 +44,15 @@ public class SyntheticCamera {
     private final TagQualityEstimator lens;
     private long sequence = 0;
 
-    /** A 1280x800 camera like a Thriftiest Cam: ~70° horizontal field of view, a mild lens. */
+    /**
+     * A 1280x800 Thriftiest Cam, using our bench calibration of TopLeft: ~82° horizontal, ~57° vertical,
+     * ~91° diagonal field of view.
+     */
     public static SyntheticCamera typical(String name, long seed) {
         return new SyntheticCamera(
-                name, 910, 910, 640, 400, 1280, 800, new double[] {0.05, -0.08, 0.001, -0.001, 0.02, 0, 0, 0}, seed);
+                name, 737.84, 737.67, 650.49, 362.44, 1280, 800,
+                new double[] {0.124195, 0.0503841, 0.000782376, -5.20496e-05, -0.0127028, 0.0343885, 0.109998, 0.0847799},
+                seed);
     }
 
     public SyntheticCamera(
