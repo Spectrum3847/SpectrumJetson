@@ -1,4 +1,18 @@
 // Shared by both builds; each sets its WPILib/PhotonLib versions and Java version.
+def windows = System.getProperty('os.name').startsWith('Windows')
+// The simulation tests' native libraries are this machine's: Windows or Linux, x86-64.
+ext.windows = windows
+ext.simPlatform = windows ? 'windowsx86-64' : 'linuxx86-64'
+// The local WPILib installs' Maven repos for a year, as GradleRIO uses them: ~/wpilib/<year>, and on
+// Windows C:/Users/Public/wpilib/<year>. The 2027 alphas install to folders like 2027_alpha5.
+ext.wpilibMavens = { String year ->
+    def roots = [new File(System.getProperty('user.home'), 'wpilib')]
+    if (windows) roots << new File(System.getenv('PUBLIC') ?: 'C:/Users/Public', 'wpilib')
+    roots.findAll { it.isDirectory() }
+        .collectMany { root -> root.listFiles().findAll { it.name.startsWith(year) }.sort { it.name } }
+        .collect { new File(it, 'maven') }
+        .findAll { it.isDirectory() }
+}
 subprojects {
     apply plugin: 'java-library'
     group = 'org.spectrum3847'

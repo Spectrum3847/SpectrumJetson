@@ -3,12 +3,16 @@
 #   ./build.sh            test both, then build/drop/*.zip in each build
 #   ./build.sh wpilib2026 (or wpilib2027): just one
 # Needs JDK 17 and JDK 25. It looks for them where the WPILib installers put them
-# (~/wpilib/2026/jdk, ~/wpilib/2027/jdk), and in JAVA17_HOME / JAVA25_HOME.
+# (~/wpilib/2026/jdk, ~/wpilib/2027/jdk; on Windows, in Git Bash, C:/Users/Public/wpilib/2026/jdk
+# and C:/Users/Public/wpilib/2027*/jdk), and in JAVA17_HOME / JAVA25_HOME.
 set -euo pipefail
 cd "$(dirname "$0")"
 paths=()
-for j in "${JAVA17_HOME:-}" "${JAVA25_HOME:-}" "$HOME/wpilib/2026/jdk" "$HOME/wpilib/2027/jdk" "$HOME/build/tools/jdk17"; do
-  [[ -n $j && -x $j/bin/java ]] && paths+=("$j")
+public=${PUBLIC:+$(cygpath -u "$PUBLIC" 2>/dev/null || echo "$PUBLIC")}
+for j in "${JAVA17_HOME:-}" "${JAVA25_HOME:-}" "$HOME/wpilib/2026/jdk" "$HOME/wpilib/2027/jdk" "$HOME/build/tools/jdk17" \
+         ${public:+"$public/wpilib/2026/jdk" "$public"/wpilib/2027*/jdk}; do
+  # Gradle on Windows needs C:/... paths, not Git Bash's /c/...
+  [[ -n $j && ( -x $j/bin/java || -x $j/bin/java.exe ) ]] && paths+=("$(cygpath -m "$j" 2>/dev/null || echo "$j")")
 done
 [[ ${#paths[@]} -gt 0 ]] || { echo "No JDK found: install WPILib 2026 and/or 2027, or set JAVA17_HOME / JAVA25_HOME" >&2; exit 1; }
 # AdvantageKit's offline Maven repos (for compiling the AdvantageKit example), from GitHub.
@@ -22,7 +26,7 @@ for v in v26.0.2 v27.0.0-alpha-4; do
 done
 # PhotonLib's and WPILib 2027's desktop libraries need a newer C++ runtime than Ubuntu 22.04 has:
 # the simulation tests get one in their own library folders (nothing system-wide changes).
-tools/ubuntu2204-sim/get-libstdcxx.sh || echo "WARNING: couldn't get a newer libstdc++; the simulation tests will fail on this system"
+[[ $(uname -s) != Linux ]] || tools/ubuntu2204-sim/get-libstdcxx.sh || echo "WARNING: couldn't get a newer libstdc++; the simulation tests will fail on this system"
 # Gradle itself runs on the first JDK found (17 or newer).
 export JAVA_HOME=${JAVA_HOME:-${paths[0]}}
 csv=$(IFS=,; echo "${paths[*]}")

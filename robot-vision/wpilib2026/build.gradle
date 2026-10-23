@@ -5,6 +5,9 @@ def photon = 'v2026.3.4'
 java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }
 
 repositories {
+    // The local WPILib install first: it has everything but PhotonLib, and frcmaven.wpi.edu isn't
+    // reachable from every network.
+    rootProject.wpilibMavens('2026').each { dir -> maven { url = uri(dir) } }
     maven { url = 'https://frcmaven.wpi.edu/artifactory/release' }
     maven { url = 'https://maven.photonvision.org/releases' }
     maven { url = 'https://maven.ctr-electronics.com/release/' }                      // examples only
@@ -51,12 +54,13 @@ dependencies {
     simTestImplementation platform('org.junit:junit-bom:5.10.1')
     simTestImplementation 'org.junit.jupiter:junit-jupiter'
     simTestRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-    // This machine's native libraries for WPILib's desktop simulation and PhotonLib (linuxx86-64).
+    // This machine's native libraries for WPILib's desktop simulation and PhotonLib.
+    def nativePlatform = rootProject.simPlatform
     ['wpiutil', 'wpimath', 'wpinet', 'ntcore', 'hal', 'cscore', 'apriltag'].each {
-        simNatives "edu.wpi.first.${it}:${it}-cpp:$wpilib:linuxx86-64@zip"
+        simNatives "edu.wpi.first.${it}:${it}-cpp:$wpilib:$nativePlatform@zip"
     }
-    simNatives 'edu.wpi.first.thirdparty.frc2025.opencv:opencv-cpp:4.10.0-3:linuxx86-64@zip'
-    simNatives "org.photonvision:photontargeting-cpp:$photon:linuxx86-64@zip"
+    simNatives "edu.wpi.first.thirdparty.frc2025.opencv:opencv-cpp:4.10.0-3:$nativePlatform@zip"
+    simNatives "org.photonvision:photontargeting-cpp:$photon:$nativePlatform@zip"
     examplesImplementation sourceSets.main.output
     examplesImplementation 'com.ctre.phoenix6:wpiapi-java:26.3.0'           // Phoenix6-frc2026-latest.json
     examplesImplementation 'org.littletonrobotics.akit:akit-java:26.0.2'     // AdvantageKit.json (2026)
@@ -69,7 +73,7 @@ tasks.named('test') { dependsOn 'compileExamplesJava' }
 
 def natives = layout.buildDirectory.dir('sim-natives')
 def extractNatives = tasks.register('extractSimNatives', Sync) {
-    from(configurations.simNatives.collect { zipTree(it) }) { include '**/shared/*.so*'; eachFile { path = name } }
+    from(configurations.simNatives.collect { zipTree(it) }) { include '**/shared/*.so*', '**/shared/*.dll'; eachFile { path = name } }
     // tools/ubuntu2204-sim/get-libstdcxx.sh (run by build.sh) puts a newer libstdc++ here when this
     // system's is too old for PhotonLib's native library (Ubuntu 22.04).
     from("${System.getProperty('user.home')}/.cache/spectrum-vision-deps/libstdcxx/x/usr/lib/x86_64-linux-gnu") {
@@ -85,6 +89,8 @@ tasks.register('simTest', Test) {
     dependsOn extractNatives
     systemProperty 'java.library.path', natives.get().asFile.path
     environment 'LD_LIBRARY_PATH', natives.get().asFile.path
+    // Windows finds a DLL's own dependencies on PATH.
+    if (rootProject.windows) environment 'PATH', natives.get().asFile.path + File.pathSeparator + System.getenv('PATH')
     testLogging { showStandardStreams = true }
 }
 

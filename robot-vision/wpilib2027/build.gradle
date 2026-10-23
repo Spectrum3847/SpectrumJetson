@@ -1,6 +1,6 @@
 // The SystemCore build: WPILib 2027 alpha-6, PhotonLib 2027 alpha-2. Sources: generated from
 // src/main by tools/port2027.py, + src/compat2027. WPILib 2027 comes from the local WPILib
-// install (~/wpilib/2027/maven), as GradleRIO 2027 uses it.
+// install (~/wpilib/2027/maven, or C:/Users/Public/wpilib/2027* on Windows), as GradleRIO 2027 uses it.
 def wpilib = '2027.0.0-alpha-6'
 def photon = 'v2027.0.0-alpha-2'
 def gen = layout.buildDirectory.dir('generated/port2027')
@@ -8,7 +8,7 @@ def gen = layout.buildDirectory.dir('generated/port2027')
 java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
 
 repositories {
-    maven { url = uri("${System.getProperty('user.home')}/wpilib/2027/maven") }
+    rootProject.wpilibMavens('2027').each { dir -> maven { url = uri(dir) } }
     maven { url = 'https://maven.photonvision.org/releases' }
     maven { url = 'https://maven.ctr-electronics.com/release/' }                      // examples only
     // AdvantageKit (examples only), from its GitHub release's offline Maven repo, which build.sh
@@ -65,11 +65,12 @@ dependencies {
     simTestImplementation platform('org.junit:junit-bom:5.10.1')
     simTestImplementation 'org.junit.jupiter:junit-jupiter'
     simTestRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    def nativePlatform = rootProject.simPlatform
     ['wpiutil', 'wpimath', 'wpinet', 'ntcore', 'hal', 'cscore', 'apriltag', 'datalog'].each {
-        simNatives "org.wpilib.${it}:${it}-cpp:$wpilib:linuxx86-64@zip"
+        simNatives "org.wpilib.${it}:${it}-cpp:$wpilib:$nativePlatform@zip"
     }
-    simNatives 'org.wpilib.thirdparty.opencv:opencv-cpp:2027-4.13.0-3:linuxx86-64@zip'
-    simNatives "org.photonvision:photontargeting-cpp:$photon:linuxx86-64@zip"
+    simNatives "org.wpilib.thirdparty.opencv:opencv-cpp:2027-4.13.0-3:$nativePlatform@zip"
+    simNatives "org.photonvision:photontargeting-cpp:$photon:$nativePlatform@zip"
     examplesImplementation sourceSets.main.output
     // The versions 2026-FM-SystemCore uses with WPILib 2027 alpha-6:
     examplesImplementation 'com.ctre.phoenix6:wpiapi-java:26.50.0-alpha-1'
@@ -93,7 +94,7 @@ tasks.register('sourceDrop', Zip) {
 // (tools/ubuntu2204-sim/get-libstdcxx.sh). On a newer system the patcher changes nothing.
 def natives = layout.buildDirectory.dir('sim-natives')
 def extractNatives = tasks.register('extractSimNatives', Sync) {
-    from(configurations.simNatives.collect { zipTree(it) }) { include '**/shared/*.so*'; eachFile { path = name } }
+    from(configurations.simNatives.collect { zipTree(it) }) { include '**/shared/*.so*', '**/shared/*.dll'; eachFile { path = name } }
     from("${System.getProperty('user.home')}/.cache/spectrum-vision-deps/libstdcxx/x/usr/lib/x86_64-linux-gnu") {
         include 'libstdc++.so.6*'
     }
@@ -102,6 +103,7 @@ def extractNatives = tasks.register('extractSimNatives', Sync) {
 }
 def patchNatives = tasks.register('patchSimNatives', Exec) {
     dependsOn extractNatives
+    onlyIf { !rootProject.windows }
     doFirst {
         def lib = fileTree(natives) { include '*.so*'; exclude 'libstdc++*' }.files*.path
         commandLine(['python3', "${rootDir}/tools/ubuntu2204-sim/glibc238_compat.py"] + lib)
@@ -117,6 +119,7 @@ tasks.register('simTest', Test) {
     dependsOn patchNatives
     systemProperty 'java.library.path', natives.get().asFile.path
     environment 'LD_LIBRARY_PATH', natives.get().asFile.path
+    if (rootProject.windows) environment 'PATH', natives.get().asFile.path + File.pathSeparator + System.getenv('PATH')
     jvmArgs jdk25Quiet
     testLogging { showStandardStreams = true }
 }

@@ -310,7 +310,9 @@ A laptop that also flashes the Jetson should stay on 22.04: NVIDIA's flashing an
 robot-vision/build.sh
 ```
 
-This tests both builds, compiles the examples, runs both simulation tests, and makes the drop-in zips. It needs JDK 17 and JDK 25, which the WPILib installers put in `~/wpilib/2026/jdk` and `~/wpilib/2027/jdk` (or set `JAVA17_HOME` / `JAVA25_HOME`). The 2027 build uses the local WPILib 2027 install's Maven repo (`~/wpilib/2027/maven`).
+This tests both builds, compiles the examples, runs both simulation tests, and makes the drop-in zips. It needs JDK 17 and JDK 25, which the WPILib installers put in `~/wpilib/2026/jdk` and `~/wpilib/2027/jdk` (or set `JAVA17_HOME` / `JAVA25_HOME`). Both builds use the local WPILib installs' Maven repos (`~/wpilib/<year>/maven`), and the 2027 build needs its install.
+
+**On Windows:** run `build.sh` from Git Bash. It finds the WPILib installs in `C:\Users\Public\wpilib` (the 2027 alphas install to folders like `2027_alpha5`), and the simulation tests use the Windows desktop libraries from those installs.
 
 **Where dependencies come from:**
 - **CTRE Phoenix 6:** from CTRE's Maven repository.
