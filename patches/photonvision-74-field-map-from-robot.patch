@@ -1,0 +1,1136 @@
+diff --git a/photon-core/src/main/java/org/photonvision/common/configuration/PhotonConfiguration.java b/photon-core/src/main/java/org/photonvision/common/configuration/PhotonConfiguration.java
+index 64bd7544..45fa2bbf 100644
+--- a/photon-core/src/main/java/org/photonvision/common/configuration/PhotonConfiguration.java
++++ b/photon-core/src/main/java/org/photonvision/common/configuration/PhotonConfiguration.java
+@@ -27,7 +27,8 @@ public class PhotonConfiguration {
+     private final HardwareConfig hardwareConfig;
+     private final HardwareSettings hardwareSettings;
+     private NetworkConfig networkConfig;
+-    private AprilTagFieldLayout atfl;
++    // SpectrumJetson (photonvision-74): volatile, as the robot's map is swapped in off the camera threads.
++    private volatile AprilTagFieldLayout atfl;
+     private NeuralNetworkModelsSettings neuralNetworkProperties;
+     private HashMap<String, CameraConfiguration> cameraConfigurations;
+ 
+diff --git a/photon-core/src/main/java/org/photonvision/fieldmap/FieldMapHash.java b/photon-core/src/main/java/org/photonvision/fieldmap/FieldMapHash.java
+new file mode 100644
+index 00000000..e1a7aa91
+--- /dev/null
++++ b/photon-core/src/main/java/org/photonvision/fieldmap/FieldMapHash.java
+@@ -0,0 +1,86 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.fieldmap;
++
++import edu.wpi.first.apriltag.AprilTag;
++import edu.wpi.first.apriltag.AprilTagFieldLayout;
++import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
++import java.security.NoSuchAlgorithmException;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.HexFormat;
++import java.util.Locale;
++
++/**
++ * SpectrumJetson (photonvision-74): the field-map hash robot code and the Jetson both compute, so
++ * each can tell the other which map it means. The robot side computes the same thing; change it
++ * only together with robot code.
++ *
++ * <p>Tags sorted by ID, one line each, {@code id,x,y,z,qw,qx,qy,qz} (meters, the tag pose's
++ * rotation quaternion), then {@code field,<length>,<width>}; every number {@code %.4f} in
++ * {@link Locale#ROOT}; lines joined with "\n", no trailing newline; SHA-256 of the UTF-8 bytes,
++ * lowercase hex, first 16 characters.
++ *
++ * <p>Java's {@code %.4f} rounds the shortest decimal form of the double half-up, and keeps the
++ * sign of a value that rounds to zero ("-0.0000"). Python's {@code f"{v:.4f}"} rounds the exact
++ * binary value half-even, so it disagrees on ties: the 2026 field's 0.55245 m tag height is
++ * "0.5525" here and "0.5524" in Python. A non-Java implementation has to round like Java.
++ */
++public final class FieldMapHash {
++    private FieldMapHash() {}
++
++    /** The text the hash is taken of. */
++    public static String canonical(AprilTagFieldLayout layout) {
++        var tags = new ArrayList<AprilTag>(layout.getTags());
++        tags.sort(Comparator.comparingInt(t -> t.ID));
++        var sb = new StringBuilder();
++        for (AprilTag tag : tags) {
++            var p = tag.pose;
++            var q = p.getRotation().getQuaternion();
++            sb.append(tag.ID);
++            for (double v : new double[] {p.getX(), p.getY(), p.getZ(), q.getW(), q.getX(), q.getY(), q.getZ()}) {
++                sb.append(',').append(format(v));
++            }
++            sb.append('\n');
++        }
++        sb.append("field,")
++                .append(format(layout.getFieldLength()))
++                .append(',')
++                .append(format(layout.getFieldWidth()));
++        return sb.toString();
++    }
++
++    public static String hash(AprilTagFieldLayout layout) {
++        return hashText(canonical(layout));
++    }
++
++    static String format(double v) {
++        return String.format(Locale.ROOT, "%.4f", v);
++    }
++
++    static String hashText(String canonical) {
++        try {
++            var md = MessageDigest.getInstance("SHA-256");
++            var digest = md.digest(canonical.getBytes(StandardCharsets.UTF_8));
++            return HexFormat.of().formatHex(digest).substring(0, 16);
++        } catch (NoSuchAlgorithmException e) {
++            throw new IllegalStateException(e);
++        }
++    }
++}
+diff --git a/photon-core/src/main/java/org/photonvision/fieldmap/FieldMapNT.java b/photon-core/src/main/java/org/photonvision/fieldmap/FieldMapNT.java
+new file mode 100644
+index 00000000..f97401b7
+--- /dev/null
++++ b/photon-core/src/main/java/org/photonvision/fieldmap/FieldMapNT.java
+@@ -0,0 +1,149 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.fieldmap;
++
++import edu.wpi.first.networktables.DoublePublisher;
++import edu.wpi.first.networktables.NetworkTable;
++import edu.wpi.first.networktables.NetworkTableInstance;
++import edu.wpi.first.networktables.StringPublisher;
++import edu.wpi.first.networktables.StringSubscriber;
++import java.nio.file.Path;
++import java.util.Objects;
++import org.photonvision.common.configuration.ConfigManager;
++import org.photonvision.common.configuration.PathManager;
++import org.photonvision.common.dataflow.DataChangeService;
++import org.photonvision.common.dataflow.events.OutgoingUIEvent;
++import org.photonvision.common.dataflow.websocket.UIPhotonConfiguration;
++import org.photonvision.common.logging.LogGroup;
++import org.photonvision.common.logging.Logger;
++import org.photonvision.common.util.TimedTaskManager;
++
++/**
++ * SpectrumJetson (photonvision-74): {@link FieldMapSync} on NetworkTables.
++ *
++ * <ul>
++ *   <li>Reads the robot's map: {@code /SpectrumVision/FieldMap/Json} (WPILib AprilTagFieldLayout
++ *       JSON), {@code Hash} and {@code Name} (strings).
++ *   <li>Reports the map in use under {@code /photonvision/jetson/FieldMap/}: {@code Hash} and
++ *       {@code Name} (strings), {@code LoadedAt} (double, unix seconds by the Jetson's clock, which
++ *       is only right once the robot has set it), and {@code Error} ("" when the robot's map is in
++ *       use or none was sent).
++ * </ul>
++ *
++ * Polled every 200 ms on PhotonVision's timer thread, never a camera's. The robot publishes the
++ * three topics one after another, so they're checked as a set once they've stopped changing.
++ */
++public final class FieldMapNT {
++    public static final String ROBOT_TABLE = "/SpectrumVision/FieldMap";
++    public static final String JETSON_TABLE = "/photonvision/jetson/FieldMap";
++
++    private static final Logger logger = new Logger(FieldMapNT.class, LogGroup.General);
++    private static FieldMapNT instance;
++
++    private final FieldMapSync sync;
++    private final StringSubscriber jsonSub;
++    private final StringSubscriber hashSub;
++    private final StringSubscriber nameSub;
++    private final StringPublisher hashPub;
++    private final StringPublisher namePub;
++    private final DoublePublisher loadedAtPub;
++    private final StringPublisher errorPub;
++    private String lastJson = "";
++    private String lastHash = "";
++    private String lastName = "";
++    private boolean pending = false;
++
++    /** Where the robot's map is kept between boots, with the other Spectrum settings. */
++    public static Path savedFile() {
++        return PathManager.getInstance().getRootFolder().resolve("spectrum").resolve("field-map.json");
++    }
++
++    /**
++     * Loads the saved map, then follows the robot's. Call after the configuration is loaded and
++     * before the cameras start, so they start on the saved map.
++     */
++    public static synchronized void start() {
++        if (instance != null) return;
++        var sync =
++                new FieldMapSync(
++                        savedFile(),
++                        () -> ConfigManager.getInstance().getConfig().getApriltagFieldLayout(),
++                        layout -> {
++                            // As upstream's /photonvision/apriltag_field_layout does: PhotonVision's
++                            // own setting, saved to its database by the settings thread, so the
++                            // page, exports and snapshots show the map in use.
++                            ConfigManager.getInstance().getConfig().setApriltagFieldLayout(layout);
++                            ConfigManager.getInstance().requestSave();
++                            // Only refreshes the web page's field view: a failure here must not
++                            // look like a failed load.
++                            try {
++                                DataChangeService.getInstance()
++                                        .publishEvent(
++                                                new OutgoingUIEvent<>(
++                                                        "fullsettings",
++                                                        UIPhotonConfiguration.programStateToUi(
++                                                                ConfigManager.getInstance().getConfig())));
++                            } catch (RuntimeException | LinkageError e) {
++                                logger.warn("Field map loaded, but the web page wasn't told: " + e);
++                            }
++                        },
++                        () -> System.currentTimeMillis() / 1000.0);
++        sync.loadSaved();
++        instance = new FieldMapNT(NetworkTableInstance.getDefault(), sync);
++        TimedTaskManager.getInstance().addTask("FieldMap", instance::poll, 200);
++    }
++
++    FieldMapNT(NetworkTableInstance nt, FieldMapSync sync) {
++        this.sync = sync;
++        NetworkTable robot = nt.getTable(ROBOT_TABLE);
++        jsonSub = robot.getStringTopic("Json").subscribe("");
++        hashSub = robot.getStringTopic("Hash").subscribe("");
++        nameSub = robot.getStringTopic("Name").subscribe("");
++        NetworkTable jetson = nt.getTable(JETSON_TABLE);
++        hashPub = jetson.getStringTopic("Hash").publish();
++        namePub = jetson.getStringTopic("Name").publish();
++        loadedAtPub = jetson.getDoubleTopic("LoadedAt").publish();
++        errorPub = jetson.getStringTopic("Error").publish();
++        publish();
++    }
++
++    synchronized void poll() {
++        String json = jsonSub.get();
++        String hash = hashSub.get();
++        String name = nameSub.get();
++        if (!Objects.equals(json, lastJson) || !Objects.equals(hash, lastHash) || !Objects.equals(name, lastName)) {
++            lastJson = json;
++            lastHash = hash;
++            lastName = name;
++            pending = true;
++        } else if (pending) {
++            // Unchanged for a whole poll: the robot has finished publishing, so a JSON from one
++            // publish and a hash from the next aren't reported as a mismatch.
++            pending = false;
++            sync.offer(json, hash, name);
++        }
++        publish();
++    }
++
++    private void publish() {
++        hashPub.set(sync.currentHash());
++        namePub.set(sync.name());
++        loadedAtPub.set(sync.loadedAt());
++        errorPub.set(sync.error());
++    }
++}
+diff --git a/photon-core/src/main/java/org/photonvision/fieldmap/FieldMapSync.java b/photon-core/src/main/java/org/photonvision/fieldmap/FieldMapSync.java
+new file mode 100644
+index 00000000..bcd4f459
+--- /dev/null
++++ b/photon-core/src/main/java/org/photonvision/fieldmap/FieldMapSync.java
+@@ -0,0 +1,309 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.fieldmap;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import com.fasterxml.jackson.databind.node.ObjectNode;
++import edu.wpi.first.apriltag.AprilTag;
++import edu.wpi.first.apriltag.AprilTagFieldLayout;
++import java.io.IOException;
++import java.nio.channels.FileChannel;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.StandardCopyOption;
++import java.nio.file.StandardOpenOption;
++import java.util.HashSet;
++import java.util.function.Consumer;
++import java.util.function.DoubleSupplier;
++import java.util.function.Supplier;
++import org.photonvision.common.logging.LogGroup;
++import org.photonvision.common.logging.Logger;
++import org.photonvision.common.util.file.JacksonUtils;
++
++/**
++ * SpectrumJetson (photonvision-74): the AprilTag field map comes from robot code. The robot
++ * publishes a map with its hash ({@link FieldMapHash}); this checks and loads it, keeps it on disk
++ * for the next boot, and reports the hash of the map actually in use, so the robot can tell
++ * whether the Jetson agrees with it. {@link FieldMapNT} connects it to NetworkTables.
++ *
++ * <p>A map is loaded only if its JSON is a sane field and hashes to the hash the robot sent with
++ * it. Otherwise the map in use stays, and {@link #error()} says why. Loading is a reference swap
++ * in PhotonVision's configuration; each pipeline reads the layout once per frame, so a change
++ * lands between frames and costs a camera nothing.
++ *
++ * <p>Not thread-safe on its own: {@link FieldMapNT} calls it from one thread.
++ */
++public final class FieldMapSync {
++    private static final Logger logger = new Logger(FieldMapSync.class, LogGroup.General);
++    private static final ObjectMapper mapper = new ObjectMapper();
++
++    /** Shown as the name of a map that didn't come from the robot (PhotonVision's own setting). */
++    public static final String LOCAL_NAME = "photonvision-settings";
++
++    // Sanity limits. An FRC field is about 16.5 x 8.1 m; a tag can sit just outside the carpet.
++    static final double MIN_FIELD_M = 1.0;
++    static final double MAX_FIELD_M = 30.0;
++    static final double TAG_MARGIN_M = 2.0;
++    static final double MAX_TAG_HEIGHT_M = 5.0;
++
++    private final Path file;
++    private final Supplier<AprilTagFieldLayout> current;
++    private final Consumer<AprilTagFieldLayout> apply;
++    private final DoubleSupplier unixSeconds;
++
++    private AprilTagFieldLayout seen;
++    private String seenHash = "";
++    private String name = LOCAL_NAME;
++    private double loadedAt = Double.NaN;
++    private String error = "";
++    private AprilTagFieldLayout ours;
++    private String savedHash = "";
++    private String savedName = "";
++
++    /**
++     * @param file where the robot's map is kept between boots
++     * @param current the layout PhotonVision is using now
++     * @param apply makes a layout the one PhotonVision uses
++     * @param unixSeconds wall-clock time, for {@link #loadedAt()}
++     */
++    public FieldMapSync(
++            Path file,
++            Supplier<AprilTagFieldLayout> current,
++            Consumer<AprilTagFieldLayout> apply,
++            DoubleSupplier unixSeconds) {
++        this.file = file;
++        this.current = current;
++        this.apply = apply;
++        this.unixSeconds = unixSeconds;
++    }
++
++    /** A checked map: the layout and its hash. */
++    record Checked(AprilTagFieldLayout layout, String hash) {}
++
++    /**
++     * At boot: loads the map the robot last sent, if one was saved and it still checks out.
++     *
++     * @return whether a saved map is now in use
++     */
++    public boolean loadSaved() {
++        if (!Files.exists(file)) return false;
++        try {
++            JsonNode saved = mapper.readTree(Files.readString(file, StandardCharsets.UTF_8));
++            String json = saved.path("json").asText("");
++            String hash = saved.path("hash").asText("");
++            String savedAs = saved.path("name").asText("");
++            Checked c = check(json);
++            if (!c.hash().equals(hash)) {
++                throw new IllegalArgumentException("its hash is " + c.hash() + ", saved as " + hash);
++            }
++            use(c, savedAs);
++            savedHash = hash;
++            savedName = savedAs;
++            logger.info("Field map: loaded the robot's saved map '" + savedAs + "' (" + hash + ")");
++            return true;
++        } catch (IOException | RuntimeException e) {
++            error = "Saved field map " + file + " unusable, kept PhotonVision's: " + e.getMessage();
++            logger.error(error);
++            return false;
++        }
++    }
++
++    /**
++     * A map from the robot. Loads it if it checks out and differs from the one in use, and saves it
++     * for the next boot. An empty JSON (the robot isn't publishing one) is ignored.
++     *
++     * @return whether the robot's map is now in use
++     */
++    public boolean offer(String json, String hash, String robotName) {
++        if (json == null || json.isBlank()) return false;
++        String expected = hash == null ? "" : hash.strip().toLowerCase(java.util.Locale.ROOT);
++        Checked c;
++        try {
++            c = check(json);
++        } catch (IOException | RuntimeException e) {
++            return refuse("Field map from the robot is invalid, kept the current map: " + e.getMessage());
++        }
++        if (!c.hash().equals(expected)) {
++            return refuse(
++                    "Field map from the robot hashes to "
++                            + c.hash()
++                            + " but the robot sent hash '"
++                            + expected
++                            + "'; kept the current map");
++        }
++        String newName = robotName == null || robotName.isBlank() ? "robot" : robotName.strip();
++        if (!c.hash().equals(currentHash())) {
++            use(c, newName);
++            logger.info("Field map: loaded the robot's map '" + newName + "' (" + c.hash() + ")");
++        } else {
++            // Already in use (saved from an earlier boot, or the same map from PhotonVision's own
++            // setting): nothing to reload.
++            ours = current.get();
++            name = newName;
++            if (Double.isNaN(loadedAt)) loadedAt = unixSeconds.getAsDouble();
++        }
++        error = "";
++        if (!c.hash().equals(savedHash) || !newName.equals(savedName) || !Files.exists(file)) {
++            try {
++                save(json, c.hash(), newName);
++                savedHash = c.hash();
++                savedName = newName;
++            } catch (IOException e) {
++                error = "Field map in use but not saved for the next boot: " + e.getMessage();
++                logger.error(error);
++            }
++        }
++        return true;
++    }
++
++    /** Hash of the map in use now, whoever set it. */
++    public String currentHash() {
++        refreshSeen();
++        return seenHash;
++    }
++
++    /** The robot's name for the map in use, or {@link #LOCAL_NAME}. */
++    public String name() {
++        refreshSeen();
++        return name;
++    }
++
++    /** When the map in use was loaded, unix seconds; NaN before any. */
++    public double loadedAt() {
++        refreshSeen();
++        return loadedAt;
++    }
++
++    /** Why the last map wasn't used, or "". */
++    public String error() {
++        return error;
++    }
++
++    /** Forgets the saved map, so PhotonVision's own layout is used at the next boot. */
++    public static void forgetSaved(Path file) {
++        try {
++            if (Files.deleteIfExists(file)) {
++                logger.info("Field map: forgot the robot's saved map; PhotonVision's own is used at the next boot");
++            }
++        } catch (IOException e) {
++            logger.error("Could not delete " + file, e);
++        }
++    }
++
++    // Notices a layout set some other way (the settings page, field calibration, upstream's
++    // /photonvision/apriltag_field_layout), so the hash reported is always the one in use.
++    private void refreshSeen() {
++        var cur = current.get();
++        if (cur == seen) return;
++        seen = cur;
++        seenHash = cur == null ? "" : FieldMapHash.hash(cur);
++        if (cur != ours) {
++            name = LOCAL_NAME;
++            loadedAt = unixSeconds.getAsDouble();
++        }
++    }
++
++    private void use(Checked c, String newName) {
++        apply.accept(c.layout());
++        ours = c.layout();
++        name = newName;
++        loadedAt = unixSeconds.getAsDouble();
++        refreshSeen();
++    }
++
++    private boolean refuse(String why) {
++        if (!why.equals(error)) logger.warn(why);
++        error = why;
++        return false;
++    }
++
++    /** Parses and sanity-checks a WPILib AprilTagFieldLayout JSON. */
++    static Checked check(String json) throws IOException {
++        JsonNode root = mapper.readTree(json);
++        JsonNode tags = root == null ? null : root.get("tags");
++        if (tags == null || !tags.isArray() || tags.isEmpty()) {
++            throw new IllegalArgumentException("no tags");
++        }
++        var ids = new HashSet<Integer>();
++        for (JsonNode t : tags) {
++            if (!ids.add(t.path("ID").asInt(-1))) {
++                throw new IllegalArgumentException("tag " + t.path("ID") + " listed twice");
++            }
++        }
++        AprilTagFieldLayout layout = JacksonUtils.deserialize(json, AprilTagFieldLayout.class);
++        if (layout == null) throw new IllegalArgumentException("not a field layout");
++        double length = layout.getFieldLength();
++        double width = layout.getFieldWidth();
++        if (!(length >= MIN_FIELD_M && length <= MAX_FIELD_M && width >= MIN_FIELD_M && width <= MAX_FIELD_M)) {
++            throw new IllegalArgumentException(String.format("field size %s x %s m", length, width));
++        }
++        if (layout.getTags().size() != tags.size()) {
++            throw new IllegalArgumentException("tags lost in parsing");
++        }
++        for (AprilTag t : layout.getTags()) {
++            var p = t.pose;
++            var q = p.getRotation().getQuaternion();
++            boolean finite =
++                    Double.isFinite(p.getX())
++                            && Double.isFinite(p.getY())
++                            && Double.isFinite(p.getZ())
++                            && Double.isFinite(q.getW())
++                            && Double.isFinite(q.getX())
++                            && Double.isFinite(q.getY())
++                            && Double.isFinite(q.getZ());
++            boolean onField =
++                    p.getX() >= -TAG_MARGIN_M
++                            && p.getX() <= length + TAG_MARGIN_M
++                            && p.getY() >= -TAG_MARGIN_M
++                            && p.getY() <= width + TAG_MARGIN_M
++                            && p.getZ() >= -TAG_MARGIN_M
++                            && p.getZ() <= MAX_TAG_HEIGHT_M;
++            if (t.ID < 0 || !finite || !onField) {
++                throw new IllegalArgumentException("tag " + t.ID + " at " + p + " is not on the field");
++            }
++        }
++        return new Checked(layout, FieldMapHash.hash(layout));
++    }
++
++    /** Written beside the old file, flushed, then renamed over it: a power cut leaves one or the other. */
++    private void save(String json, String hash, String robotName) throws IOException {
++        ObjectNode root = mapper.createObjectNode();
++        root.put("name", robotName);
++        root.put("hash", hash);
++        root.put("json", json);
++        Files.createDirectories(file.getParent());
++        Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
++        try (var ch =
++                FileChannel.open(
++                        tmp,
++                        StandardOpenOption.CREATE,
++                        StandardOpenOption.WRITE,
++                        StandardOpenOption.TRUNCATE_EXISTING)) {
++            ch.write(java.nio.ByteBuffer.wrap(mapper.writeValueAsBytes(root)));
++            ch.force(true);
++        }
++        Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
++        try (var dir = FileChannel.open(file.getParent(), StandardOpenOption.READ)) {
++            dir.force(true); // the rename itself; Linux only, Windows can't open a directory
++        } catch (IOException e) {
++            // best effort
++        }
++    }
++}
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagCudaPipeline.java b/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagCudaPipeline.java
+index 9cc735ca..3800b6d8 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagCudaPipeline.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagCudaPipeline.java
+@@ -62,6 +62,9 @@ public class AprilTagCudaPipeline extends CVPipeline<CVPipelineResult, AprilTagC
+     private final AprilTagPoseEstimatorPipe singleTagPoseEstimatorPipe =
+             new AprilTagPoseEstimatorPipe();
+     private final MultiTargetPNPPipe multiTagPNPPipe = new MultiTargetPNPPipe();
++    // SpectrumJetson (photonvision-74): read once per frame, so a map loaded from the robot can't
++    // give one frame's multi-tag and single-tag poses different layouts.
++    private edu.wpi.first.apriltag.AprilTagFieldLayout frameLayout;
+     private final CalculateFPSPipe calculateFPSPipe = new CalculateFPSPipe();
+     private double tagWidthMeters = Units.inchesToMeters(6.5); // photonvision-61
+ 
+@@ -79,6 +82,7 @@ public class AprilTagCudaPipeline extends CVPipeline<CVPipelineResult, AprilTagC
+ 
+     @Override
+     protected void setPipeParamsImpl() {
++        frameLayout = ConfigManager.getInstance().getConfig().getApriltagFieldLayout();
+         // Sanitize thread count - not supported to have fewer than 1 threads
+         settings.threads = Math.max(1, settings.threads);
+ 
+@@ -117,7 +121,7 @@ public class AprilTagCudaPipeline extends CVPipeline<CVPipelineResult, AprilTagC
+                                 settings.numIterations));
+ 
+                 // TODO global state ew
+-                var atfl = ConfigManager.getInstance().getConfig().getApriltagFieldLayout();
++                var atfl = frameLayout;
+                 multiTagPNPPipe.setParams(
+                         new MultiTargetPNPPipeParams(frameStaticProperties.cameraCalibration, atfl, tagModel));
+             }
+@@ -195,7 +199,7 @@ public class AprilTagCudaPipeline extends CVPipeline<CVPipelineResult, AprilTagC
+             targetList.forEach(TrackedTarget::release);
+             targetList.clear();
+             // TODO global state again ew
+-            var atfl = ConfigManager.getInstance().getConfig().getApriltagFieldLayout();
++            var atfl = frameLayout;
+ 
+             for (AprilTagDetection detection : usedDetections) {
+                 AprilTagPoseEstimate tagPoseEstimate = null;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java b/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java
+index 928e4594..4a29b97b 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java
+@@ -60,6 +60,9 @@ public class AprilTagPipeline extends CVPipeline<CVPipelineResult, AprilTagPipel
+     private final AprilTagPoseEstimatorPipe singleTagPoseEstimatorPipe =
+             new AprilTagPoseEstimatorPipe();
+     private final MultiTargetPNPPipe multiTagPNPPipe = new MultiTargetPNPPipe();
++    // SpectrumJetson (photonvision-74): read once per frame, so a map loaded from the robot can't
++    // give one frame's multi-tag and single-tag poses different layouts.
++    private edu.wpi.first.apriltag.AprilTagFieldLayout frameLayout;
+     private final CalculateFPSPipe calculateFPSPipe = new CalculateFPSPipe();
+     private double tagWidthMeters = Units.inchesToMeters(6.5); // photonvision-61
+ 
+@@ -77,6 +80,7 @@ public class AprilTagPipeline extends CVPipeline<CVPipelineResult, AprilTagPipel
+ 
+     @Override
+     protected void setPipeParamsImpl() {
++        frameLayout = ConfigManager.getInstance().getConfig().getApriltagFieldLayout();
+         // Sanitize thread count - not supported to have fewer than 1 threads
+         settings.threads = Math.max(1, settings.threads);
+ 
+@@ -128,7 +132,7 @@ public class AprilTagPipeline extends CVPipeline<CVPipelineResult, AprilTagPipel
+                                 settings.numIterations));
+ 
+                 // TODO global state ew
+-                var atfl = ConfigManager.getInstance().getConfig().getApriltagFieldLayout();
++                var atfl = frameLayout;
+                 multiTagPNPPipe.setParams(
+                         new MultiTargetPNPPipeParams(frameStaticProperties.cameraCalibration, atfl, tagModel));
+             }
+@@ -199,7 +203,7 @@ public class AprilTagPipeline extends CVPipeline<CVPipelineResult, AprilTagPipel
+             targetList.forEach(TrackedTarget::release);
+             targetList.clear();
+             // TODO global state again ew
+-            var atfl = ConfigManager.getInstance().getConfig().getApriltagFieldLayout();
++            var atfl = frameLayout;
+ 
+             for (AprilTagDetection detection : usedDetections) {
+                 AprilTagPoseEstimate tagPoseEstimate = null;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipeline/ArucoPipeline.java b/photon-core/src/main/java/org/photonvision/vision/pipeline/ArucoPipeline.java
+index a72774da..d5eb6429 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipeline/ArucoPipeline.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipeline/ArucoPipeline.java
+@@ -52,6 +52,9 @@ public class ArucoPipeline extends CVPipeline<CVPipelineResult, ArucoPipelineSet
+     private ArucoDetectionPipe arucoDetectionPipe = new ArucoDetectionPipe();
+     private ArucoPoseEstimatorPipe singleTagPoseEstimatorPipe = new ArucoPoseEstimatorPipe();
+     private final MultiTargetPNPPipe multiTagPNPPipe = new MultiTargetPNPPipe();
++    // SpectrumJetson (photonvision-74): read once per frame, so a map loaded from the robot can't
++    // give one frame's multi-tag and single-tag poses different layouts.
++    private edu.wpi.first.apriltag.AprilTagFieldLayout frameLayout;
+     private final CalculateFPSPipe calculateFPSPipe = new CalculateFPSPipe();
+ 
+     public ArucoPipeline() {
+@@ -66,6 +69,7 @@ public class ArucoPipeline extends CVPipeline<CVPipelineResult, ArucoPipelineSet
+ 
+     @Override
+     protected void setPipeParamsImpl() {
++        frameLayout = ConfigManager.getInstance().getConfig().getApriltagFieldLayout();
+         var params = new ArucoDetectionPipeParams();
+         // sanitize and record settings
+ 
+@@ -117,7 +121,7 @@ public class ArucoPipeline extends CVPipeline<CVPipelineResult, ArucoPipelineSet
+                 singleTagPoseEstimatorPipe.setParams(estimatorParams);
+ 
+                 // TODO global state ew
+-                var atfl = ConfigManager.getInstance().getConfig().getApriltagFieldLayout();
++                var atfl = frameLayout;
+                 multiTagPNPPipe.setParams(
+                         new MultiTargetPNPPipeParams(frameStaticProperties.cameraCalibration, atfl, tagModel));
+             }
+@@ -174,7 +178,7 @@ public class ArucoPipeline extends CVPipeline<CVPipelineResult, ArucoPipelineSet
+             // Clear target list that was used for multitag so we can add target transforms
+             targetList.clear();
+             // TODO global state again ew
+-            var atfl = ConfigManager.getInstance().getConfig().getApriltagFieldLayout();
++            var atfl = frameLayout;
+ 
+             for (ArucoDetectionResult detection : tagDetectionPipeResult.output) {
+                 AprilTagPoseEstimate tagPoseEstimate = null;
+diff --git a/photon-core/src/test/java/org/photonvision/fieldmap/FieldMapHashTest.java b/photon-core/src/test/java/org/photonvision/fieldmap/FieldMapHashTest.java
+new file mode 100644
+index 00000000..27198841
+--- /dev/null
++++ b/photon-core/src/test/java/org/photonvision/fieldmap/FieldMapHashTest.java
+@@ -0,0 +1,95 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.fieldmap;
++
++import static org.junit.jupiter.api.Assertions.*;
++
++import edu.wpi.first.apriltag.AprilTagFieldLayout;
++import edu.wpi.first.apriltag.AprilTagFields;
++import org.junit.jupiter.api.Test;
++import org.photonvision.common.util.file.JacksonUtils;
++
++/**
++ * SpectrumJetson (photonvision-74). The expected hashes were computed outside Java (Python,
++ * rounding like Java's %.4f), so these check the contract, not just this code against itself.
++ * Robot code must get the same two reference hashes.
++ */
++public class FieldMapHashTest {
++    static final String ANDYMARK_2026 = "2792cd4e868967b8";
++    static final String WELDED_2026 = "ca28a7c1139ed099";
++
++    @Test
++    public void referenceFields() {
++        assertEquals(ANDYMARK_2026, FieldMapHash.hash(AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltAndymark)));
++        assertEquals(WELDED_2026, FieldMapHash.hash(AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltWelded)));
++    }
++
++    @Test
++    public void canonicalText() {
++        String text = FieldMapHash.canonical(AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltAndymark));
++        String[] lines = text.split("\n", -1);
++        assertEquals(33, lines.length); // 32 tags and the field line
++        assertEquals("1,11.8640,7.4115,0.8890,0.0000,0.0000,0.0000,1.0000", lines[0]);
++        // 0.55245 m is a tie at 4 decimals: Java rounds it up (Python's f"{:.4f}" would say 0.5524).
++        assertEquals("13,16.4993,7.3919,0.5525,0.0000,0.0000,0.0000,1.0000", lines[12]);
++        assertEquals("field,16.5180,8.0430", lines[32]);
++        assertFalse(text.endsWith("\n"));
++    }
++
++    @Test
++    public void formatting() {
++        assertEquals("0.0000", FieldMapHash.format(0.0));
++        assertEquals("-0.0000", FieldMapHash.format(-0.0));
++        assertEquals("-0.0000", FieldMapHash.format(-6.123233995736766e-17));
++        assertEquals("0.0000", FieldMapHash.format(6.123233995736766e-17));
++        assertEquals("0.5525", FieldMapHash.format(0.55245));
++        assertEquals("-1.2346", FieldMapHash.format(-1.23456));
++    }
++
++    static final String NEGATIVE_ZERO_JSON =
++            """
++            {"tags": [
++              {"ID": 2, "pose": {"translation": {"x": -0.0, "y": 1.0, "z": 1.0},
++                "rotation": {"quaternion": {"W": 1.0, "X": -0.0, "Y": 0.0, "Z": 0.0}}}},
++              {"ID": 1, "pose": {"translation": {"x": 1.0, "y": 2.0, "z": 0.55245},
++                "rotation": {"quaternion": {"W": -6.123233995736766e-17, "X": 0.0, "Y": 0.0, "Z": 1.0}}}}
++            ],
++            "field": {"length": 16.518, "width": 8.043}}
++            """;
++
++    @Test
++    public void negativeZeroKeepsItsSign() throws Exception {
++        var layout = JacksonUtils.deserialize(NEGATIVE_ZERO_JSON, AprilTagFieldLayout.class);
++        assertEquals(
++                "1,1.0000,2.0000,0.5525,-0.0000,0.0000,0.0000,1.0000\n"
++                        + "2,-0.0000,1.0000,1.0000,1.0000,-0.0000,0.0000,0.0000\n"
++                        + "field,16.5180,8.0430",
++                FieldMapHash.canonical(layout));
++        assertEquals("2ebfc3a8b8c327fa", FieldMapHash.hash(layout));
++        // The same map with every -0 written as +0 hashes differently: the sign is part of the text.
++        var positive = JacksonUtils.deserialize(NEGATIVE_ZERO_JSON.replace("-0.0,", "0.0,").replace("-6.1", "6.1"), AprilTagFieldLayout.class);
++        assertEquals("8a1d9a629d0e492e", FieldMapHash.hash(positive));
++    }
++
++    @Test
++    public void survivesAJsonRoundTrip() throws Exception {
++        var layout = AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltWelded);
++        var again = JacksonUtils.deserialize(JacksonUtils.serializeToString(layout), AprilTagFieldLayout.class);
++        assertEquals(WELDED_2026, FieldMapHash.hash(again));
++    }
++}
+diff --git a/photon-core/src/test/java/org/photonvision/fieldmap/FieldMapSyncTest.java b/photon-core/src/test/java/org/photonvision/fieldmap/FieldMapSyncTest.java
+new file mode 100644
+index 00000000..8f12f585
+--- /dev/null
++++ b/photon-core/src/test/java/org/photonvision/fieldmap/FieldMapSyncTest.java
+@@ -0,0 +1,297 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.fieldmap;
++
++import static org.junit.jupiter.api.Assertions.*;
++
++import edu.wpi.first.apriltag.AprilTagFieldLayout;
++import edu.wpi.first.apriltag.AprilTagFields;
++import edu.wpi.first.networktables.NetworkTableInstance;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import org.photonvision.common.LoadJNI;
++import org.photonvision.common.util.file.JacksonUtils;
++
++/** SpectrumJetson (photonvision-74): loading, refusing and keeping the robot's field map. */
++public class FieldMapSyncTest {
++    @TempDir Path dir;
++
++    static String andymarkJson;
++    static String weldedJson;
++
++    /** Stands in for PhotonVision's configuration. */
++    final AtomicReference<AprilTagFieldLayout> config = new AtomicReference<>();
++
++    final AtomicInteger applies = new AtomicInteger();
++    double clock = 1_760_000_000;
++
++    @BeforeAll
++    public static void loadFields() throws Exception {
++        LoadJNI.loadLibraries();
++        andymarkJson = JacksonUtils.serializeToString(AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltAndymark));
++        weldedJson = JacksonUtils.serializeToString(AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltWelded));
++    }
++
++    @BeforeEach
++    public void freshConfig() {
++        // PhotonVision's own setting before the robot says anything: the welded field.
++        config.set(AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltWelded));
++        applies.set(0);
++    }
++
++    FieldMapSync sync() {
++        return new FieldMapSync(
++                dir.resolve("spectrum").resolve("field-map.json"),
++                config::get,
++                l -> {
++                    applies.incrementAndGet();
++                    config.set(l);
++                },
++                () -> clock);
++    }
++
++    Path file() {
++        return dir.resolve("spectrum").resolve("field-map.json");
++    }
++
++    @Test
++    public void reportsPhotonVisionsOwnMapBeforeTheRobotSendsOne() {
++        var s = sync();
++        assertEquals(FieldMapHashTest.WELDED_2026, s.currentHash());
++        assertEquals(FieldMapSync.LOCAL_NAME, s.name());
++        assertEquals("", s.error());
++        assertFalse(s.loadSaved());
++        assertFalse(s.offer("", "", ""), "an empty JSON means the robot isn't publishing");
++        assertEquals("", s.error());
++    }
++
++    @Test
++    public void loadsAndSavesTheRobotsMap() {
++        var s = sync();
++        assertTrue(s.offer(andymarkJson, FieldMapHashTest.ANDYMARK_2026, "k2026RebuiltAndymark"));
++        assertEquals(1, applies.get());
++        assertEquals(FieldMapHashTest.ANDYMARK_2026, FieldMapHash.hash(config.get()));
++        assertEquals(FieldMapHashTest.ANDYMARK_2026, s.currentHash());
++        assertEquals("k2026RebuiltAndymark", s.name());
++        assertEquals(clock, s.loadedAt());
++        assertEquals("", s.error());
++        assertTrue(Files.exists(file()));
++        assertFalse(Files.exists(file().resolveSibling("field-map.json.tmp")), "temporary file left behind");
++    }
++
++    @Test
++    public void hashIsCaseAndSpaceTolerant() {
++        var s = sync();
++        assertTrue(s.offer(andymarkJson, " " + FieldMapHashTest.ANDYMARK_2026.toUpperCase() + "\n", "a"));
++    }
++
++    @Test
++    public void refusesAHashMismatch() {
++        var s = sync();
++        var before = config.get();
++        assertFalse(s.offer(andymarkJson, FieldMapHashTest.WELDED_2026, "k2026RebuiltAndymark"));
++        assertSame(before, config.get());
++        assertEquals(0, applies.get());
++        assertTrue(s.error().contains("hashes to " + FieldMapHashTest.ANDYMARK_2026), s.error());
++        assertEquals(FieldMapHashTest.WELDED_2026, s.currentHash());
++        assertFalse(Files.exists(file()));
++        // A missing hash is a mismatch too.
++        assertFalse(s.offer(andymarkJson, "", "x"));
++        assertSame(before, config.get());
++    }
++
++    @Test
++    public void refusesInvalidMaps() {
++        var s = sync();
++        var before = config.get();
++        String tag =
++                "{\"ID\": %d, \"pose\": {\"translation\": {\"x\": %s, \"y\": 1.0, \"z\": 1.0},"
++                        + " \"rotation\": {\"quaternion\": {\"W\": 1.0, \"X\": 0.0, \"Y\": 0.0, \"Z\": 0.0}}}}";
++        String field = "\"field\": {\"length\": %s, \"width\": %s}";
++        String[] bad = {
++            "not json",
++            "{}",
++            "{\"tags\": [], " + String.format(field, 16.5, 8.0) + "}",
++            "{\"tags\": [" + String.format(tag, 1, "1.0") + "], " + String.format(field, 0.0, 0.0) + "}",
++            "{\"tags\": [" + String.format(tag, 1, "1.0") + "], " + String.format(field, 165.0, 8.0) + "}",
++            "{\"tags\": [" + String.format(tag, 1, "1.0") + ", " + String.format(tag, 1, "2.0") + "], "
++                    + String.format(field, 16.5, 8.0) + "}",
++            "{\"tags\": [" + String.format(tag, 1, "40.0") + "], " + String.format(field, 16.5, 8.0) + "}",
++            "{\"tags\": [" + String.format(tag, -3, "1.0") + "], " + String.format(field, 16.5, 8.0) + "}",
++            andymarkJson.substring(0, andymarkJson.length() / 2),
++        };
++        for (String json : bad) {
++            assertFalse(s.offer(json, "0000000000000000", "bad"), json);
++            assertTrue(s.error().contains("invalid"), json + " -> " + s.error());
++            assertSame(before, config.get());
++        }
++        assertEquals(0, applies.get());
++        assertFalse(Files.exists(file()));
++        // A good map afterwards clears the error.
++        assertTrue(s.offer(andymarkJson, FieldMapHashTest.ANDYMARK_2026, "good"));
++        assertEquals("", s.error());
++    }
++
++    @Test
++    public void keepsTheRobotsMapWhenARefusedOneFollows() {
++        var s = sync();
++        assertTrue(s.offer(andymarkJson, FieldMapHashTest.ANDYMARK_2026, "am"));
++        var loaded = config.get();
++        assertFalse(s.offer(weldedJson, "deadbeefdeadbeef", "welded"));
++        assertSame(loaded, config.get());
++        assertEquals(FieldMapHashTest.ANDYMARK_2026, s.currentHash());
++        assertEquals("am", s.name());
++        // and at the next boot, too
++        config.set(AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltWelded));
++        var next = sync();
++        assertTrue(next.loadSaved());
++        assertEquals(FieldMapHashTest.ANDYMARK_2026, next.currentHash());
++    }
++
++    @Test
++    public void theSameMapIsNotReloaded() throws Exception {
++        var s = sync();
++        assertTrue(s.offer(andymarkJson, FieldMapHashTest.ANDYMARK_2026, "am"));
++        var loaded = config.get();
++        long modified = Files.getLastModifiedTime(file()).toMillis();
++        clock += 100;
++        assertTrue(s.offer(andymarkJson, FieldMapHashTest.ANDYMARK_2026, "am"));
++        assertEquals(1, applies.get());
++        assertSame(loaded, config.get());
++        assertEquals(clock - 100, s.loadedAt());
++        assertEquals(modified, Files.getLastModifiedTime(file()).toMillis());
++        // A map PhotonVision already has (here its own setting) is adopted without a reload.
++        assertTrue(s.offer(weldedJson, FieldMapHashTest.WELDED_2026, "welded") );
++        assertEquals(2, applies.get()); // andymark -> welded is a change
++        config.set(AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltWelded));
++        var t = sync();
++        assertTrue(t.offer(weldedJson, FieldMapHashTest.WELDED_2026, "welded"));
++        assertEquals(2, applies.get());
++        assertEquals("welded", t.name());
++    }
++
++    @Test
++    public void usesTheSavedMapAtTheNextBoot() {
++        assertTrue(sync().offer(andymarkJson, FieldMapHashTest.ANDYMARK_2026, "k2026RebuiltAndymark"));
++        // Restart: PhotonVision's database still has the welded field.
++        config.set(AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltWelded));
++        applies.set(0);
++        clock += 3600;
++        var s = sync();
++        assertTrue(s.loadSaved());
++        assertEquals(1, applies.get());
++        assertEquals(FieldMapHashTest.ANDYMARK_2026, s.currentHash());
++        assertEquals("k2026RebuiltAndymark", s.name());
++        assertEquals(clock, s.loadedAt());
++        assertEquals("", s.error());
++    }
++
++    @Test
++    public void aDamagedSavedMapIsNotUsed() throws Exception {
++        assertTrue(sync().offer(andymarkJson, FieldMapHashTest.ANDYMARK_2026, "am"));
++        String saved = Files.readString(file());
++
++        // edited so the hash no longer matches
++        Files.writeString(file(), saved.replace("11.863959", "11.963959"));
++        config.set(AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltWelded));
++        var before = config.get();
++        var s = sync();
++        assertFalse(s.loadSaved());
++        assertSame(before, config.get());
++        assertTrue(s.error().contains("unusable"), s.error());
++        assertEquals(FieldMapHashTest.WELDED_2026, s.currentHash());
++
++        // truncated
++        Files.writeString(file(), saved.substring(0, saved.length() / 2));
++        assertFalse(sync().loadSaved());
++        assertSame(before, config.get());
++    }
++
++    @Test
++    public void forgetSavedFallsBackToPhotonVisionsMap() {
++        var s = sync();
++        assertTrue(s.offer(andymarkJson, FieldMapHashTest.ANDYMARK_2026, "am"));
++        FieldMapSync.forgetSaved(file());
++        assertFalse(Files.exists(file()));
++        // The robot sending the same map again saves it again.
++        assertTrue(s.offer(andymarkJson, FieldMapHashTest.ANDYMARK_2026, "am"));
++        assertTrue(Files.exists(file()));
++        FieldMapSync.forgetSaved(file());
++        config.set(AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltWelded));
++        assertFalse(sync().loadSaved());
++        assertEquals(FieldMapHashTest.WELDED_2026, FieldMapHash.hash(config.get()));
++    }
++
++    @Test
++    public void reportsAMapSetSomeOtherWay() {
++        var s = sync();
++        assertTrue(s.offer(andymarkJson, FieldMapHashTest.ANDYMARK_2026, "am"));
++        clock += 5;
++        config.set(AprilTagFieldLayout.loadField(AprilTagFields.k2026RebuiltWelded)); // e.g. the settings page
++        assertEquals(FieldMapHashTest.WELDED_2026, s.currentHash());
++        assertEquals(FieldMapSync.LOCAL_NAME, s.name());
++        assertEquals(clock, s.loadedAt());
++    }
++
++    /** The NetworkTables side, on a local instance: the robot's topics in, the Jetson's out. */
++    @Test
++    public void networkTables() {
++        var nt = NetworkTableInstance.create(); // left open, like NTDriverStationTest's
++        var robot = nt.getTable(FieldMapNT.ROBOT_TABLE);
++        var json = robot.getStringTopic("Json").publish();
++        var hash = robot.getStringTopic("Hash").publish();
++        var name = robot.getStringTopic("Name").publish();
++        var jetson = nt.getTable(FieldMapNT.JETSON_TABLE);
++        var outHash = jetson.getStringTopic("Hash").subscribe("?");
++        var outName = jetson.getStringTopic("Name").subscribe("?");
++        var outLoadedAt = jetson.getDoubleTopic("LoadedAt").subscribe(-1);
++        var outError = jetson.getStringTopic("Error").subscribe("?");
++
++        var adapter = new FieldMapNT(nt, sync());
++        assertEquals(FieldMapHashTest.WELDED_2026, outHash.get());
++        assertEquals(FieldMapSync.LOCAL_NAME, outName.get());
++
++        // The JSON arrives a poll before its hash: no mismatch is reported in between.
++        json.set(andymarkJson);
++        adapter.poll();
++        hash.set(FieldMapHashTest.ANDYMARK_2026);
++        name.set("k2026RebuiltAndymark");
++        adapter.poll();
++        assertEquals("", outError.get());
++        assertEquals(FieldMapHashTest.WELDED_2026, outHash.get());
++        adapter.poll();
++        assertEquals(FieldMapHashTest.ANDYMARK_2026, outHash.get());
++        assertEquals("k2026RebuiltAndymark", outName.get());
++        assertEquals(clock, outLoadedAt.get());
++        assertEquals("", outError.get());
++
++        // A bad hash: refused, the map in use stays, and the error says so.
++        json.set(weldedJson);
++        hash.set("0123456789abcdef");
++        adapter.poll();
++        adapter.poll();
++        assertEquals(FieldMapHashTest.ANDYMARK_2026, outHash.get());
++        assertTrue(outError.get().contains("0123456789abcdef"), outError.get());
++    }
++}
+diff --git a/photon-server/src/main/java/org/photonvision/Main.java b/photon-server/src/main/java/org/photonvision/Main.java
+index e086636b..730e7375 100644
+--- a/photon-server/src/main/java/org/photonvision/Main.java
++++ b/photon-server/src/main/java/org/photonvision/Main.java
+@@ -331,6 +331,9 @@ public class Main {
+         org.photonvision.rewind.RewindManager.getInstance().start();
+         // SpectrumJetson: set the Jetson's date from the robot's (no clock battery, no internet)
+         org.photonvision.common.util.RobotClockSync.start();
++        // SpectrumJetson (photonvision-74): the robot's field map (the saved one first, before the
++        // cameras start)
++        org.photonvision.fieldmap.FieldMapNT.start();
+ 
+         logger.debug("Loading HardwareManager...");
+         // Force load the hardware manager
+diff --git a/photon-server/src/main/java/org/photonvision/server/RequestHandler.java b/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
+index cd016386..d70dcead 100644
+--- a/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
++++ b/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
+@@ -325,6 +325,9 @@ public class RequestHandler {
+         }
+ 
+         if (ConfigManager.getInstance().saveUploadedAprilTagFieldLayout(tempFilePath.get().toPath())) {
++            // SpectrumJetson (photonvision-74): this upload, not the robot's last map, after the
++            // restart (until the robot sends its map again).
++            org.photonvision.fieldmap.FieldMapSync.forgetSaved(org.photonvision.fieldmap.FieldMapNT.savedFile());
+             ctx.status(200);
+             ctx.result("Successfully saved the uploaded AprilTagFieldLayout, rebooting...");
+             logger.info("Successfully saved the uploaded AprilTagFieldLayout, rebooting...");
+@@ -1089,6 +1092,7 @@ public class RequestHandler {
+                         throw new IOException("PhotonVision couldn't load " + layout.getFileName());
+                     }
+                     if (req.action().equals("undo")) Files.delete(layout);
++                    org.photonvision.fieldmap.FieldMapSync.forgetSaved(org.photonvision.fieldmap.FieldMapNT.savedFile()); // photonvision-74, as for an upload
+                     ctx.status(200);
+                     ctx.result("Layout saved; restarting PhotonVision");
+                     restartProgram();
