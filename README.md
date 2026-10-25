@@ -509,6 +509,13 @@ PhotonVision's Object Detection pipeline runs YOLO models on the Jetson's GPU th
 - **What to do:** if cameras are stuck, power-cycle instead of rebooting.
 - **To find the cause:** with a DisplayPort monitor plugged in, run `tests/usb-hub-reset/run.sh`, then `sudo reboot`, and see where the boot stops.
 
+**PhotonVision may never connect to NT if it starts before robot code** (reported by 6324, Oct 2026; not seen on our robot yet).
+- **What happens:** PhotonVision comes up before the robot's NT server and never starts talking over NT. Restarting robot code fixes it.
+- **Likely cause:** upstream #2398 (in patch 00) removed the loop that restarted the NT client every 5 s while it was disconnected. That loop was written for exactly this case ("if Photon starts before the robot NT server does, and both aren't static IP, it'll never connect"). Upstream removed it because the restarts seemed to break connections NT4 was still setting up. See `docs/UPSTREAM-PORT.md`.
+- **Not known yet:** whether the client was stuck disconnected or showed connected with no data flowing, and whether the NT server address (team number or IP) or a static Jetson IP matters.
+- **Our decision:** no patch for now. A watchdog that restarts the NT client after ~15 s disconnected, waiting longer between tries up to 60 s, is the likely fix if we see it. It has trade-offs (restarts can break a connection about to succeed, and every restart republishes topics), so we'll only add it with evidence.
+- **If you see it:** save the PhotonVision log from that boot (the connection listener logs connects and disconnects), note the NT server setting and whether the Jetson's IP was static, and add it here. Restarting robot code, or pressing Save on PhotonVision's Settings page, gets it connected.
+
 ## Troubleshooting quick reference
 
 | Symptom | Likely cause | What to do |
@@ -527,6 +534,7 @@ PhotonVision's Object Detection pipeline runs YOLO models on the Jetson's GPU th
 | Calibration fails ("Negative corner", null intrinsics) | Board width/height swapped | Width 12, height 9. Check with `check_board.py`. Restart PhotonVision to clear bad snapshots. |
 | Settings page missing Device Control / Restart | Old browser (no `Intl.DurationFormat`) | Update the browser. Fixed in our patch too. |
 | A camera's stream won't show | The browser's connection limit (each open stream holds one) | Close extra PhotonVision tabs, then Ctrl+Shift+R. |
+| PhotonVision never shows up on NT after a boot; restarting robot code fixes it | PhotonVision started before robot code and its NT client got stuck (see Known issues) | Restart robot code, or press Save on PhotonVision's Settings page. Save the PhotonVision log first. |
 | PhotonVision won't start ("corrupt jarfile") | A bad jar was installed | Reinstall a good jar with `06-install-fork-jar.sh`, or copy back `photonvision.jar.prev`. |
 | Robot code throws about a PhotonLib version or message mismatch | Robot PhotonLib upgraded past alpha-6 | Keep `photonlib v2027.0.0-alpha-2`. |
 | Gradle build fails with a PKIX/SSL error | The shop network's filter blocked `frcmaven.wpi.edu` | Use another network, or get it allowlisted. |
