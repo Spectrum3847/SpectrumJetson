@@ -1,19 +1,19 @@
 diff --git a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
-index a94514a7..ab4af11d 100644
+index ccc7445c..e05b06da 100644
 --- a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
 +++ b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
-@@ -119,7 +119,9 @@ public class RewindManager {
+@@ -129,7 +129,9 @@ public class RewindManager {
      private volatile String manualLabel = "";
      private volatile String stopReason = "";
      private volatile boolean diskLow = false;
 -    private volatile long lastRobotRecordTrueUs = 0;
-+    private RobotRecordRequest robotRequest; // photonvision-74
++    private RobotRecordRequest robotRequest; // photonvision-77
 +    private volatile boolean robotGraceNow = false;
 +    private boolean waitingAfterReconnect = false;
      private volatile long sessionsBytes = 0;
      private volatile int sessionCount = 0;
      private volatile long lastDiskCheckUs = 0;
-@@ -151,6 +153,7 @@ public class RewindManager {
+@@ -161,6 +163,7 @@ public class RewindManager {
          NetworkTableInstance nt = NetworkTablesManager.getInstance().getNTInst();
          NetworkTable t = nt.getTable("photonvision").getSubTable("rewind");
          recordSub = t.getBooleanTopic("record").subscribe(false);
@@ -21,16 +21,16 @@ index a94514a7..ab4af11d 100644
          labelSub = t.getStringTopic("label").subscribe("");
          recordingPub = t.getBooleanTopic("recording").publish();
          sessionPub = t.getStringTopic("session").publish();
-@@ -253,6 +256,8 @@ public class RewindManager {
+@@ -263,6 +266,8 @@ public class RewindManager {
          var m = INSTANCE;
          if (m == null) return false;
          if (m.manual) return true;
-+        // photonvision-74: a robot recording kept through a NetworkTables drop counts too.
++        // photonvision-77: a robot recording kept through a NetworkTables drop counts too.
 +        if (m.robotGraceNow) return true;
          var sub = m.recordSub;
          return sub != null && NetworkTablesManager.getInstance().getNTInst().isConnected() && sub.get();
      }
-@@ -263,14 +268,26 @@ public class RewindManager {
+@@ -273,14 +278,26 @@ public class RewindManager {
          try {
              long now = NetworkTablesJNI.now();
              boolean ntConnected = NetworkTablesManager.getInstance().getNTInst().isConnected();
@@ -42,7 +42,7 @@ index a94514a7..ab4af11d 100644
 -                            && current != null
 -                            && current.reason().equals("robot")
 -                            && now - lastRobotRecordTrueUs < DISCONNECT_GRACE_US;
-+            // Robot asked to record, then vanished: keep going for the grace period. photonvision-74:
++            // Robot asked to record, then vanished: keep going for the grace period. photonvision-77:
 +            // also after it reconnects, until it sends record again (see RobotRecordRequest).
 +            var robot =
 +                    robotRequest.update(
@@ -65,7 +65,7 @@ index a94514a7..ab4af11d 100644
  
              // photonvision-56: never while quiet mode has the scratch partition read-only (and no
              // tidying either: deleting old recordings is a write too).
-@@ -291,7 +308,11 @@ public class RewindManager {
+@@ -301,7 +318,11 @@ public class RewindManager {
                                  ? "disk low"
                                  : current.reason().equals("bench")
                                          ? "bench recording stopped"
@@ -79,8 +79,8 @@ index a94514a7..ab4af11d 100644
  
              recordingPub.set(current != null);
 diff --git a/photon-core/src/main/java/org/photonvision/rewind/RobotRecordRequest.java b/photon-core/src/main/java/org/photonvision/rewind/RobotRecordRequest.java
-new file mode 100755
-index 00000000..5026fb97
+new file mode 100644
+index 00000000..62ff42e6
 --- /dev/null
 +++ b/photon-core/src/main/java/org/photonvision/rewind/RobotRecordRequest.java
 @@ -0,0 +1,82 @@
@@ -110,7 +110,7 @@ index 00000000..5026fb97
 +import java.util.EnumSet;
 +
 +/**
-+ * SpectrumJetson (photonvision-74): whether robot code wants a recording, through NetworkTables
++ * SpectrumJetson (photonvision-77): whether robot code wants a recording, through NetworkTables
 + * drops.
 + *
 + * <p>When the connection drops, ntcore forgets the robot's values. After the reconnect, {@code
@@ -167,8 +167,8 @@ index 00000000..5026fb97
 +    }
 +}
 diff --git a/photon-core/src/test/java/org/photonvision/rewind/RobotRecordRequestTest.java b/photon-core/src/test/java/org/photonvision/rewind/RobotRecordRequestTest.java
-new file mode 100755
-index 00000000..aeae966c
+new file mode 100644
+index 00000000..a1591a48
 --- /dev/null
 +++ b/photon-core/src/test/java/org/photonvision/rewind/RobotRecordRequestTest.java
 @@ -0,0 +1,185 @@
@@ -205,7 +205,7 @@ index 00000000..aeae966c
 +import org.photonvision.common.LoadJNI;
 +
 +/**
-+ * SpectrumJetson (photonvision-74): a robot recording through a NetworkTables drop, with real
++ * SpectrumJetson (photonvision-77): a robot recording through a NetworkTables drop, with real
 + * ntcore. A "robot" NetworkTables server and the "Jetson" client on localhost; the drop is the robot
 + * server going away and coming back. Each test ticks {@link RobotRecordRequest} the way
 + * RewindManager's tick does and counts the sessions that would open and close.

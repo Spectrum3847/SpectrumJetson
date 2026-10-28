@@ -6,7 +6,7 @@
 //                   [--mwbd N] [--mse X] [--threads N] [--upscale 2]
 //                   [--mask ignore|only x,y,w,h[;x,y,w,h...]]
 //
-// CAMERA_DIR: one camera's folder of a Rewind session (NNNN.mjpeg + NNNN.csv, docs/REWIND.md).
+// CAMERA_DIR: one camera's folder of a Rewind session (..._NNNN.mjpeg + .csv, docs/REWIND.md).
 // --every N: every Nth frame. --calib: the camera's lens calibration; the detector's edge
 // refinement straightens edges with it, as it does in PhotonVision (without it, no undistortion).
 // --mwbd / --mse: as SPECTRUM_971_MIN_WHITE_BLACK_DIFF / SPECTRUM_971_MAX_LINE_FIT_MSE, which

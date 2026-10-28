@@ -17,7 +17,7 @@
 // FAKE_ROBOT_RECORD=1 also asks Rewind to record (/photonvision/rewind/record true, label
 // FAKE_ROBOT_LABEL or "fake-robot") in every phase, except a phase whose state ends in "-norecord"
 // (e.g. fms-enabled-norecord), which leaves record unpublished, like robot code that hasn't set it
-// yet. Record is set false at the end (photonvision-74, tests/rewind-sessions/reconnect.sh).
+// yet. Record is set false at the end (photonvision-77, tests/rewind-sessions/reconnect.sh).
 import edu.wpi.first.networktables.BooleanPublisher;
 import edu.wpi.first.networktables.NetworkTableInstance;
 import java.nio.ByteBuffer;

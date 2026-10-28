@@ -121,7 +121,7 @@ The vision stack has four parts. Two are built on the Jetson, one on the laptop,
 | 1 | PhotonVision service | Jetson (installer) | `jetson/03-photonvision.sh` | Installs the systemd service that starts PhotonVision at boot. We then replace its jar with the fork. |
 | 2 | allwpilib `v2026.2.1` | Jetson | `jetson/04-build-allwpilib.sh` | Libraries the CUDA detector links against. Must be the **v2026.2.1 tag**: its `main` branch has moved on and won't compile with the detector. Took 17 minutes. |
 | 3 | CUDA detector `lib971apriltag.so` | Jetson | `jetson/07-build-bos-detector.sh`, then `08-select-detector.sh bos --mwbd 20 --jpeg nvjpg` | Austin Schuh's current code (see below) plus our JNI wrapper in `detector/`. `--jpeg nvjpg` decodes the camera JPEGs on the Jetson's JPEG hardware (`libspectrumnvjpg.so`, see Performance), gray and colour; it uses ~180 MB of memory per camera. Leave it out to decode on the CPU. |
-| 4 | PhotonVision fork jar | Laptop | `host/03-build-photonvision-fork.sh`, then `jetson/06-install-fork-jar.sh` | The 4143 fork, upstream v2026.3.4 (patch 00) and our patches 01–74. It builds on the laptop in about 30 s instead of taxing the Jetson. The Jetson runs it on Java 17. The build also bundles the training site (`training/`) as the sidebar's Documentation page, so the course works on the robot with no internet. |
+| 4 | PhotonVision fork jar | Laptop | `host/03-build-photonvision-fork.sh`, then `jetson/06-install-fork-jar.sh` | The 4143 fork, upstream v2026.3.4 (patch 00) and our patches 01–78. It builds on the laptop in about 30 s instead of taxing the Jetson. The Jetson runs it on Java 17. The build also bundles the training site (`training/`) as the sidebar's Documentation page, so the course works on the robot with no internet. |
 | 5 | Camera driver with a bandwidth cap | Jetson | `jetson/11-uvcvideo-payload-cap.sh --install` | Needed for 3–4 cameras on the USB-A ports (see Performance). |
 | 6 | TensorRT backend `libspectrumtrt.so` | Jetson | built by `07-build-bos-detector.sh`; install to `/usr/lib` | Game-piece detection. Models go in with `jetson/12-install-yolo-model.sh`. |
 | 7 | USB controller watchdog | Jetson | `jetson/14-usb-watchdog.sh --install` | Resets the USB controller if the kernel says it died, so the cameras come back without a person. It never reboots (see Known issues). |
@@ -328,7 +328,7 @@ Both cameras use the same PhotonVision settings. Each one needs its own calibrat
 - Low Latency Mode **off**
 - Processing Mode **3D** and **multi-tag on** (Output tab), once the camera is calibrated. The robot's pose code needs both.
 - Stream Resolution: small, to save CPU (it only affects the video you watch in the browser)
-- AprilTag field layout: **2026 Rebuilt AndyMark**. The robot code must use the same layout.
+- AprilTag field layout: **2026 Rebuilt AndyMark** until the robot connects. Robot code sends its own map, and the Jetson loads it, keeps it for the next boot and reports which one it's using (`photonvision-74`, below).
 
 **New cameras start with these settings automatically.** A camera PhotonVision has never seen gets AprilTagCuda, 1280x800 MJPEG, exposure 50, decision margin 15, brightness 100, white balance 2800 K, Low Latency off and multi-tag on (`TeamCameraDefaults` in `photonvision-06`). 3D can't work without a calibration, so it starts off and turns itself on (with multi-tag) as soon as a calibration is saved or imported for the resolution the camera uses. It never turns 3D off. Existing cameras keep their saved settings.
 
@@ -450,7 +450,7 @@ A page in PhotonVision's web UI (**Field Calibration** in the sidebar, `photonvi
 4. **Results:**
    - **Tags:** each tag marked as drawn or moved, with its offset.
    - **Cameras:** each mount compared with robot code's, plus a Java snippet.
-   - **Use this layout in PhotonVision:** loads the corrected layout; **Undo** puts the old one back.
+   - **Use this layout in PhotonVision:** loads the corrected layout; **Undo** puts the old one back. A robot that sends its own field map replaces it as soon as it connects, so for matches put the corrected layout in robot code instead.
 
 Robot code has to publish each camera's `robotToCamera` (a `Transform3d` struct) at `/photonvision/<camera>/robotToCamera`, from CAD or the last calibration. Without it, height, pitch and roll are still found, but x, y and yaw are only relative to one camera. The solved mounts come back at `/photonvision/<camera>/fieldcal/robotToCamera`.
 
@@ -509,6 +509,13 @@ PhotonVision's Object Detection pipeline runs YOLO models on the Jetson's GPU th
 - **What to do:** if cameras are stuck, power-cycle instead of rebooting.
 - **To find the cause:** with a DisplayPort monitor plugged in, run `tests/usb-hub-reset/run.sh`, then `sudo reboot`, and see where the boot stops.
 
+**PhotonVision may never connect to NT if it starts before robot code** (reported by 6324, Oct 2026; not seen on our robot yet).
+- **What happens:** PhotonVision comes up before the robot's NT server and never starts talking over NT. Restarting robot code fixes it.
+- **Likely cause:** upstream #2398 (in patch 00) removed the loop that restarted the NT client every 5 s while it was disconnected. That loop was written for exactly this case ("if Photon starts before the robot NT server does, and both aren't static IP, it'll never connect"). Upstream removed it because the restarts seemed to break connections NT4 was still setting up. See `docs/UPSTREAM-PORT.md`.
+- **Not known yet:** whether the client was stuck disconnected or showed connected with no data flowing, and whether the NT server address (team number or IP) or a static Jetson IP matters.
+- **Our decision:** no patch for now. A watchdog that restarts the NT client after ~15 s disconnected, waiting longer between tries up to 60 s, is the likely fix if we see it. It has trade-offs (restarts can break a connection about to succeed, and every restart republishes topics), so we'll only add it with evidence.
+- **If you see it:** save the PhotonVision log from that boot (the connection listener logs connects and disconnects), note the NT server setting and whether the Jetson's IP was static, and add it here. Restarting robot code, or pressing Save on PhotonVision's Settings page, gets it connected.
+
 ## Troubleshooting quick reference
 
 | Symptom | Likely cause | What to do |
@@ -527,6 +534,7 @@ PhotonVision's Object Detection pipeline runs YOLO models on the Jetson's GPU th
 | Calibration fails ("Negative corner", null intrinsics) | Board width/height swapped | Width 12, height 9. Check with `check_board.py`. Restart PhotonVision to clear bad snapshots. |
 | Settings page missing Device Control / Restart | Old browser (no `Intl.DurationFormat`) | Update the browser. Fixed in our patch too. |
 | A camera's stream won't show | The browser's connection limit (each open stream holds one) | Close extra PhotonVision tabs, then Ctrl+Shift+R. |
+| PhotonVision never shows up on NT after a boot; restarting robot code fixes it | PhotonVision started before robot code and its NT client got stuck (see Known issues) | Restart robot code, or press Save on PhotonVision's Settings page. Save the PhotonVision log first. |
 | PhotonVision won't start ("corrupt jarfile") | A bad jar was installed | Reinstall a good jar with `06-install-fork-jar.sh`, or copy back `photonvision.jar.prev`. |
 | Robot code throws about a PhotonLib version or message mismatch | Robot PhotonLib upgraded past alpha-6 | Keep `photonlib v2027.0.0-alpha-2`. |
 | Gradle build fails with a PKIX/SSL error | The shop network's filter blocked `frcmaven.wpi.edu` | Use another network, or get it allowlisted. |
@@ -599,6 +607,8 @@ PhotonVision's Object Detection pipeline runs YOLO models on the Jetson's GPU th
 - **Use the Jetson's camera names** (`TopLeft`, `TopRight`, …), exactly as the dashboard shows them.
 - **Call `setEnabled(true)` on every camera at robot init** (*). A camera robot code disabled stays disabled if robot code restarts (PhotonVision keeps it in memory), and returns empty results.
 - **Drop the tags in `/photonvision/excludedTagsActive`** (*). They're left out of multi-tag, but still sent as single-tag targets.
+- **Send the field map, and check the Jetson's** (`photonvision-74`). Robot code publishes the map it uses: `/SpectrumVision/FieldMap/Json` (WPILib's AprilTagFieldLayout JSON), `Hash` and `Name`. The Jetson loads it only if the JSON hashes to `Hash`, saves it for the next boot, and reports the map it's actually using: `/photonvision/jetson/FieldMap/Hash`, `Name`, `LoadedAt` (unix seconds) and `Error`. Alert when its `Hash` isn't yours. The hash is defined in [docs/TECHNICAL.md](docs/TECHNICAL.md#the-field-map-comes-from-the-robot-2026-10-23-photonvision-74): the 2026 AndyMark field is `2792cd4e868967b8`, welded `ca28a7c1139ed099`. Hash the JSON you publish, not the layout you loaded it from: WPILib 2027's JSON writer drops the sign of a `-0.0`, which changes the hash.
+- **Watch each camera's `health/state`** (`photonvision-75`). It reads `streaming`, `stalled`, `recovering`, `disconnected`, `gave-up`, `paused` or `starting`, and `heartbeat` counts up every second. `gave-up` means the Jetson can't bring that camera back: a Thriftiest Cam in that state needs a power cycle. A dead camera sends no results, so `isConnected()` goes false (\*: SpectrumVision alerts on `gave-up` and `problem`).
 - **The event profile wins at field connect.** With "switch to the event pipeline when the FMS connects" on, a pipeline robot code chose before the field connected is replaced. Set it again after `DriverStation.isFMSAttached()` if robot code picks pipelines.
 - **After a NetworkTables reconnect**, results in the first ~1 s can carry an unsynced timestamp: skip results whose `metadata.timeSinceLastPong` is large (*: the `timeSynced` gate).
 - **The robot's control word:** both formats work. A 2026 roboRIO publishes `/FMSInfo/FMSControlData`, and WPILib 2027 publishes the `/FMSInfo/ControlWord` struct (`photonvision-62`). Before this, PhotonVision read a 2027 robot as always disabled, so cameras idled at ~30 fps through matches.
@@ -699,6 +709,8 @@ The detailed technical reference, with exact versions, commits and measurements,
 - [x] Full backup image of the SSD with PhotonVision's settings (`scripts/host/04-backup-ssd.sh`: 8.7 GB, 7 min). Keep it on the team drive, never GitHub (it holds the Wi-Fi password and SSH keys)
 - [x] GitHub release [v2026.09.24](https://github.com/Spectrum3847/SpectrumJetson/releases/tag/v2026.09.24): the PhotonVision jar, TensorRT backend, camera driver and settings
 - [ ] Clone a spare SSD from the backup (`scripts/host/05-restore-ssd.sh`)
+- [ ] Field map from the robot (`photonvision-74`): run `tests/field-map/run.sh` on the Jetson, then check on the robot that `/photonvision/jetson/FieldMap/Hash` matches robot code's and stays put through a Jetson power cycle
+- [ ] Dead cameras (`photonvision-75`) on the Jetson. Check `health/state` and `heartbeat` with the stuck-camera hook (`stalled` → `recovering` → `gave-up` after 4 USB resets), with a camera unplugged (`disconnected`, then `gave-up` after 10 s), and with a camera wedged by `tests/usb-hub-reset`. Also check that no `rawBytes` arrive from a dead camera.
 
 
 ## Credits and licenses

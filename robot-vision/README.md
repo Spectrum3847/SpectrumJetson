@@ -236,6 +236,7 @@ System.out.println(s.stats().summary());
 | Vision rejecting every pose (top reason) | candidates arrive, none accepted for 3 s, while enabled | any PhotonVision |
 | Camera X: N fps | below 20 fps while enabled | SpectrumJetson |
 | Camera X: problem | the camera reports one: stuck, wrong mode, USB | SpectrumJetson |
+| Camera X won't recover by itself: power-cycle the robot | its `health/state` is `gave-up` and it reports no problem | SpectrumJetson with `photonvision-75` |
 | Jetson throttling / hot | over-current, a temperature or clock cap, or ≥ 92 °C | SpectrumJetson |
 | Jetson in quiet mode while enabled | it should leave quiet mode within 0.1 s of an enable | SpectrumJetson |
 

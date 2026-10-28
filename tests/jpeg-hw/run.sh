@@ -17,7 +17,7 @@ lib=${LIB:-$HOME/build/bos-detector/libspectrumnvjpg.so}
 files=("$@")
 if [[ ${#files[@]} -eq 0 ]]; then
   mapfile -t files < <(ls -d /opt/photonvision/rewind/sessions/*/ 2>/dev/null | sort | tail -3 |
-                       while read -r s; do ls "$s"*/0000.mjpeg 2>/dev/null; done)
+                       while read -r s; do ls "$s"*/*0000.mjpeg 2>/dev/null; done)
 fi
 [[ ${#files[@]} -gt 0 ]] || { echo "No Rewind recordings found; pass .mjpeg files" >&2; exit 1; }
 # Colour content (our cameras are mono): real photos as 4:2:2, 4:2:0 and 4:4:4 JPEGs.

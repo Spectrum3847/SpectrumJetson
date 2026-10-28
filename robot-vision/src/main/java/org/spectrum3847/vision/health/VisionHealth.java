@@ -24,6 +24,8 @@ import org.spectrum3847.vision.log.VisionStats;
  *   <li>the coprocessor's time sync is stale (frames' {@code timeSinceLastPong})
  *   <li>a camera's fps is below {@link #minFps} while enabled (SpectrumJetson's {@code health/fps})
  *   <li>a camera reports a problem (SpectrumJetson's {@code health/problem}: stuck, wrong mode, ...)
+ *   <li>the Jetson has given up on a camera (SpectrumJetson's {@code health/state} "gave-up": only
+ *       a power cycle brings a wedged Thriftiest Cam back)
  *   <li>the Jetson is throttling (over-current or temperature) or hot ({@link #maxJetsonTempC})
  *   <li>the Jetson is in quiet mode while the robot is enabled (it shouldn't be)
  *   <li>frames arrive but every candidate is rejected (with the top reason), while enabled
@@ -50,9 +52,9 @@ public class VisionHealth {
     private double rejectingSince = Double.NaN;
 
     private static final class CameraAlerts {
-        final VisionAlert disconnected, format, sync, fps, problem;
+        final VisionAlert disconnected, format, sync, fps, problem, gaveUp;
         final DoubleSubscriber fpsSub;
-        final StringSubscriber problemSub;
+        final StringSubscriber problemSub, stateSub;
         final String name;
 
         CameraAlerts(NetworkTable pv, String name) {
@@ -62,9 +64,23 @@ public class VisionHealth {
             sync = new VisionAlert("Vision", "Camera " + name + ": time sync stale (timestamps may be wrong)", Level.WARNING);
             fps = new VisionAlert("Vision", "", Level.WARNING);
             problem = new VisionAlert("Vision", "", Level.ERROR);
-            fpsSub = pv.getSubTable(name).getSubTable("health").getDoubleTopic("fps").subscribe(Double.NaN);
-            problemSub = pv.getSubTable(name).getSubTable("health").getStringTopic("problem").subscribe("");
+            gaveUp = new VisionAlert(
+                    "Vision", "Camera " + name + " won't recover by itself: power-cycle the robot", Level.ERROR);
+            var health = pv.getSubTable(name).getSubTable("health");
+            fpsSub = health.getDoubleTopic("fps").subscribe(Double.NaN);
+            problemSub = health.getStringTopic("problem").subscribe("");
+            stateSub = health.getStringTopic("state").subscribe("");
         }
+    }
+
+    /**
+     * SpectrumJetson's {@code health/state} for a camera: "streaming", "stalled", "recovering",
+     * "disconnected", "gave-up", "paused" or "starting"; "" when the coprocessor doesn't publish it
+     * (stock PhotonVision, or before SpectrumJetson's photonvision-75). Log it with the camera.
+     */
+    public String cameraState(String name) {
+        var c = cameras.get(name);
+        return c == null ? "" : c.stateSub.get();
     }
 
     public VisionHealth(double nowSeconds) {
@@ -94,6 +110,9 @@ public class VisionHealth {
             String p = c.problemSub.get();
             c.problem.setText("Camera " + name + ": " + p);
             c.problem.set(p != null && !p.isEmpty());
+            // The Jetson has given up on it (a wedged camera needs its power cut). Its problem says
+            // why; this says what to do, and covers a Jetson that hasn't filled in a problem.
+            c.gaveUp.set("gave-up".equals(c.stateSub.get()) && (p == null || p.isEmpty()));
         });
         String t = throttle.get();
         throttleAlert.setText("Jetson throttling: " + t);

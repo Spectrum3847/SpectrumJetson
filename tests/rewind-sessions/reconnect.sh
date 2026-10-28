@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A robot recording through a NetworkTables drop (photonvision-74). Run ON THE JETSON, off the robot.
+# A robot recording through a NetworkTables drop (photonvision-77). Run ON THE JETSON, off the robot.
 #
 # At TXMAN1 (2026-10-17) a flaky robot switch dropped NetworkTables for ~2 s mid-match, and each
 # reconnect split the match's recording in two: after a reconnect, record reads false until the

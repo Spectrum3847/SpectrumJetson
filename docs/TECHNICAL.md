@@ -103,7 +103,8 @@ Settings shared by the scripts live in [config.env](../config.env).
 **Target event:** October 2026 off-season, playing as **team 8515**. Robot code is
 [`Spectrum3847/2026-FM-SystemCore`](https://github.com/Spectrum3847/2026-FM-SystemCore)
 (WPILib 2027.0.0-alpha-6 on a **SystemCore**, vendordep `photonlib v2027.0.0-alpha-2`).
-The field is the **2026 Rebuilt AndyMark** layout, on the Jetson and in robot code.
+The field is the **2026 Rebuilt AndyMark** layout, on the Jetson and in robot code. Since
+`photonvision-74` robot code sends the Jetson its map, and the Jetson reports the one it loaded.
 
 **Decision:** the Jetson runs the **unmodified 2026** `FRC-Team-4143/photonvision` fork
 (`d8c9e8e`, WPILib 2026.2.1) with 971's CUDA detector. The robot uses **stock**
@@ -323,7 +324,10 @@ JVM (`tests/jvm-check.sh`, 2 cameras at ~90 fps): 28 MB peak heap of 512 MB, 0 G
 - **How it records.** It adds a per-camera `RewindRecorder` in `USBFrameProvider`: a second cscore `RawSink` on the `UsbCamera`, left at `kUnknown` pixel format, so `GetExistingImage(0)` hands over the camera's own MJPEG bytes. No decode, no re-encode.
 - **Threads.** One thread per camera, at nice 10 via `renice` on `/proc/thread-self`. It keeps a frame if ≥ 1/fps − 2 ms has passed since the last kept frame (30 fps).
 - **Control.** `RewindManager` runs a 5 Hz tick: robot NT `record` (plus a 60 s grace period if the robot disconnects) or the UI's bench switch. It also enforces the quota and minimum free space. Files go to `/opt/photonvision/rewind`.
-- **Reconnects** (`photonvision-74`, 2026-10-19). On a disconnect ntcore drops the values it had from the server, so after the reconnect `record` reads its default, false, until the robot's value comes back. The tick read that as "robot stopped": at TXMAN1 each ~2 s switch drop split a match's recording in two (Q30: `0011`, then `0012` two seconds later). `RobotRecordRequest` now keeps the grace through the reconnect until a `record` value arrives after it. Connects, disconnects and values come from one `NetworkTableListenerPoller` read each tick, in ntcore's order; callbacks on the listener thread lost events in the unit test, the poller never did. `RobotRecordRequestTest` uses a real ntcore server and client on localhost: with the old rule 3 of its 4 cases split the recording; with the new one a late true keeps one session, a false or 60 s of nothing ends it. `tests/rewind-sessions/reconnect.sh` checks the same on the Jetson, with a fake robot and an iptables drop.
+- **File names** (`photonvision-75`, 2026-10-27). Each file names its recording and camera: `<session>_<camera>_NNNN.mjpeg`/`.csv` and `<session>_session.json`, the names robotlog.spectrum3847.org stores them under (it keys files by name, and every camera's first segment was `0000.mjpeg`). With no robot label and no FMS match, the label is the robot's mode when recording starts (`auto`, `teleop`, `test`, `disabled`, `estop`, `no-robot`) instead of `robot` or `bench`. Readers take both the old and new names; recordings already on the SSD keep theirs.
+- **5 min files** (`photonvision-76`, 2026-10-27). Each camera's video starts a new file every 5 min instead of every 60 s. A match (~160 s, plus the robot's 10 s tail and up to 60 s of disconnect grace) is one file per camera, so robotlog shows it as one clip instead of three. A recording was never cut at 60 s; only its files were. A 5 min file is ~0.85-1 GB at FM's frame rate. Power-cut loss is still bounded by the 2 s sync, and the exports still split AVIs at 1.9 GB.
+- **Reconnects** (`photonvision-77`, 2026-10-19). On a disconnect ntcore drops the values it had from the server, so after the reconnect `record` reads its default, false, until the robot's value comes back. The tick read that as "robot stopped": at TXMAN1 each ~2 s switch drop split a match's recording in two (Q30: `0011`, then `0012` two seconds later). `RobotRecordRequest` now keeps the grace through the reconnect until a `record` value arrives after it. Connects, disconnects and values come from one `NetworkTableListenerPoller` read each tick, in ntcore's order; callbacks on the listener thread lost events in the unit test, the poller never did. `RobotRecordRequestTest` uses a real ntcore server and client on localhost: with the old rule 3 of its 4 cases split the recording; with the new one a late true keeps one session, a false or 60 s of nothing ends it. `tests/rewind-sessions/reconnect.sh` checks the same on the Jetson, with a fake robot and an iptables drop.
+- **Matches through disconnects** (`photonvision-78`, 2026-10-27). A recording of an FMS match keeps going through a disconnect until the robot is back and sends `record` false, or 5 min after its last true, instead of 60 s. That covers the rest of a match the robot dropped out of. Settings > Rewind > Record through disconnects (`recordThroughDisconnects` in `settings.json`, off by default) does the same for every robot recording: turn it on at events for practice matches.
 - **Measured** (2 cameras, `tests/rewind-ab/run.sh 30 2`): detector fps 108–110 / 99–100 off, and the same with recording on; detect time 1.5–1.9 ms either way. Rewind threads use 2.9% of one core. Frames are 30–55 KB; TopRight's view compresses better.
 - **WPILib bug:** `RawFrame.getSize()` returns the limit of a Java `ByteBuffer` that is only replaced when the native data pointer changes. `WPI_AllocateRawFrameData` frees and mallocs, which often returns the same address, and it doesn't reallocate at all when the frame fits the capacity. So the limit stuck at the first frame's size: every frame was 51,677 bytes, with no EOI marker. Fix: `RawFrame.setData()` with our own 4 MB direct buffer (the JNI gives it a no-op free), and the real length from the JPEG (walk the marker segments, then the first `FFD9` in the scan data). Verified: 1,005/1,005 frames complete, sizes 54.3–54.8 KB, the AVI decodes end to end in GStreamer.
 - **Export** (`scripts/host/rewind-export.py`). A plain-Python MJPEG AVI writer (RIFF `hdrl`/`movi`/`idx1`, split under 2 GB), plus `frames.csv` with `jetson_us` and `robot_us`. Optional H.264 `.mp4` via ffmpeg's concat demuxer with per-frame durations.
@@ -797,6 +801,46 @@ only goes out when it changes.
   | +8.0 s | USB reset of `1-2.3` |
   | +9.1 s | Kernel re-enumerated it: "Found UVC 1.00 device Thrifty", the payload cap re-applied, "authorized to connect". cscore reconnected |
   | end of test | "delivering frames again, after a USB reset" |
+
+**`photonvision-75`: a dead camera is dead, and says so** (2026-10-27, after TXMAN1: see
+[TXMAN1-JETSON-REVIEW.md](TXMAN1-JETSON-REVIEW.md), F1 and F2).
+- **No blank results on NetworkTables.** A blank result (capture time 0: the camera is disabled,
+  unplugged, or sends nothing usable) used to be published as a result. That's ~50 a second, each
+  stamped with just the time-sync offset; at TXMAN1 the robot read them for minutes after a camera
+  died. Now `NTDataPublisher` publishes only the camera's settings for one (`enabled`,
+  `pipelineIndexState`, `driverMode`, `fpsLimit`). The result and `heartbeat` stand still, so
+  PhotonLib reads no results and `isConnected()` goes false.
+- **The watchdog escalates instead of stopping.**
+  - **Disconnected, its USB device still in `/sys/bus/usb/devices/<port>`:** after 5 s, a USB reset;
+    then one every 30 s. Before, nothing was tried once cscore saw the camera disconnected. USB resets
+    now go through the port, so a camera that has lost its `/dev/video` node can be reset too.
+  - **Gone from USB for 10 s:** gave up. A wedged Thriftiest Cam needs its power cut
+    ([USB hub reset](#usb-hub-reset-stuck-thriftiest-cams-a-hung-reboot-and-the-log-flood-2026-09-25)).
+  - **Connected, no frames, after 4 USB resets:** gave up.
+  - **After giving up:** one more USB reset every 2 min, in case it's something else.
+  - **Bandwidth retries** (`photonvision-31`) now count in `recoveries`.
+- **Health that can't look frozen** (`/photonvision/<camera>/health/`, from a 1 s timer that doesn't
+  depend on results):
+
+  | Topic | Type | What |
+  | --- | --- | --- |
+  | `heartbeat` | int | Counts up each second |
+  | `state` | string | `streaming`, `stalled` (connected, no frame for 1 s), `recovering` (a reconnect or reset tried), `disconnected`, `gave-up`, `paused` (nobody reading it: disabled by robot code), `starting` |
+  | `lastFrameAgeMs` | int | Since the last usable frame; -1 before the first |
+
+  - **Repeats reach the robot's log.** `fps` and `state` keep duplicates: NetworkTables drops a value
+    equal to the last one, so at TXMAN1 a dead camera's `fps 0` reached the robot's log only at the
+    next reconnect.
+  - **`fps` goes to 0** when no result has arrived for 2 s.
+  - **`problem` stays set** until the camera delivers frames again (it was cleared 90 s after the
+    kernel's message). It now also says "gone from USB port …" and "no frames after 4 USB resets".
+- **Tests:**
+  - `StuckCameraWatchdogTest`: 12 tests, 6 new.
+  - `CameraHealthPublisherTest`: 2 tests.
+  - `NTDataPublisherBlankResultTest`: 1 test. It needs the targeting JNI, so it runs on Linux and the
+    Jetson and is skipped on Windows.
+  - **Not yet on the Jetson.** To test there: the stuck-camera hook, unplugging a camera, and a
+    camera wedged by `tests/usb-hub-reset`.
 
   Afterwards the health check passed: both cameras streaming 1280x800 MJPG as set, NVJPG 242
   frames/s with checks ok, 122 fps each.
@@ -1909,6 +1953,95 @@ and only a PhotonVision restart helped.
   view. So `Frame.unshareProcessed()` gives `processedImage` its own copy right before a frame goes
   to the stream (at most 30 a second, `photonvision-15`) or to that debug view. Detection is always
   finished with the frame by then.
+
+### The field map comes from the robot (2026-10-23, `photonvision-74`)
+
+**Before:** the field map was PhotonVision's own setting, `apriltagFieldLayout` in
+`photon.sqlite`. It starts as WPILib's default field and changes only when someone uploads a JSON
+on the Settings page (or Field Calibration applies one). Nothing told robot code which map the
+Jetson had, apart from a fingerprint in `settingsJson` in another format. Every multi-tag pose
+depends on it.
+
+**Now robot code's map is the one used.** Robot code publishes it to every camera; the Jetson
+checks it, loads it, keeps it, and says what it loaded.
+
+| Topic | Type | From | What |
+| --- | --- | --- | --- |
+| `/SpectrumVision/FieldMap/Json` | string | robot | WPILib `AprilTagFieldLayout` JSON |
+| `/SpectrumVision/FieldMap/Hash` | string | robot | its hash (below) |
+| `/SpectrumVision/FieldMap/Name` | string | robot | e.g. `k2026RebuiltAndymark` |
+| `/photonvision/jetson/FieldMap/Hash` | string | Jetson | hash of the map in use, however it was set |
+| `/photonvision/jetson/FieldMap/Name` | string | Jetson | the robot's name for it, or `photonvision-settings` |
+| `/photonvision/jetson/FieldMap/LoadedAt` | double | Jetson | unix seconds by the Jetson's clock (right once the robot has set it, patch 08) |
+| `/photonvision/jetson/FieldMap/Error` | string | Jetson | why the robot's last map wasn't used; empty when it was |
+
+**The hash** (`FieldMapHash`; robot code computes the same): tags sorted by ID, one line each,
+`id,x,y,z,qw,qx,qy,qz` (meters, the tag pose's rotation quaternion), then `field,<length>,<width>`.
+Every number is Java's `String.format(Locale.ROOT, "%.4f", v)`. Lines joined with `\n`, no trailing
+newline, SHA-256 of the UTF-8 bytes, the first 16 lowercase hex characters. 2026 AndyMark:
+`2792cd4e868967b8`; 2026 welded: `ca28a7c1139ed099` (the same with WPILib 2026.2.1 on the Jetson's
+Java 17, with 2027 alpha-6 on Java 25, and with an independent Python version).
+- **Rounding is Java's.** `%.4f` rounds the shortest decimal form of the double half-up. Python's
+  `f"{v:.4f}"` rounds the exact binary value half-even, and the Rebuilt field hits the difference:
+  its 0.55245 m tags are `0.5525` in Java and `0.5524` in Python, so plain Python gets
+  `90dbef151859080a` for AndyMark. A Python version must round
+  `Decimal(repr(v)).quantize(Decimal("0.0001"), ROUND_HALF_UP)` and keep the sign of zero.
+- **`-0.0` counts.** Java prints a value that rounds to zero with its sign (`-0.0000`). WPILib's
+  AndyMark and welded JSONs have `"X": -0.0` in four tags. WPILib 2027's JSON writer
+  (`AprilTagFieldLayout.serialize`) writes those as `0.0`, so the JSON it produces for AndyMark
+  hashes to `a0a75cd9a602dcc1`, not `2792cd4e868967b8`. Robot code must hash the JSON it publishes
+  (parse it back, or publish WPILib's resource file as is), or the Jetson refuses its map.
+
+**What the Jetson does** (`FieldMapSync`, `FieldMapNT`, polled every 200 ms on PhotonVision's timer
+thread):
+- Waits until `Json`, `Hash` and `Name` have stopped changing for one poll (the robot publishes them
+  one after another), then parses the JSON and checks it: at least one tag, no ID twice, field 1–30 m
+  each way, every tag finite and on the field (2 m margin, under 5 m high).
+- Loads it only if its hash equals `Hash`. On a mismatch or a bad JSON the map in use stays and
+  `Error` says why.
+- **Loading** sets PhotonVision's own setting (`setApriltagFieldLayout`, as upstream's
+  `/photonvision/apriltag_field_layout` does) and asks for a settings save. On a camera thread that's
+  a reference swap: the parsing and checks happen on the timer thread, and each AprilTag and Aruco
+  pipeline now reads the layout once per frame, so a frame's multi-tag and single-tag poses always
+  use one map and a change lands between frames. Nothing heavy runs on a camera thread, so a load
+  isn't held until the robot is disabled (the Jetson could tell, through `NTDriverStation`): after a
+  Jetson reboot mid-match, the robot's map is back before the cameras are.
+- **Kept for the next boot** in `photonvision_config/spectrum/field-map.json`: the robot's JSON, its
+  hash and name, written to a temporary file, flushed, and renamed over the old one. At boot, before
+  the cameras start, it's loaded if its hash still checks out; otherwise PhotonVision's own setting
+  is used and `Error` says the saved one was unusable.
+- The same map again (the robot reconnecting) is not reloaded or rewritten.
+- A layout uploaded on the Settings page, or applied or undone by Field Calibration, deletes the
+  saved robot map, so the next boot uses it, until the robot sends its map again.
+
+**PhotonVision's own ways to set the map, and why they aren't used as they are:**
+- `POST /api/settings/aprilTagFieldLayout` (the Settings page's upload, multipart key `data`):
+  `saveUploadedAprilTagFieldLayout` writes it to the database, then **restarts PhotonVision**, about
+  20 s without cameras.
+- `/photonvision/apriltag_field_layout` (string, upstream `NetworkTablesManager`): any JSON published
+  there replaces the map at once and is saved. No hash, no checks beyond parsing, and nothing tells
+  the robot what was loaded. It's still there and nothing of ours publishes to it; if something
+  does, the Jetson's `FieldMap/Hash` reports that map, named `photonvision-settings`.
+
+**Checked** (laptop, Windows, the fork with patches 00–74):
+- `FieldMapHashTest`: both reference fields, the canonical text (the 0.55245 tie), formatting of
+  `-0.0`, a negative-zero map against a hash computed in Python, and a JSON round trip.
+- `FieldMapSyncTest`: loads and saves; refuses a hash mismatch, a missing hash, and nine bad JSONs
+  (not JSON, no tags, empty tags, zero and 165 m fields, a duplicate ID, a tag off the field, a
+  negative ID, a truncated file) with the map in use untouched; keeps the robot's map when a
+  refused one follows; doesn't reload or rewrite the same map; uses the saved map at the next boot;
+  ignores a saved file that was edited or truncated; forgets the saved map; reports a map set some
+  other way; and the NetworkTables side on a local instance (a JSON a poll ahead of its hash isn't
+  reported as a mismatch).
+- AprilTag, Aruco and tag-quality pipeline tests still pass.
+- End to end, two processes: PhotonVision's configuration, `FieldMapNT.start()` and an NT client on
+  one side, `tests/field-map/FieldMapRobot.java` as the NT server on the other. A wrong hash was
+  refused and reported; a map written by WPILib 2027's serializer, sent with its own hash, loaded;
+  the reference map loaded and was echoed. After a restart with the robot silent the saved map was
+  in use from the start, also with PhotonVision's database deleted. A stand-in camera loop reading
+  the layout every 8 ms saw each change between two reads; the slowest read took 0.3 ms.
+- **On a Jetson:** `tests/field-map/run.sh` (also in `tests/run-all.sh`) runs the same checks
+  against the real service, plus every camera's fps through the swap. Not run yet.
 
 ## Changes from the handoff
 

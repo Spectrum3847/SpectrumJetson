@@ -99,7 +99,7 @@ def cmd_solve(a) -> int:
     cams = rewind.cameras_from_session(session)
     srcs = rewind.sources(a.session)
     if not srcs:
-        print(f"No camera recordings in {a.session} (expected Camera/0000.mjpeg + .csv, or Camera.avi + "
+        print(f"No camera recordings in {a.session} (expected Camera/*_0000.mjpeg + .csv, or Camera.avi + "
               "Camera.frames.csv)", file=sys.stderr)
         return 2
     sizes = {src.name: rewind.frame_size(src) for src in srcs}
