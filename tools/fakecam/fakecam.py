@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fake cameras: play Rewind recordings into v4l2loopback devices, so PhotonVision sees cameras.
 
-Each camera folder of a Rewind session (docs/REWIND.md: NNNN.mjpeg + NNNN.csv) goes to one
+Each camera folder of a Rewind session (docs/REWIND.md: ..._NNNN.mjpeg + .csv) goes to one
 v4l2loopback device as MJPEG, frame for frame at the recording's own timing, looping. PhotonVision
 opens them like USB cameras, so the real path runs: cscore, our MJPEG decode, the GPU detector.
 They have no camera controls (exposure, gain) and no USB bandwidth, so tests of those skip.

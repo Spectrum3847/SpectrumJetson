@@ -1,0 +1,133 @@
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/RewindExport.java b/photon-core/src/main/java/org/photonvision/rewind/RewindExport.java
+index 603f326c..38916aa3 100644
+--- a/photon-core/src/main/java/org/photonvision/rewind/RewindExport.java
++++ b/photon-core/src/main/java/org/photonvision/rewind/RewindExport.java
+@@ -92,7 +92,7 @@ public final class RewindExport {
+     public static void writeZip(Path sessionDir, OutputStream out) throws IOException {
+         ZipOutputStream zip = new ZipOutputStream(out);
+         zip.setLevel(Deflater.NO_COMPRESSION);
+-        Path meta = sessionDir.resolve("session.json");
++        Path meta = RewindManager.sessionJson(sessionDir);
+         if (Files.exists(meta)) {
+             zip.putNextEntry(new ZipEntry("session.json"));
+             Files.copy(meta, zip);
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
+index a94514a7..ccc7445c 100644
+--- a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
++++ b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
+@@ -56,7 +56,7 @@ import org.photonvision.common.util.TimedTaskManager;
+  * <ul>
+  *   <li>{@code record} (boolean, robot sets): record while true.
+  *   <li>{@code label} (string, robot sets, optional): names the recording, e.g. "shooter-test-3".
+- *       Empty: the FMS match (e.g. "Q12"), else "robot".
++ *       Empty: the FMS match (e.g. "Q12"), else the robot's mode ("teleop", "disabled", ...).
+  *   <li>{@code recording}, {@code session}, {@code freeGB}, {@code framesDropped} (Jetson sets).
+  * </ul>
+  *
+@@ -65,8 +65,8 @@ import org.photonvision.common.util.TimedTaskManager;
+  * footage of what happened is kept.
+  *
+  * <p>Each recording is a session folder under {@link #ROOT}{@code /sessions}, holding {@code
+- * session.json} and one folder per camera. When the folder passes its quota or the disk gets low,
+- * the oldest sessions are deleted.
++ * <session>_session.json} and one folder per camera. When the folder passes its quota or the disk
++ * gets low, the oldest sessions are deleted.
+  */
+ public class RewindManager {
+     private static final Logger logger = new Logger(RewindManager.class, LogGroup.General);
+@@ -75,6 +75,16 @@ public class RewindManager {
+     public static final Path ROOT = Path.of("/opt/photonvision/rewind");
+ 
+     public static final Path SESSIONS = ROOT.resolve("sessions");
++
++    /** photonvision-75: {@code <session>_session.json}; older recordings: {@code session.json}. */
++    public static final String SESSION_JSON = "_session.json";
++
++    /** A session folder's metadata file, under either name. */
++    public static Path sessionJson(Path sessionDir) {
++        Path p = sessionDir.resolve(sessionDir.getFileName() + SESSION_JSON);
++        return Files.exists(p) ? p : sessionDir.resolve("session.json");
++    }
++
+     private static final Path SETTINGS_FILE = ROOT.resolve("settings.json");
+     private static final Path SEQ_FILE = ROOT.resolve("next-session-number");
+     private static final long DISCONNECT_GRACE_US = 60_000_000L;
+@@ -306,12 +316,9 @@ public class RewindManager {
+     }
+ 
+     private void openSession(long now, String reason) {
+-        String label =
+-                reason.equals("robot")
+-                        ? labelSub.get().strip()
+-                        : manualLabel.isEmpty() ? "bench" : manualLabel;
++        String label = reason.equals("robot") ? labelSub.get().strip() : manualLabel;
+         if (label.isEmpty()) label = matchName();
+-        if (label.isEmpty()) label = "robot";
++        if (label.isEmpty()) label = robotMode();
+         String stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+         String name = String.format("%04d_%s_%s", nextSessionNumber(), safeName(label), stamp);
+         Path dir = SESSIONS.resolve(name);
+@@ -369,7 +376,8 @@ public class RewindManager {
+             m.put("endJetsonUs", NetworkTablesJNI.now());
+             m.put("endReason", endReason);
+         }
+-        try (var out = new java.io.FileOutputStream(s.dir().resolve("session.json").toFile())) {
++        try (var out =
++                new java.io.FileOutputStream(s.dir().resolve(s.name() + SESSION_JSON).toFile())) {
+             json.writeValue(new java.io.FilterOutputStream(out) {
+                 @Override
+                 public void close() {} // keep the file open for the sync below
+@@ -380,6 +388,18 @@ public class RewindManager {
+         }
+     }
+ 
++    /** photonvision-75: off the FMS there's no event or match, so name the robot's mode. */
++    private static String robotMode() {
++        var nt = NetworkTablesManager.getInstance();
++        var ds = nt.getDriverStation();
++        if (!nt.getNTInst().isConnected() || !ds.hasControlWord()) return "no-robot";
++        var w = ds.current();
++        if (w.m_emergencyStop()) return "estop";
++        if (!w.m_enabled()) return "disabled";
++        if (w.m_test()) return "test";
++        return w.m_autonomous() ? "auto" : "teleop";
++    }
++
+     private String matchName() {
+         String type =
+                 switch ((int) matchTypeSub.get()) {
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java b/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java
+index 77dda2c6..6e1c9004 100644
+--- a/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java
++++ b/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java
+@@ -194,13 +194,16 @@ public class RewindRecorder {
+         logger.info("Rewind: recording to " + cameraDir);
+     }
+ 
+-    /** One past the highest NNNN.mjpeg already in {@code dir} (0 for a new camera folder). */
++    /** One past the highest ...NNNN.mjpeg already in {@code dir} (0 for a new camera folder). */
+     private static int nextSegmentIndex(Path dir) throws IOException {
+         int next = 0;
+         try (var files = Files.list(dir)) {
+             for (Path f : (Iterable<Path>) files::iterator) {
+                 String n = f.getFileName().toString();
+-                if (n.matches("[0-9]{4}\\.mjpeg")) next = Math.max(next, Integer.parseInt(n.substring(0, 4)) + 1);
++                if (n.matches("(.*_)?[0-9]{4}\\.mjpeg")) {
++                    int end = n.length() - ".mjpeg".length();
++                    next = Math.max(next, Integer.parseInt(n.substring(end - 4, end)) + 1);
++                }
+             }
+         }
+         return next;
+@@ -208,7 +211,10 @@ public class RewindRecorder {
+ 
+     private void openSegment(long t) throws IOException {
+         closeFiles();
+-        String base = String.format("%04d", segmentIndex++);
++        // photonvision-75: named for the session and camera, so a file means the same thing
++        // outside its folder (robotlog stores files by name).
++        String base =
++                String.format("%s_%s_%04d", session.name(), cameraDir.getFileName(), segmentIndex++);
+         data =
+                 FileChannel.open(
+                         cameraDir.resolve(base + ".mjpeg"),

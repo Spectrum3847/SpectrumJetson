@@ -34,7 +34,7 @@ All topics are under `/photonvision/rewind/` in NetworkTables.
 | Topic | Type | Who sets it | Meaning |
 |---|---|---|---|
 | `record` | boolean | robot | Record while true. |
-| `label` | string | robot | Optional name for the recording, e.g. `shooter-test-3`. Empty: the FMS match (`Q12`), else `robot`. Read when a recording starts. |
+| `label` | string | robot | Optional name for the recording, e.g. `shooter-test-3`. Empty: the FMS match (`Q12`), else the robot's mode (`auto`, `teleop`, `test`, `disabled`, `estop`, or `no-robot`). Read when a recording starts. |
 | `recording` | boolean | Jetson | Whether it's recording right now. |
 | `session` | string | Jetson | The current recording's name. |
 | `freeGB` | double | Jetson | Free space on the Jetson's SSD. |
@@ -151,14 +151,21 @@ and set its offset so a known event lines up; the CSV gives the exact offset.
 
 ```
 sessions/0007_Q12_20261010-143502/
-  session.json            name, why it recorded, match, label, fps, per-camera frame counts,
-                          start/end times, and why it ended
-  TopLeft/0000.mjpeg      JPEG frames back to back (one file per 60 s)
-  TopLeft/0000.csv        frame,offset,size,width,height,jetson_us,robot_us
+  0007_Q12_20261010-143502_session.json         name, why it recorded, match, label, fps,
+                                                per-camera frame counts, start/end times, and
+                                                why it ended
+  TopLeft/0007_Q12_20261010-143502_TopLeft_0000.mjpeg   JPEG frames back to back (one file per 60 s)
+  TopLeft/0007_Q12_20261010-143502_TopLeft_0000.csv     frame,offset,size,width,height,jetson_us,robot_us
   TopRight/...
 ```
 
-The number at the start of each name counts up forever, so name order is age order.
+The number at the start of each name counts up forever, so name order is age order. Every file
+names its recording and camera (`photonvision-75`), so it means the same thing out of its folder:
+robotlog.spectrum3847.org stores files by name. Recordings from before then have `session.json`,
+`0000.mjpeg` and `0000.csv`; the tools here read both.
+
+The label is the robot's `label`, else the FMS match, else the robot's mode when the recording
+started. A recording from the web page's Record now button uses the same fallback.
 
 ## Checking it still works
 

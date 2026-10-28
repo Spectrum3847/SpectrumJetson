@@ -1,8 +1,9 @@
 """Reading a Rewind recording (docs/REWIND.md), in either form it reaches a laptop:
 
-* the session folder itself (rewind-pull.sh, or scp): session.json plus, per camera, NNNN.mjpeg
-  (JPEG frames back to back) and NNNN.csv (frame, offset, size, width, height, jetson_us,
-  robot_us);
+* the session folder itself (rewind-pull.sh, or scp): <session>_session.json plus, per camera,
+  <session>_<camera>_NNNN.mjpeg (JPEG frames back to back) and the same name .csv (frame, offset,
+  size, width, height, jetson_us, robot_us). Recordings before photonvision-75 have session.json,
+  NNNN.mjpeg and NNNN.csv;
 * the browser download (Settings → Rewind), unzipped: session.json, <Camera>.avi (MJPEG, with
   <Camera>.part2.avi etc. past 1.9 GB) and <Camera>.frames.csv (frame, video_s, jetson_us, robot_us,
   robot_s). rewind-export.py's export/ folder is the same.
@@ -33,7 +34,10 @@ class Source:
 
 
 def load_session(session_dir: Path) -> dict:
-    p = Path(session_dir) / "session.json"
+    d = Path(session_dir)
+    p = d / f"{d.resolve().name}_session.json"
+    if not p.exists():
+        p = d / "session.json"
     return json.loads(p.read_text()) if p.exists() else {}
 
 
