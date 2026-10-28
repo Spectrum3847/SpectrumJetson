@@ -1,0 +1,815 @@
+diff --git a/photon-core/src/main/java/org/photonvision/common/hardware/UsbTrouble.java b/photon-core/src/main/java/org/photonvision/common/hardware/UsbTrouble.java
+index 04b7e763..596805cd 100644
+--- a/photon-core/src/main/java/org/photonvision/common/hardware/UsbTrouble.java
++++ b/photon-core/src/main/java/org/photonvision/common/hardware/UsbTrouble.java
+@@ -42,10 +42,47 @@ public final class UsbTrouble {
+     private static final Map<String, Long> bandwidthNs = new ConcurrentHashMap<>();
+     private static final Map<String, Long> connectNs = new ConcurrentHashMap<>();
+ 
++    /**
++     * photonvision-76: any USB trouble worth a line in the robot's log. TXMAN1 Q13's camera death was
++     * "disabled by hub (EMI?)", "USB disconnect", "device descriptor read ... error -110", "unable to
++     * enumerate USB device".
++     */
++    private static final Pattern EVENT =
++            Pattern.compile(
++                    "usb \\d+-[\\d.]+(?:-port\\d+)?: (?:USB disconnect|disabled by hub|device descriptor read"
++                            + "|device not accepting address|Device not responding|unable to enumerate"
++                            + "|over-current|attempt power cycle|Not enough bandwidth|reset (?:high|full|super)"
++                            + "-speed)|uvcvideo.*(?:[Ee]rror|[Ff]ailed|Non-zero status)|xhci.*(?:died|not"
++                            + " responding|[Ee]rror|Babble)|HC died");
++    /** Syslog's "Oct 15 15:27:11 host kernel: [  224.500901] " in front of the message. */
++    private static final Pattern PREFIX = Pattern.compile("^.*?kernel: (?:\\[\\s*[\\d.]+\\] )?");
++
++    private static final java.util.concurrent.atomic.AtomicLong events = new java.util.concurrent.atomic.AtomicLong();
++    private static volatile String lastEvent = null;
++
+     private UsbTrouble() {}
+ 
++    /** photonvision-76: whether a kernel line is USB trouble (see {@link #EVENT}). */
++    public static boolean isEvent(String line) {
++        return line != null && EVENT.matcher(line).find();
++    }
++
++    /** photonvision-76: USB trouble lines since PhotonVision started. */
++    public static long events() {
++        return events.get();
++    }
++
++    /** photonvision-76: the latest USB trouble line, without its syslog prefix; null if none. */
++    public static String lastEvent() {
++        return lastEvent;
++    }
++
+     /** One kernel log line. */
+     public static void noteKernelLine(String line) {
++        if (isEvent(line)) {
++            events.incrementAndGet();
++            lastEvent = PREFIX.matcher(line).replaceFirst("");
++        }
+         if (line == null || !line.contains("usb ")) return;
+         var m = BANDWIDTH.matcher(line);
+         if (m.find()) {
+diff --git a/photon-core/src/main/java/org/photonvision/common/hardware/metrics/InputVoltage.java b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/InputVoltage.java
+new file mode 100644
+index 00000000..79e3a9d9
+--- /dev/null
++++ b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/InputVoltage.java
+@@ -0,0 +1,47 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.common.hardware.metrics;
++
++/**
++ * SpectrumJetson (photonvision-76): the board's input voltage (the INA3221's VDD_IN), sampled
++ * often so a short dip between once-a-second publishes still shows up. Keeps the latest reading, the
++ * lowest since the last {@link #takeSecond()}, and the lowest since PhotonVision started.
++ *
++ * <p>Why: at TXMAN1 cameras dropped off USB mid-match ("disabled by hub (EMI?)") and only the
++ * power could be suspected, never checked: the voltage was read for {@code powerW} and thrown away.
++ * The INA3221 averages over a few milliseconds, so a dip shorter than that can still be missed.
++ */
++final class InputVoltage {
++    private double lastMv = Double.NaN;
++    private double secondMinMv = Double.NaN;
++    private double lowestMv = Double.NaN;
++
++    /** One reading, in millivolts. */
++    synchronized void sample(double mv) {
++        lastMv = mv;
++        if (Double.isNaN(secondMinMv) || mv < secondMinMv) secondMinMv = mv;
++        if (Double.isNaN(lowestMv) || mv < lowestMv) lowestMv = mv;
++    }
++
++    /** {latest, lowest since the last call, lowest since start}, in volts; NaN before any sample. */
++    synchronized double[] takeSecond() {
++        double[] v = {lastMv / 1000, secondMinMv / 1000, lowestMv / 1000};
++        secondMinMv = Double.NaN;
++        return v;
++    }
++}
+diff --git a/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonDiagnostics.java b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonDiagnostics.java
+new file mode 100644
+index 00000000..76f0c7a3
+--- /dev/null
++++ b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonDiagnostics.java
+@@ -0,0 +1,377 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.common.hardware.metrics;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import edu.wpi.first.networktables.BooleanPublisher;
++import edu.wpi.first.networktables.DoublePublisher;
++import edu.wpi.first.networktables.IntegerPublisher;
++import edu.wpi.first.networktables.NetworkTable;
++import edu.wpi.first.networktables.NetworkTableEvent;
++import edu.wpi.first.networktables.StringPublisher;
++import java.nio.file.DirectoryStream;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.HashMap;
++import java.util.Map;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicLong;
++import org.photonvision.common.dataflow.networktables.NetworkTablesManager;
++import org.photonvision.common.hardware.UsbBandwidth;
++import org.photonvision.common.hardware.UsbTrouble;
++import org.photonvision.common.logging.LogGroup;
++import org.photonvision.common.logging.Logger;
++import org.photonvision.common.util.RobotClockSync;
++import org.photonvision.common.util.TimedTaskManager;
++
++/**
++ * SpectrumJetson (photonvision-76): what TXMAN1 showed we couldn't see, on NetworkTables under
++ * /photonvision/jetson/, so it lands in the robot's log. The Jetson's own logs stop at quiet mode
++ * and keep only a few boots; the robot's log keeps every match.
++ *
++ * <p>Once a second:
++ *
++ * <ul>
++ *   <li>{@code usbEvents}, {@code lastUsbEvent}: kernel USB trouble since boot (disconnects, a hub
++ *       disabling a port, enumeration failures, uvcvideo and xHCI errors), and the latest line
++ *   <li>{@code ethInterface}, {@code ethLinkUp}, {@code ethSpeedMbps}, {@code ethCarrierChanges}:
++ *       the wired link to the robot. A carrier change at an NT drop means the Jetson's own cable or
++ *       the switch port lost link
++ *   <li>{@code ntDisconnects}: NetworkTables disconnects this process has seen
++ *   <li>{@code bootId}, {@code uptimeSeconds}: a reboot changes the boot ID; a reconnect doesn't
++ *   <li>{@code clockSource} ("robot", "internet" or "unset": the date restored at boot), {@code
++ *       clockLastJumpSeconds}
++ *   <li>{@code cpuUtilPct}, {@code ramUsedPct}
++ *   <li>{@code ssdTempC}; {@code fsErrors} (ext4 errors recorded on any mounted partition), {@code
++ *       settingsReadOnly}, {@code scratchReadOnly} (the scratch partition is read-only on purpose in
++ *       quiet mode; settings never should be)
++ *   <li>{@code usbBandwidthUsedBytes} of {@code usbBandwidthBudgetBytes} per microframe, reserved by
++ *       the cameras on the shared USB 2.0 budget (every 10 s)
++ * </ul>
++ *
++ * Every 5 minutes, from {@code smartctl} (smartmontools, installed by install.sh): {@code
++ * ssdMediaErrors}, {@code ssdUnsafeShutdowns}, {@code ssdPercentUsed}, {@code ssdCriticalWarning},
++ * {@code ssdAvailableSparePct}. Anything a board doesn't provide isn't published.
++ */
++public final class JetsonDiagnostics {
++    private static final Logger logger = new Logger(JetsonDiagnostics.class, LogGroup.General);
++    private static JetsonDiagnostics instance;
++
++    /** Starts the publishers (idempotent). */
++    public static synchronized void start() {
++        if (instance == null) instance = new JetsonDiagnostics();
++    }
++
++    static final long SMART_EVERY_S = 300;
++
++    private final NetworkTable table;
++    private final Map<String, DoublePublisher> doubles = new HashMap<>();
++    private final Map<String, IntegerPublisher> ints = new HashMap<>();
++    private final Map<String, StringPublisher> strings = new HashMap<>();
++    private final Map<String, BooleanPublisher> booleans = new HashMap<>();
++    private final AtomicLong ntDisconnects = new AtomicLong();
++    private final String ethInterface;
++    private final Path ssdTemp;
++    private final CpuMeter cpuMeter = new CpuMeter();
++    private long ticks = 0;
++    private double cpuMax = 0, ramMax = 0;
++
++    /** A summary line in PhotonVision's own log this often (it's only open while not quiet). */
++    static final long SUMMARY_EVERY_S = 60;
++
++    private JetsonDiagnostics() {
++        var nt = NetworkTablesManager.getInstance().getNTInst();
++        table = nt.getTable("photonvision").getSubTable("jetson");
++        ethInterface = findEthernet();
++        ssdTemp = findNvmeTemp();
++        nt.addConnectionListener(
++                false,
++                (NetworkTableEvent e) -> {
++                    if (e.is(NetworkTableEvent.Kind.kDisconnected)) ntDisconnects.incrementAndGet();
++                });
++        String bootId = read(Path.of("/proc/sys/kernel/random/boot_id"));
++        if (bootId != null) str("bootId", bootId);
++        logger.info(
++                "Jetson diagnostics on /photonvision/jetson: Ethernet "
++                        + ethInterface
++                        + (ssdTemp != null ? ", SSD temperature" : "")
++                        + (smartctlPath() != null ? ", SSD SMART (smartctl)" : ", no smartctl"));
++        TimedTaskManager.getInstance().addTask("JetsonDiagnostics", this::tick, 1000, 1000);
++        TimedTaskManager.getInstance()
++                .addTask("JetsonDiagnosticsSmart", this::smart, 5000, SMART_EVERY_S * 1000);
++    }
++
++    private void tick() {
++        try {
++            integer("usbEvents", UsbTrouble.events());
++            String last = UsbTrouble.lastEvent();
++            if (last != null) str("lastUsbEvent", last);
++
++            if (ethInterface != null) {
++                Path n = Path.of("/sys/class/net", ethInterface);
++                str("ethInterface", ethInterface);
++                Long carrier = longOf(n.resolve("carrier"));
++                if (carrier != null) bool("ethLinkUp", carrier == 1);
++                Long speed = longOf(n.resolve("speed"));
++                if (speed != null && speed > 0) integer("ethSpeedMbps", speed);
++                Long changes = longOf(n.resolve("carrier_changes"));
++                if (changes != null) integer("ethCarrierChanges", changes);
++            }
++            integer("ntDisconnects", ntDisconnects.get());
++
++            String up = read(Path.of("/proc/uptime"));
++            if (up != null) dbl("uptimeSeconds", Double.parseDouble(up.split("\\s+")[0]));
++            str("clockSource", RobotClockSync.source());
++            dbl("clockLastJumpSeconds", RobotClockSync.lastJumpSeconds());
++
++            Double cpu = cpuMeter.next(read(Path.of("/proc/stat")));
++            if (cpu != null) {
++                dbl("cpuUtilPct", cpu);
++                cpuMax = Math.max(cpuMax, cpu);
++            }
++            Double ram = ramUsedPct(read(Path.of("/proc/meminfo")));
++            if (ram != null) {
++                dbl("ramUsedPct", ram);
++                ramMax = Math.max(ramMax, ram);
++            }
++
++            if (ssdTemp != null) {
++                Long t = longOf(ssdTemp);
++                if (t != null) dbl("ssdTempC", t / 1000.0);
++            }
++            publishFilesystems();
++
++            if (ticks % SUMMARY_EVERY_S == 0) logSummary();
++            // Every 10 s: the survey reads every camera's USB descriptors.
++            if (ticks++ % 10 == 0) {
++                var s = UsbBandwidth.survey();
++                integer("usbBandwidthUsedBytes", s.reservedBytes());
++                integer("usbBandwidthBudgetBytes", s.budgetBytes());
++            }
++        } catch (RuntimeException e) {
++            logger.error("Jetson diagnostics failed", e);
++        }
++    }
++
++    /**
++     * One line in PhotonVision's log: PhotonVision measures CPU and RAM but never logged them, so
++     * the Jetson's own logs had no record of either at TXMAN1. Peaks are over the last minute.
++     */
++    private void logSummary() {
++        logger.info(
++                String.format(
++                        "Jetson: CPU peak %.0f%%, RAM peak %.0f%%, input voltage lowest %s, Tj %s, SSD %s, USB events %d,"
++                                + " NT disconnects %d, Ethernet carrier changes %s, clock %s",
++                        cpuMax,
++                        ramMax,
++                        fmt(JetsonTelemetry.lowestInputVolts(), "%.2f V"),
++                        fmt(JetsonTelemetry.tjTempC(), "%.0f C"),
++                        ssdTemp == null ? "?" : fmt(longOf(ssdTemp) == null ? null : longOf(ssdTemp) / 1000.0, "%.0f C"),
++                        UsbTrouble.events(),
++                        ntDisconnects.get(),
++                        ethInterface == null ? "?" : String.valueOf(longOf(Path.of("/sys/class/net", ethInterface, "carrier_changes"))),
++                        RobotClockSync.source()));
++        cpuMax = ramMax = 0;
++    }
++
++    private static String fmt(Double v, String format) {
++        return v == null || v.isNaN() ? "?" : String.format(format, v);
++    }
++
++    private void publishFilesystems() {
++        long errors = 0;
++        try (DirectoryStream<Path> devs = Files.newDirectoryStream(Path.of("/sys/fs/ext4"))) {
++            for (Path d : devs) {
++                Long n = longOf(d.resolve("errors_count"));
++                if (n != null) errors += n;
++            }
++        } catch (Exception e) {
++            return; // no ext4 here
++        }
++        integer("fsErrors", errors);
++        String mounts = read(Path.of("/proc/mounts"));
++        if (mounts == null) return;
++        Boolean settings = readOnly(mounts, "/data/settings"), scratch = readOnly(mounts, "/data/scratch");
++        if (settings != null) bool("settingsReadOnly", settings);
++        if (scratch != null) bool("scratchReadOnly", scratch);
++    }
++
++    /** SSD health from smartctl's JSON, every 5 minutes. */
++    private void smart() {
++        String smartctl = smartctlPath();
++        if (smartctl == null) return;
++        try {
++            var p =
++                    new ProcessBuilder(smartctl, "-j", "-H", "-A", "/dev/nvme0")
++                            .redirectErrorStream(true)
++                            .start();
++            byte[] out = p.getInputStream().readAllBytes();
++            if (!p.waitFor(10, TimeUnit.SECONDS)) {
++                p.destroyForcibly();
++                return;
++            }
++            var log = parseSmart(new String(out));
++            if (log == null) return;
++            log.forEach(this::integer);
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++        } catch (Exception e) {
++            logger.warn("smartctl failed: " + e);
++        }
++    }
++
++    // ---- pure helpers (tested in JetsonDiagnosticsTest) ----
++
++    /**
++     * The NVMe health values from {@code smartctl -j -H -A}, as topic name to value; null if the
++     * output isn't smartctl's NVMe JSON.
++     */
++    static Map<String, Long> parseSmart(String json) {
++        try {
++            JsonNode log = new ObjectMapper().readTree(json).path("nvme_smart_health_information_log");
++            if (log.isMissingNode()) return null;
++            var out = new java.util.LinkedHashMap<String, Long>();
++            put(out, "ssdMediaErrors", log.path("media_errors"));
++            put(out, "ssdUnsafeShutdowns", log.path("unsafe_shutdowns"));
++            put(out, "ssdPercentUsed", log.path("percentage_used"));
++            put(out, "ssdCriticalWarning", log.path("critical_warning"));
++            put(out, "ssdAvailableSparePct", log.path("available_spare"));
++            return out;
++        } catch (Exception e) {
++            return null;
++        }
++    }
++
++    private static void put(Map<String, Long> out, String key, JsonNode n) {
++        if (n.canConvertToLong()) out.put(key, n.asLong());
++    }
++
++    /** CPU use between successive readings of /proc/stat. */
++    static final class CpuMeter {
++        private long[] last = null;
++
++        /** CPU use since the previous call, from /proc/stat's first line; null the first time. */
++        Double next(String procStat) {
++            if (procStat == null) return null;
++            String[] f = procStat.lines().findFirst().orElse("").trim().split("\s+");
++            if (f.length < 5 || !f[0].equals("cpu")) return null;
++            long total = 0;
++            for (int i = 1; i < f.length; i++) total += Long.parseLong(f[i]);
++            long idle = Long.parseLong(f[4]) + (f.length > 5 ? Long.parseLong(f[5]) : 0); // idle + iowait
++            long[] prev = last;
++            last = new long[] {total, idle};
++            if (prev == null || total <= prev[0]) return null;
++            return 100.0 * (1 - (double) (idle - prev[1]) / (total - prev[0]));
++        }
++    }
++
++    /** RAM in use (total minus available), from /proc/meminfo. */
++    static Double ramUsedPct(String meminfo) {
++        if (meminfo == null) return null;
++        Long total = null, avail = null;
++        for (String line : meminfo.split("\n")) {
++            String[] f = line.trim().split("\\s+");
++            if (f.length < 2) continue;
++            if (f[0].equals("MemTotal:")) total = Long.parseLong(f[1]);
++            if (f[0].equals("MemAvailable:")) avail = Long.parseLong(f[1]);
++        }
++        return total == null || avail == null || total == 0 ? null : 100.0 * (total - avail) / total;
++    }
++
++    /** Whether {@code mountPoint} is mounted read-only in /proc/mounts' text; null if not mounted. */
++    static Boolean readOnly(String procMounts, String mountPoint) {
++        Boolean ro = null;
++        for (String line : procMounts.split("\n")) {
++            String[] f = line.split(" ");
++            // The last entry for a mount point wins (a bind or remount stacks on top).
++            if (f.length >= 4 && f[1].equals(mountPoint)) ro = java.util.Arrays.asList(f[3].split(",")).contains("ro");
++        }
++        return ro;
++    }
++
++    /** The wired interface: a physical, non-wireless, non-USB network device (enP8p1s0 here). */
++    private static String findEthernet() {
++        try (DirectoryStream<Path> nets = Files.newDirectoryStream(Path.of("/sys/class/net"))) {
++            for (Path n : nets) {
++                String name = n.getFileName().toString();
++                if (name.equals("lo") || name.startsWith("usb") || name.startsWith("l4tbr")) continue;
++                if (!Files.exists(n.resolve("device")) || Files.exists(n.resolve("wireless"))) continue;
++                if (!"1".equals(read(n.resolve("type")))) continue; // Ethernet (ARPHRD_ETHER)
++                if (n.resolve("device").toRealPath().toString().contains("/usb")) continue;
++                return name;
++            }
++        } catch (Exception e) {
++            // no sysfs
++        }
++        return null;
++    }
++
++    private static Path findNvmeTemp() {
++        try (DirectoryStream<Path> mons = Files.newDirectoryStream(Path.of("/sys/class/hwmon"), "hwmon*")) {
++            for (Path h : mons) {
++                if ("nvme".equals(read(h.resolve("name"))) && Files.isReadable(h.resolve("temp1_input"))) {
++                    return h.resolve("temp1_input");
++                }
++            }
++        } catch (Exception e) {
++            // no hwmon
++        }
++        return null;
++    }
++
++    private static String smartctlPath() {
++        for (String p : new String[] {"/usr/sbin/smartctl", "/usr/bin/smartctl"}) {
++            if (Files.isExecutable(Path.of(p))) return p;
++        }
++        return null;
++    }
++
++    private void dbl(String key, double v) {
++        doubles.computeIfAbsent(key, k -> table.getDoubleTopic(k).publish()).set(v);
++    }
++
++    private void integer(String key, long v) {
++        ints.computeIfAbsent(key, k -> table.getIntegerTopic(k).publish()).set(v);
++    }
++
++    private void str(String key, String v) {
++        strings.computeIfAbsent(key, k -> table.getStringTopic(k).publish()).set(v);
++    }
++
++    private void bool(String key, boolean v) {
++        booleans.computeIfAbsent(key, k -> table.getBooleanTopic(k).publish()).set(v);
++    }
++
++    private static Long longOf(Path p) {
++        String s = read(p);
++        try {
++            return s == null ? null : Long.parseLong(s);
++        } catch (NumberFormatException e) {
++            return null;
++        }
++    }
++
++    private static String read(Path p) {
++        try {
++            return Files.readString(p).trim();
++        } catch (Exception e) {
++            return null;
++        }
++    }
++}
+diff --git a/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonTelemetry.java b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonTelemetry.java
+index 5eeb32bc..377f1cfe 100644
+--- a/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonTelemetry.java
++++ b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonTelemetry.java
+@@ -45,6 +45,9 @@ import org.photonvision.jni.JetsonStatusJNI;
+  *   <li>{@code gpuLoadPct}; {@code cpuTempC}, {@code gpuTempC}, {@code socTempC} (hottest of the
+  *       three SoC sensors), {@code tjTempC} (hottest on the chip); {@code fanRpm}
+  *   <li>{@code powerW} (the board's input), {@code cpuGpuPowerW}, {@code socPowerW}
++ *   <li>photonvision-76: {@code inputVoltageV} (the board's input, VDD_IN), {@code
++ *       inputVoltageMinV} (lowest in the last second, sampled every 20 ms), {@code
++ *       inputVoltageLowestV} (lowest since PhotonVision started)
+  *   <li>{@code jpegDecoder} ("nvjpg" or "libjpeg-turbo"), {@code jpegHardwareOff} (the hardware
+  *       decoder was switched off after a failed check), {@code jpegChecksOk}, {@code
+  *       jpegChecksDiffer} (counts since PhotonVision started)
+@@ -89,8 +92,40 @@ public final class JetsonTelemetry {
+                         + (fanRpm != null ? ", fan" : "")
+                         + (Files.isReadable(GPU_LOAD) ? ", GPU load" : ""));
+         TimedTaskManager.getInstance().addTask("JetsonTelemetry", this::tick, 1000, 1000);
++        // photonvision-76: the input voltage, often enough that a short dip shows in each second's
++        // minimum (one small sysfs read).
++        Path[] in = rails.get("VDD_IN");
++        if (in != null) {
++            TimedTaskManager.getInstance()
++                    .addTask(
++                            "JetsonInputVoltage",
++                            () -> {
++                                Double mv = number(in[0]);
++                                if (mv != null) inputVoltage.sample(mv);
++                            },
++                            INPUT_SAMPLE_MS);
++        }
++    }
++
++    // photonvision-76
++    static final long INPUT_SAMPLE_MS = 20;
++    /** Below this, a dip is also written to PhotonVision's log (at most every 5 s). */
++    static final double LOW_INPUT_V = 12.0;
++
++    private final InputVoltage inputVoltage = new InputVoltage();
++    private volatile double lowestInputV = Double.NaN, lastTjC = Double.NaN;
++
++    /** photonvision-76: lowest input voltage since start (NaN if unknown), for JetsonDiagnostics' log line. */
++    static Double lowestInputVolts() {
++        return instance == null ? null : instance.lowestInputV;
+     }
+ 
++    /** photonvision-76: the latest chip (Tj) temperature, NaN if unknown. */
++    static Double tjTempC() {
++        return instance == null ? null : instance.lastTjC;
++    }
++    private long lowInputLoggedNs = 0;
++
+     private void discover() {
+         try (DirectoryStream<Path> zones = Files.newDirectoryStream(Path.of("/sys/class/thermal"), "thermal_zone*")) {
+             for (Path z : zones) {
+@@ -127,7 +162,9 @@ public final class JetsonTelemetry {
+ 
+             put("cpuTempC", milliC("cpu-thermal"));
+             put("gpuTempC", milliC("gpu-thermal"));
+-            put("tjTempC", milliC("tj-thermal"));
++            Double tj = milliC("tj-thermal");
++            put("tjTempC", tj);
++            if (tj != null) lastTjC = tj;
+             Double soc = null;
+             for (String z : new String[] {"soc0-thermal", "soc1-thermal", "soc2-thermal"}) {
+                 Double t = milliC(z);
+@@ -140,6 +177,7 @@ public final class JetsonTelemetry {
+             put("powerW", railW("VDD_IN"));
+             put("cpuGpuPowerW", railW("VDD_CPU_GPU_CV"));
+             put("socPowerW", railW("VDD_SOC"));
++            publishInputVoltage();
+ 
+             publishJpegStatus();
+             publishThrottle();
+@@ -149,6 +187,20 @@ public final class JetsonTelemetry {
+         }
+     }
+ 
++    /** photonvision-76. */
++    private void publishInputVoltage() {
++        double[] v = inputVoltage.takeSecond(); // latest, lowest this second, lowest since start
++        if (!Double.isNaN(v[0])) put("inputVoltageV", v[0]);
++        if (!Double.isNaN(v[1])) put("inputVoltageMinV", v[1]);
++        if (!Double.isNaN(v[2])) put("inputVoltageLowestV", v[2]);
++        lowestInputV = v[2];
++        long now = System.nanoTime();
++        if (v[1] < LOW_INPUT_V && (lowInputLoggedNs == 0 || now - lowInputLoggedNs > 5_000_000_000L)) {
++            lowInputLoggedNs = now;
++            logger.warn(String.format("Input voltage dipped to %.2f V (now %.2f V)", v[1], v[0]));
++        }
++    }
++
+     private void publishJpegStatus() {
+         if (!jpegStatusAvailable) return;
+         long[] s = JetsonStatusJNI.jpegStatus();
+diff --git a/photon-core/src/main/java/org/photonvision/common/logging/KernelLogLogger.java b/photon-core/src/main/java/org/photonvision/common/logging/KernelLogLogger.java
+index c2823c99..247ebb49 100644
+--- a/photon-core/src/main/java/org/photonvision/common/logging/KernelLogLogger.java
++++ b/photon-core/src/main/java/org/photonvision/common/logging/KernelLogLogger.java
+@@ -56,8 +56,11 @@ public class KernelLogLogger {
+         }
+ 
+         for (var msg : listener.getNewlines()) {
+-            // We currently set all logs to debug regardless of their actual level
+-            logger.log(msg, LogLevel.DEBUG);
++            // We currently set all logs to debug regardless of their actual level.
++            // SpectrumJetson (photonvision-76): USB trouble at INFO, so it's kept at any log level.
++            logger.log(
++                    msg,
++                    org.photonvision.common.hardware.UsbTrouble.isEvent(msg) ? LogLevel.INFO : LogLevel.DEBUG);
+             // SpectrumJetson (photonvision-31): USB bandwidth and connection trouble, by port.
+             org.photonvision.common.hardware.UsbTrouble.noteKernelLine(msg);
+         }
+diff --git a/photon-core/src/main/java/org/photonvision/common/util/RobotClockSync.java b/photon-core/src/main/java/org/photonvision/common/util/RobotClockSync.java
+index cfb99190..1d43d299 100644
+--- a/photon-core/src/main/java/org/photonvision/common/util/RobotClockSync.java
++++ b/photon-core/src/main/java/org/photonvision/common/util/RobotClockSync.java
+@@ -73,6 +73,25 @@ public class RobotClockSync {
+     private static IntegerSubscriber sub;
+     private static long lastSetUs = 0;
+ 
++    // photonvision-76: for /photonvision/jetson/clockSource and clockLastJumpSeconds.
++    private static volatile boolean setFromRobot = false;
++    private static volatile double lastJumpSeconds = 0;
++
++    /**
++     * Where this boot's clock came from: "internet" (NTP), "robot" (set from robot code's clock at
++     * least once), or "unset" (still the date restored at boot: whatever was saved last, possibly
++     * long ago). TXMAN1: several boots stayed "unset" all match, so their logs carried a wrong date.
++     */
++    public static String source() {
++        if (NTP_SYNCED.exists()) return "internet";
++        return setFromRobot ? "robot" : "unset";
++    }
++
++    /** Seconds the last set from the robot moved the clock (+ forward), 0 if never. */
++    public static double lastJumpSeconds() {
++        return lastJumpSeconds;
++    }
++
+     public static synchronized void start() {
+         if (sub != null) return;
+         sub =
+@@ -127,6 +146,8 @@ public class RobotClockSync {
+             logger.error("RobotClockSync: 'date -s' failed (exit " + p.exitValue() + ")");
+             return;
+         }
++        setFromRobot = true;
++        lastJumpSeconds = errorMs / 1000.0;
+         // Next boot starts from about now, not 1970 (timesyncd moves the clock up to this file's
+         // modification time at boot).
+         if (TIMESYNCD_CLOCK.exists() && !TIMESYNCD_CLOCK.setLastModified(unixMs)) {
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
+index 4dc8578d..d4813928 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
+@@ -217,6 +217,7 @@ public class VisionModule {
+                                         ? usb.getLastFrameAgeMs()
+                                         : -1));
+         JetsonTelemetry.start();
++        org.photonvision.common.hardware.metrics.JetsonDiagnostics.start(); // photonvision-76
+         // SpectrumJetson: the camera's mount (height, pitch, roll) from the tags it sees (photonvision-17).
+         addResultConsumer(
+                 new MountEstimatePublisher(() -> visionSource.getSettables().getConfiguration().nickname));
+diff --git a/photon-core/src/test/java/org/photonvision/common/hardware/metrics/InputVoltageTest.java b/photon-core/src/test/java/org/photonvision/common/hardware/metrics/InputVoltageTest.java
+new file mode 100644
+index 00000000..3bf49a4c
+--- /dev/null
++++ b/photon-core/src/test/java/org/photonvision/common/hardware/metrics/InputVoltageTest.java
+@@ -0,0 +1,51 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.common.hardware.metrics;
++
++import static org.junit.jupiter.api.Assertions.*;
++
++import org.junit.jupiter.api.Test;
++
++/** SpectrumJetson (photonvision-76). */
++public class InputVoltageTest {
++    @Test
++    public void nothingBeforeTheFirstSample() {
++        var v = new InputVoltage().takeSecond();
++        assertTrue(Double.isNaN(v[0]) && Double.isNaN(v[1]) && Double.isNaN(v[2]));
++    }
++
++    @Test
++    public void aShortDipShowsInTheSecondsMinimumAndTheLowest() {
++        var iv = new InputVoltage();
++        // One second at 20 ms: 19 V, with one 40 ms dip to 7.2 V in the middle.
++        for (int i = 0; i < 50; i++) iv.sample(i == 24 || i == 25 ? 7200 : 19040);
++        var v = iv.takeSecond();
++        assertEquals(19.04, v[0], 1e-9, "latest");
++        assertEquals(7.2, v[1], 1e-9, "lowest this second");
++        assertEquals(7.2, v[2], 1e-9, "lowest since start");
++
++        // The next second is steady: its minimum resets, the lowest since start doesn't.
++        for (int i = 0; i < 50; i++) iv.sample(19000);
++        v = iv.takeSecond();
++        assertEquals(19.0, v[1], 1e-9);
++        assertEquals(7.2, v[2], 1e-9);
++
++        // No samples this second (the sampler held up): no minimum to publish.
++        assertTrue(Double.isNaN(iv.takeSecond()[1]));
++    }
++}
+diff --git a/photon-core/src/test/java/org/photonvision/common/hardware/metrics/JetsonDiagnosticsTest.java b/photon-core/src/test/java/org/photonvision/common/hardware/metrics/JetsonDiagnosticsTest.java
+new file mode 100644
+index 00000000..8653b61b
+--- /dev/null
++++ b/photon-core/src/test/java/org/photonvision/common/hardware/metrics/JetsonDiagnosticsTest.java
+@@ -0,0 +1,100 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.common.hardware.metrics;
++
++import static org.junit.jupiter.api.Assertions.*;
++
++import java.util.Map;
++import org.junit.jupiter.api.Test;
++import org.photonvision.common.hardware.UsbTrouble;
++
++/** SpectrumJetson (photonvision-76): the parsing behind /photonvision/jetson's diagnostics. */
++public class JetsonDiagnosticsTest {
++    @Test
++    public void smartctlNvmeJson() {
++        // The fields smartctl 7.2 (Ubuntu 22.04) prints for an NVMe drive with -j -H -A.
++        String json =
++                "{\"smart_status\":{\"passed\":true,\"nvme\":{\"value\":0}},"
++                        + "\"nvme_smart_health_information_log\":{\"critical_warning\":0,\"temperature\":44,"
++                        + "\"available_spare\":100,\"available_spare_threshold\":10,\"percentage_used\":1,"
++                        + "\"data_units_read\":1234,\"unsafe_shutdowns\":187,\"media_errors\":0}}";
++        assertEquals(
++                Map.of(
++                        "ssdMediaErrors", 0L,
++                        "ssdUnsafeShutdowns", 187L,
++                        "ssdPercentUsed", 1L,
++                        "ssdCriticalWarning", 0L,
++                        "ssdAvailableSparePct", 100L),
++                JetsonDiagnostics.parseSmart(json));
++        assertNull(JetsonDiagnostics.parseSmart("{\"smartctl\":{\"exit_status\":2}}"), "no NVMe log");
++        assertNull(JetsonDiagnostics.parseSmart("smartctl: not found"));
++    }
++
++    @Test
++    public void ramFromMeminfo() {
++        String meminfo = "MemTotal:        7802716 kB\nMemFree:          912345 kB\nMemAvailable:    5852037 kB\n";
++        assertEquals(25.0, JetsonDiagnostics.ramUsedPct(meminfo), 0.01);
++        assertNull(JetsonDiagnostics.ramUsedPct("MemTotal: 1 kB\n"));
++    }
++
++    @Test
++    public void readOnlyMounts() {
++        String mounts =
++                "/dev/nvme0n1p1 / ext4 ro,noatime 0 0\n"
++                        + "/dev/nvme0n1p16 /data/settings ext4 rw,noatime 0 0\n"
++                        + "/dev/nvme0n1p17 /data/scratch ext4 rw,noatime 0 0\n"
++                        + "/dev/nvme0n1p17 /data/scratch ext4 ro,noatime 0 0\n"; // quiet mode remount
++        assertFalse(JetsonDiagnostics.readOnly(mounts, "/data/settings"));
++        assertTrue(JetsonDiagnostics.readOnly(mounts, "/data/scratch"), "the last entry wins");
++        assertNull(JetsonDiagnostics.readOnly(mounts, "/data/other"));
++    }
++
++    @Test
++    public void cpuFromTwoReadsOfProcStat() {
++        // Between the two readings 1000 jiffies passed, 250 of them idle or iowait.
++        var m = new JetsonDiagnostics.CpuMeter();
++        assertNull(m.next("cpu  100 0 100 700 100 0 0 0 0 0\ncpu0 1 2 3"), "the first reading has no interval");
++        assertEquals(75.0, m.next("cpu  500 0 450 900 150 0 0 0 0 0\n"), 1e-9);
++        assertNull(m.next("intr 1 2 3"));
++    }
++
++    @Test
++    public void usbEventsFromTxman1Q13() {
++        long before = UsbTrouble.events();
++        String[] q13 = {
++            "Oct 15 15:27:11 photonvision kernel: [  224.500901] usb 1-2-port1: disabled by hub (EMI?), re-enabling...",
++            "Oct 15 15:27:11 photonvision kernel: [  224.501603] usb 1-2.1: USB disconnect, device number 4",
++            "Oct 15 15:27:13 photonvision kernel: [  225.876372] usb 1-2.1: device descriptor read/64, error -110",
++            "Oct 15 15:27:21 photonvision kernel: [  233.792729] usb 1-2-port1: attempt power cycle",
++            "Oct 15 15:27:31 photonvision kernel: [  244.368770] usb 1-2-port1: unable to enumerate USB device",
++        };
++        for (String l : q13) UsbTrouble.noteKernelLine(l);
++        // Not trouble: a camera arriving, the driver's own setup lines, unrelated kernel lines.
++        String[] fine = {
++            "Oct 15 15:23:06 photonvision kernel: [    1.0] usb 1-2.1: new high-speed USB device number 4 using tegra-xusb",
++            "Oct 15 15:23:08 photonvision kernel: [    3.1] usb 1-2.1: Found UVC 1.00 device Thrifty (1bcf:28c5)",
++            "Oct 15 15:26:34 photonvision kernel: [  187.27] EXT4-fs (nvme0n1p17): re-mounted. Opts: (null).",
++        };
++        for (String l : fine) UsbTrouble.noteKernelLine(l);
++        assertEquals(before + q13.length, UsbTrouble.events());
++        assertEquals("usb 1-2-port1: unable to enumerate USB device", UsbTrouble.lastEvent());
++        assertTrue(UsbTrouble.isEvent("uvcvideo 1-2.3:1.1: Failed to resubmit video URB (-1)."));
++        assertTrue(UsbTrouble.isEvent("xhci-hcd 3610000.usb: xHCI host controller not responding, assume dead"));
++        assertTrue(UsbTrouble.isEvent("tegra-xusb 3610000.usb: HC died; cleaning up"));
++    }
++}

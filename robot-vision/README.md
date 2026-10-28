@@ -237,6 +237,15 @@ System.out.println(s.stats().summary());
 | Camera X: N fps | below 20 fps while enabled | SpectrumJetson |
 | Camera X: problem | the camera reports one: stuck, wrong mode, USB | SpectrumJetson |
 | Camera X won't recover by itself: power-cycle the robot | its `health/state` is `gave-up` and it reports no problem | SpectrumJetson with `photonvision-75` |
+| Jetson input voltage dipped to N V | `inputVoltageLowestV` below `minJetsonInputV` (12 V; set it a few volts under your supply) | SpectrumJetson with `photonvision-76` |
+| Jetson USB trouble (N): kernel line | `usbEvents` rose since robot code started | SpectrumJetson with `photonvision-76` |
+| Jetson Ethernet link dropped N time(s) | `ethCarrierChanges` rose by 2 or more: its cable or the switch port | SpectrumJetson with `photonvision-76` |
+| Jetson rebooted | `bootId` changed | SpectrumJetson with `photonvision-76` |
+| Jetson clock not set from the robot | `clockSource` is `unset` after 10 s: publish `/photonvision/clock/unixMs` | SpectrumJetson with `photonvision-76` |
+| Jetson SSD: ... | SSD media errors or critical warning, ext4 errors, or the settings partition read-only | SpectrumJetson with `photonvision-76` |
+| Jetson RAM at N% | above `maxJetsonRamPct` (90) | SpectrumJetson with `photonvision-76` |
+
+The photonvision-76 alerts stay up until robot code restarts, so the pit sees them after the match.
 | Jetson throttling / hot | over-current, a temperature or clock cap, or ≥ 92 °C | SpectrumJetson |
 | Jetson in quiet mode while enabled | it should leave quiet mode within 0.1 s of an enable | SpectrumJetson |
 
