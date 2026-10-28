@@ -179,6 +179,8 @@ This is from reading the patches. **[code]** means the patch does it. **[inferre
 
 ### On the Jetson (this repo)
 
+R1-R3 are in `photonvision-75` (2026-10-27): unit-tested on the build host, not yet run on the Jetson. Details: [TECHNICAL.md](TECHNICAL.md), under `photonvision-29`.
+
 | # | Change | Fixes | Priority |
 |---|---|---|---|
 | R1 | Don't publish `rawBytes` for a result with capture time 0 (the blank-result branches in `photonvision-63`), so a dead camera's `getAllUnreadResults()` comes back empty. Also, sleep in the empty-frame branch. | F2 | must |

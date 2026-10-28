@@ -798,6 +798,46 @@ only goes out when it changes.
   | +9.1 s | Kernel re-enumerated it: "Found UVC 1.00 device Thrifty", the payload cap re-applied, "authorized to connect". cscore reconnected |
   | end of test | "delivering frames again, after a USB reset" |
 
+**`photonvision-75`: a dead camera is dead, and says so** (2026-10-27, after TXMAN1: see
+[TXMAN1-JETSON-REVIEW.md](TXMAN1-JETSON-REVIEW.md), F1 and F2).
+- **No blank results on NetworkTables.** A blank result (capture time 0: the camera is disabled,
+  unplugged, or sends nothing usable) used to be published as a result. That's ~50 a second, each
+  stamped with just the time-sync offset; at TXMAN1 the robot read them for minutes after a camera
+  died. Now `NTDataPublisher` publishes only the camera's settings for one (`enabled`,
+  `pipelineIndexState`, `driverMode`, `fpsLimit`). The result and `heartbeat` stand still, so
+  PhotonLib reads no results and `isConnected()` goes false.
+- **The watchdog escalates instead of stopping.**
+  - **Disconnected, its USB device still in `/sys/bus/usb/devices/<port>`:** after 5 s, a USB reset;
+    then one every 30 s. Before, nothing was tried once cscore saw the camera disconnected. USB resets
+    now go through the port, so a camera that has lost its `/dev/video` node can be reset too.
+  - **Gone from USB for 10 s:** gave up. A wedged Thriftiest Cam needs its power cut
+    ([USB hub reset](#usb-hub-reset-stuck-thriftiest-cams-a-hung-reboot-and-the-log-flood-2026-09-25)).
+  - **Connected, no frames, after 4 USB resets:** gave up.
+  - **After giving up:** one more USB reset every 2 min, in case it's something else.
+  - **Bandwidth retries** (`photonvision-31`) now count in `recoveries`.
+- **Health that can't look frozen** (`/photonvision/<camera>/health/`, from a 1 s timer that doesn't
+  depend on results):
+
+  | Topic | Type | What |
+  | --- | --- | --- |
+  | `heartbeat` | int | Counts up each second |
+  | `state` | string | `streaming`, `stalled` (connected, no frame for 1 s), `recovering` (a reconnect or reset tried), `disconnected`, `gave-up`, `paused` (nobody reading it: disabled by robot code), `starting` |
+  | `lastFrameAgeMs` | int | Since the last usable frame; -1 before the first |
+
+  - **Repeats reach the robot's log.** `fps` and `state` keep duplicates: NetworkTables drops a value
+    equal to the last one, so at TXMAN1 a dead camera's `fps 0` reached the robot's log only at the
+    next reconnect.
+  - **`fps` goes to 0** when no result has arrived for 2 s.
+  - **`problem` stays set** until the camera delivers frames again (it was cleared 90 s after the
+    kernel's message). It now also says "gone from USB port …" and "no frames after 4 USB resets".
+- **Tests:**
+  - `StuckCameraWatchdogTest`: 12 tests, 6 new.
+  - `CameraHealthPublisherTest`: 2 tests.
+  - `NTDataPublisherBlankResultTest`: 1 test. It needs the targeting JNI, so it runs on Linux and the
+    Jetson and is skipped on Windows.
+  - **Not yet on the Jetson.** To test there: the stuck-camera hook, unplugging a camera, and a
+    camera wedged by `tests/usb-hub-reset`.
+
   Afterwards the health check passed: both cameras streaming 1280x800 MJPG as set, NVJPG 242
   frames/s with checks ok, 122 fps each.
 - **Unit tests:** `StuckCameraWatchdogTest` 5/5 and `DirectDecodeTest` 4/4.
