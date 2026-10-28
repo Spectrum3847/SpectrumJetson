@@ -1,0 +1,869 @@
+diff --git a/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java b/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java
+index 4df02e7a..b9801687 100644
+--- a/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java
++++ b/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java
+@@ -203,6 +203,21 @@ public class NTDataPublisher implements CVPipelineResultConsumer {
+                             List.of(),
+                             result.inputAndOutputFrame);
+         else acceptedResult = result;
++
++        // SpectrumJetson (photonvision-75): a blank result (capture time 0: the camera is disabled,
++        // unplugged or sends nothing usable) isn't a frame. Published, it went out ~50 times a second,
++        // stamped with just the time-sync offset (TXMAN1: results dated ~26 s into the robot's boot,
++        // read for minutes after a camera died), and it blanked the calibration and best-target topics.
++        // The camera's settings still go out; its result and heartbeat stand still, so PhotonLib reads
++        // no results and isConnected() goes false.
++        if (result.getImageCaptureTimestampNanos() == 0) {
++            ts.pipelineIndexPublisher.set(pipelineIndexSupplier.get());
++            ts.driverModePublisher.set(driverModeSupplier.getAsBoolean());
++            ts.fpsLimitPublisher.set(fpsLimitSupplier.get());
++            ts.enabledPublisher.set(enabledSupplier.getAsBoolean());
++            return;
++        }
++
+         var now = NetworkTablesJNI.now();
+         var captureMicros = MathUtils.nanosToMicros(result.getImageCaptureTimestampNanos());
+ 
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/StuckCameraWatchdog.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/StuckCameraWatchdog.java
+index fe4c7f0b..bb740568 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/StuckCameraWatchdog.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/StuckCameraWatchdog.java
+@@ -31,8 +31,8 @@ import java.util.function.LongSupplier;
+  *   <li>No good frame for 3 s: reconnect the camera: close and reopen the device in cscore
+  *       (photonvision-43: by switching to another video mode and back; before, a kForceClose only
+  *       restarted the stream).
+- *   <li>Still none 5 s after a reconnect: reset it at the USB level (like a replug), at most every 30
+- *       s while it stays stuck.
++ *   <li>Still none 5 s after a reconnect: reset it at the USB level (like a replug), at most every
++ *       30 s while it stays stuck.
+  *   <li>Reconnects for a video-mode mismatch (photonvision-27) share the throttle, so the two never
+  *       reconnect the camera at once.
+  * </ul>
+@@ -40,9 +40,23 @@ import java.util.function.LongSupplier;
+  * A camera that's unplugged, or disabled by robot code, isn't stuck: the caller only reports frames
+  * while the camera is connected and being read. photonvision-66: and a gap of over {@link
+  * #NOT_READ_NS} between reports means nobody was reading it, so the clock restarts. Before, the
+- * first failed grab after such a pause (robot code re-enabling the camera, or the vision thread held
+- * up by a pipeline switch or the shared CUDA lock) counted the pause as 3 s without frames, and the
+- * camera was reconnected for nothing: a 0.5-1 s blackout.
++ * first failed grab after such a pause (robot code re-enabling the camera, or the vision thread
++ * held up by a pipeline switch or the shared CUDA lock) counted the pause as 3 s without frames,
++ * and the camera was reconnected for nothing: a 0.5-1 s blackout.
++ *
++ * <p>photonvision-75, after TXMAN1 (cameras died mid-match and stayed dead):
++ *
++ * <ul>
++ *   <li>A camera that disconnects and stays disconnected for {@link #DISCONNECTED_RESET_NS} is
++ *       reset at the USB level if its USB device is still there, every {@link #USB_RESET_EVERY_NS}.
++ *       Before, a disconnected camera was never acted on: at TXMAN1 one camera's own USB reset left
++ *       it disconnected, and nothing more was tried for the rest of the match.
++ *   <li>After {@link #MAX_USB_RESETS} USB resets without a frame, or with the device gone from USB
++ *       for {@link #GONE_NS}, the camera has given up: a Thriftiest Cam in that state needs its
++ *       power cut. One more reset is tried every {@link #GAVE_UP_RETRY_NS}, in case it's something
++ *       else.
++ *   <li>{@link #state()} says which of these the camera is in, for health/state on NetworkTables.
++ * </ul>
+  */
+ final class StuckCameraWatchdog {
+     enum Action {
+@@ -51,6 +65,27 @@ final class StuckCameraWatchdog {
+         USB_RESET
+     }
+ 
++    /** Published as health/state. */
++    enum State {
++        /** No frame yet since PhotonVision started (and not given up). */
++        STARTING("starting"),
++        STREAMING("streaming"),
++        /** Connected, no usable frame for a while, nothing tried yet. */
++        STALLED("stalled"),
++        /** A reconnect or USB reset was tried and hasn't brought a frame yet. */
++        RECOVERING("recovering"),
++        DISCONNECTED("disconnected"),
++        GAVE_UP("gave-up"),
++        /** Nobody is reading it: disabled by robot code, or the vision thread held up. */
++        PAUSED("paused");
++
++        final String topicValue;
++
++        State(String topicValue) {
++            this.topicValue = topicValue;
++        }
++    }
++
+     static final long STUCK_NS = 3_000_000_000L;
+     static final long AFTER_RECONNECT_NS = 5_000_000_000L;
+     static final long USB_RESET_EVERY_NS = 30_000_000_000L;
+@@ -65,13 +100,38 @@ final class StuckCameraWatchdog {
+      */
+     static final long NOT_READ_NS = 2_000_000_000L;
+ 
++    // photonvision-75
++    /** Disconnected this long (not just mid-reconnect), with its USB device still there: reset it. */
++    static final long DISCONNECTED_RESET_NS = 5_000_000_000L;
++
++    /**
++     * Gone from USB this long: it won't come back by itself (a wedged Thriftiest needs a power cut).
++     */
++    static final long GONE_NS = 10_000_000_000L;
++
++    /** USB resets without a frame before giving up (~2 min at one per 30 s). */
++    static final int MAX_USB_RESETS = 4;
++
++    static final long GAVE_UP_RETRY_NS = 120_000_000_000L;
++
++    /** No usable frame for this long while being read: stalled (above any frame-rate limit's gap). */
++    static final long STALLED_NS = 1_000_000_000L;
++
++    private static final long NEVER = Long.MIN_VALUE / 2;
++
+     private final LongSupplier clockNs;
+     private long lastGoodNs;
+     private long lastReportNs;
+-    private long lastReconnectNs = Long.MIN_VALUE / 2;
+-    private long lastUsbResetNs = Long.MIN_VALUE / 2;
++    private long lastReconnectNs = NEVER;
++    private long lastUsbResetNs = NEVER;
+     private int stage = 0; // 0: fine, 1: reconnected, 2: USB reset
+     private long recoveries = 0;
++    // photonvision-75
++    private long lastFrameNs = NEVER;
++    private long disconnectedSinceNs = NEVER;
++    private int usbResetsSinceFrame = 0;
++    private boolean gaveUp = false;
++    private boolean goneFromUsb = false;
+ 
+     StuckCameraWatchdog(LongSupplier clockNs) {
+         this.clockNs = clockNs;
+@@ -88,36 +148,67 @@ final class StuckCameraWatchdog {
+     }
+ 
+     /** A usable frame arrived. Returns what fixed it, if the camera was stuck ("" otherwise). */
+-    String good() {
++    synchronized String good() {
+         lastGoodNs = report();
+-        String fixedBy = stage == 1 ? "a reconnect" : stage == 2 ? "a USB reset" : "";
++        lastFrameNs = lastGoodNs;
++        String fixedBy =
++                gaveUp
++                        ? "being given up on (replugged, or a later USB reset)"
++                        : stage == 1 ? "a reconnect" : stage == 2 ? "a USB reset" : "";
+         stage = 0;
++        disconnectedSinceNs = NEVER;
++        usbResetsSinceFrame = 0;
++        gaveUp = false;
++        goneFromUsb = false;
+         return fixedBy;
+     }
+ 
+-    /** The camera isn't connected (unplugged, or mid-reconnect): not stuck, and the clock restarts. */
+-    void notConnected() {
+-        lastGoodNs = report();
++    /**
++     * The camera isn't connected: unplugged, mid-reconnect, or dropped off USB. Not stuck, so the
++     * stuck clock restarts. photonvision-75: but a camera that stays disconnected while its USB
++     * device is still there gets USB resets, and one gone from USB for {@link #GONE_NS} has given up.
++     *
++     * @param devicePresent its USB device is still in sysfs (enumerated)
++     */
++    synchronized Action notConnected(boolean devicePresent) {
++        long now = report();
++        lastGoodNs = now;
++        if (disconnectedSinceNs == NEVER) disconnectedSinceNs = now;
++        long disconnected = now - disconnectedSinceNs;
++        if (!devicePresent) {
++            if (disconnected >= GONE_NS && !gaveUp) {
++                gaveUp = true;
++                goneFromUsb = true;
++            }
++            return Action.NONE;
++        }
++        goneFromUsb = false;
++        if (disconnected < DISCONNECTED_RESET_NS) return Action.NONE;
++        return usbResetIfDue(now);
+     }
+ 
+     /** Someone else reconnected the camera (photonvision-27's mode fix): share the throttle. */
+-    void noteReconnect() {
++    synchronized void noteReconnect() {
+         lastReconnectNs = clockNs.getAsLong();
+     }
+ 
+     /** No usable frame this time, and the kernel is refusing the camera USB bandwidth. */
+-    Action noFrameNoBandwidth() {
++    synchronized Action noFrameNoBandwidth() {
+         long now = report();
++        disconnectedSinceNs = NEVER;
+         if (now - lastGoodNs < STUCK_NS) return Action.NONE;
+         if (now - lastReconnectNs < BANDWIDTH_RETRY_NS) return Action.NONE;
+         lastReconnectNs = now;
+         stage = 1;
++        recoveries++; // photonvision-75: these count too
+         return Action.RECONNECT;
+     }
+ 
+     /** No usable frame this time. What to do now. */
+-    Action noFrame() {
++    synchronized Action noFrame() {
+         long now = report();
++        disconnectedSinceNs = NEVER;
++        goneFromUsb = false;
+         if (now - lastGoodNs < STUCK_NS) return Action.NONE;
+         if (now - lastReconnectNs < AFTER_RECONNECT_NS) return Action.NONE;
+         if (stage == 0) {
+@@ -126,23 +217,56 @@ final class StuckCameraWatchdog {
+             recoveries++;
+             return Action.RECONNECT;
+         }
+-        if (now - lastUsbResetNs >= USB_RESET_EVERY_NS) {
+-            stage = 2;
+-            lastUsbResetNs = now;
+-            lastReconnectNs = now; // the reset reconnects too; wait before judging it
+-            recoveries++;
+-            return Action.USB_RESET;
+-        }
+-        return Action.NONE;
++        return usbResetIfDue(now);
++    }
++
++    /** A USB reset, at most every 30 s; after {@link #MAX_USB_RESETS}, gave up: every 2 min. */
++    private Action usbResetIfDue(long now) {
++        if (usbResetsSinceFrame >= MAX_USB_RESETS) gaveUp = true;
++        long every = gaveUp ? GAVE_UP_RETRY_NS : USB_RESET_EVERY_NS;
++        if (now - lastUsbResetNs < every) return Action.NONE;
++        stage = 2;
++        lastUsbResetNs = now;
++        lastReconnectNs = now; // the reset reconnects too; wait before judging it
++        recoveries++;
++        usbResetsSinceFrame++;
++        return Action.USB_RESET;
+     }
+ 
+     /** Seconds since the last usable frame. */
+-    double secondsWithoutFrames() {
++    synchronized double secondsWithoutFrames() {
+         return (clockNs.getAsLong() - lastGoodNs) / 1e9;
+     }
+ 
++    /** photonvision-75: seconds since it disconnected (0 while connected). */
++    synchronized double secondsDisconnected() {
++        return disconnectedSinceNs == NEVER ? 0 : (clockNs.getAsLong() - disconnectedSinceNs) / 1e9;
++    }
++
+     /** Reconnects and USB resets done since the camera started. */
+-    long recoveries() {
++    synchronized long recoveries() {
+         return recoveries;
+     }
++
++    /** photonvision-75: milliseconds since the last usable frame, or -1 if there hasn't been one. */
++    synchronized long lastFrameAgeMs() {
++        return lastFrameNs == NEVER ? -1 : (clockNs.getAsLong() - lastFrameNs) / 1_000_000;
++    }
++
++    /** photonvision-75: it has given up, and the camera's USB device is gone (needs a power cut). */
++    synchronized boolean goneFromUsb() {
++        return gaveUp && goneFromUsb;
++    }
++
++    /** photonvision-75: what the camera is doing. */
++    synchronized State state() {
++        long now = clockNs.getAsLong();
++        if (gaveUp) return State.GAVE_UP;
++        if (disconnectedSinceNs != NEVER) return State.DISCONNECTED;
++        if (now - lastReportNs > NOT_READ_NS) return State.PAUSED;
++        if (lastFrameNs != NEVER && now - lastFrameNs < STALLED_NS) return State.STREAMING;
++        if (stage != 0) return State.RECOVERING;
++        if (lastFrameNs == NEVER) return State.STARTING;
++        return State.STALLED;
++    }
+ }
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+index 457b8b94..9ddeaafb 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+@@ -115,11 +115,24 @@ public class USBFrameProvider extends CpuImageProcessor {
+             if (!problem.isEmpty()) logger.info("The camera is working again (it had: " + problem + ")");
+             problem = "";
+         } else if (!camera.isConnected()) {
+-            stuckWatchdog.notConnected();
++            String port = usbPort();
++            // photonvision-75: a camera that stays disconnected with its USB device still there gets
++            // USB resets; one gone from USB gives up (TXMAN1: nothing was tried for either).
++            boolean devicePresent =
++                    port != null
++                            && java.nio.file.Files.exists(java.nio.file.Path.of("/sys/bus/usb/devices", port));
++            if (stuckWatchdog.notConnected(devicePresent) == StuckCameraWatchdog.Action.USB_RESET) {
++                usbReset(
++                        String.format(
++                                "disconnected for %.0f s with its USB device still there",
++                                stuckWatchdog.secondsDisconnected()),
++                        true);
++            }
+             // SpectrumJetson (photonvision-33): it's plugged in but won't answer (the kernel couldn't
+             // enumerate it). A USB hub reset leaves a Thriftiest Cam like this, and on this carrier
+             // board only a real power cut revives it: USB power can't be switched from software.
+-            String port = usbPort();
++            // photonvision-75: the problem stays until the camera delivers frames again (it was
++            // cleared 90 s after the kernel's message, with the camera still dead).
+             if (org.photonvision.common.hardware.UsbTrouble.connectFailed(port, BANDWIDTH_WINDOW_NS)) {
+                 if (!problem.startsWith("not answering")) {
+                     problem = "not answering on USB port " + port + ": replug it, or power-cycle the robot";
+@@ -130,8 +143,15 @@ public class USBFrameProvider extends CpuImageProcessor {
+                                     + " can leave a camera like this; only cutting its power fixes it: replug it, or"
+                                     + " power-cycle the robot.");
+                 }
+-            } else if (problem.startsWith("not answering")) {
+-                problem = "";
++            } else if (stuckWatchdog.goneFromUsb() && problem.isEmpty()) {
++                problem = "gone from USB port " + port + ": replug it, or power-cycle the robot";
++                logger.error(
++                        "The camera has been gone from USB port "
++                                + port
++                                + " for over "
++                                + StuckCameraWatchdog.GONE_NS / 1_000_000_000L
++                                + " s. If it's still plugged in, it needs its power cut: replug it, or"
++                                + " power-cycle the robot. Look in the kernel log (journalctl -k) for why it left.");
+             }
+         } else if (org.photonvision.common.hardware.UsbTrouble.bandwidthFailed(usbPort(), BANDWIDTH_WINDOW_NS)) {
+             // SpectrumJetson (photonvision-31): the kernel refuses this camera USB bandwidth. Say so,
+@@ -162,10 +182,32 @@ public class USBFrameProvider extends CpuImageProcessor {
+                                 true);
+                 case NONE -> {}
+             }
++            // photonvision-75: connected, but USB resets haven't brought it back.
++            if (stuckWatchdog.state() == StuckCameraWatchdog.State.GAVE_UP && problem.isEmpty()) {
++                problem =
++                        "no frames after " + StuckCameraWatchdog.MAX_USB_RESETS + " USB resets: power-cycle the robot";
++                logger.error(
++                        "Giving up on this camera: still no usable frames after "
++                                + StuckCameraWatchdog.MAX_USB_RESETS
++                                + " USB resets. It needs its power cut (replug it, or power-cycle the robot). One"
++                                + " more reset every "
++                                + StuckCameraWatchdog.GAVE_UP_RETRY_NS / 1_000_000_000L
++                                + " s.");
++            }
+         }
+         return frame;
+     }
+ 
++    /** photonvision-75: health/state ("streaming", "stalled", "gave-up", ...). */
++    public String getHealthState() {
++        return stuckWatchdog.state().topicValue;
++    }
++
++    /** photonvision-75: milliseconds since the last usable frame, or -1 if none yet. */
++    public long getLastFrameAgeMs() {
++        return stuckWatchdog.lastFrameAgeMs();
++    }
++
+     // SpectrumJetson (photonvision-33): with a camera gone every grab failed and logged, ~40 lines a
+     // second per camera (13 MB a minute with 4 cameras), so the system log kept only ~25 minutes.
+     // Now: the first failure, then at most one line per 5 s, with a count.
+@@ -283,11 +325,11 @@ public class USBFrameProvider extends CpuImageProcessor {
+      */
+     private void usbReset(String why, boolean asError) {
+         try {
+-            var dev = java.nio.file.Path.of(camera.getPath()).toRealPath(); // e.g. /dev/video2
+-            var usbDevice =
+-                    java.nio.file.Path.of("/sys/class/video4linux", dev.getFileName().toString(), "device")
+-                            .toRealPath()
+-                            .getParent(); // the USB interface's parent, e.g. .../2-2.3
++            // photonvision-75: by the USB port (remembered from when the camera was there), so a
++            // camera that has lost its /dev/video node can be reset too.
++            String port = usbPort();
++            if (port == null) throw new java.io.IOException("its USB port isn't known");
++            var usbDevice = java.nio.file.Path.of("/sys/bus/usb/devices", port); // e.g. .../2-2.3
+             var authorized = usbDevice.resolve("authorized");
+             String msg = "Resetting the camera at the USB level (" + usbDevice.getFileName() + "): " + why;
+             if (asError) logger.error(msg);
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java b/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
+index 4501dab1..220945fa 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
+@@ -20,6 +20,8 @@ package org.photonvision.vision.processes;
+ import edu.wpi.first.networktables.DoublePublisher;
+ import edu.wpi.first.networktables.IntegerPublisher;
+ import edu.wpi.first.networktables.NetworkTable;
++import edu.wpi.first.networktables.NetworkTableInstance;
++import edu.wpi.first.networktables.PubSubOption;
+ import edu.wpi.first.networktables.StringPublisher;
+ import java.util.function.LongSupplier;
+ import java.util.function.Supplier;
+@@ -32,19 +34,31 @@ import org.photonvision.vision.pipeline.result.CVPipelineResult;
+  * /photonvision/<camera>/health/: {@code fps}, {@code pipelineMs} (average) and {@code
+  * pipelineMsMax} over the last second, {@code latencyMs} (average, capture to result), {@code
+  * frames} (total since start) and {@code decodeFailures} (total frames whose JPEG couldn't be
+- * decoded; a rising count means a corrupt camera stream) and {@code recoveries} (reconnects and
+- * USB resets of a stuck camera since start, photonvision-29).
++ * decoded; a rising count means a corrupt camera stream) and {@code recoveries} (reconnects and USB
++ * resets of a stuck camera since start, photonvision-29).
++ *
++ * <p>photonvision-75, after TXMAN1: a dead camera's health looked frozen on the robot. Its values
++ * repeated (fps 0, frames unchanged) and NetworkTables drops a repeated value, so nothing reached
++ * the robot's log until a reconnect. Now, from a 1 s timer that doesn't depend on results: {@code
++ * heartbeat} (counts up), {@code state} (streaming, stalled, recovering, disconnected, gave-up,
++ * paused, starting; "" for a non-USB source) and {@code lastFrameAgeMs} (-1 before the first
++ * frame); fps and state keep duplicates; and fps goes to 0 if no result has closed a window for 2
++ * s.
+  */
+ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+     private final Supplier<String> nickname;
+     private final LongSupplier decodeFailures;
+     private final LongSupplier recoveries;
+     private final Supplier<String> problem;
+-    private StringPublisher problemPub;
++    private final Supplier<String> state;
++    private final LongSupplier lastFrameAgeMs;
++    private final NetworkTableInstance nt; // null: PhotonVision's own
++    private StringPublisher problemPub, statePub;
+ 
+     private String publishedName = null;
+     private DoublePublisher fps, pipelineMs, pipelineMsMax, latencyMs;
+-    private IntegerPublisher frames, failures, recoveryCount;
++    private IntegerPublisher frames, failures, recoveryCount, heartbeat, lastFrameAge;
++    private long beats = 0;
+ 
+     private long windowStartNs = 0, total = 0;
+     private int count = 0;
+@@ -59,33 +73,68 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+         this(nickname, decodeFailures, recoveries, () -> "");
+     }
+ 
+-    /** SpectrumJetson (photonvision-31): also {@code problem}, why the camera gets no frames ("" if fine). */
++    /**
++     * SpectrumJetson (photonvision-31): also {@code problem}, why the camera gets no frames ("" if
++     * fine).
++     */
+     public CameraHealthPublisher(
+             Supplier<String> nickname,
+             LongSupplier decodeFailures,
+             LongSupplier recoveries,
+             Supplier<String> problem) {
++        this(nickname, decodeFailures, recoveries, problem, () -> "", () -> -1);
++    }
++
++    /** photonvision-75: also {@code state} and {@code lastFrameAgeMs}. */
++    public CameraHealthPublisher(
++            Supplier<String> nickname,
++            LongSupplier decodeFailures,
++            LongSupplier recoveries,
++            Supplier<String> problem,
++            Supplier<String> state,
++            LongSupplier lastFrameAgeMs) {
++        this(nickname, decodeFailures, recoveries, problem, state, lastFrameAgeMs, null);
++    }
++
++    /** For tests: publishes on {@code nt}, not PhotonVision's own instance. */
++    CameraHealthPublisher(
++            Supplier<String> nickname,
++            LongSupplier decodeFailures,
++            LongSupplier recoveries,
++            Supplier<String> problem,
++            Supplier<String> state,
++            LongSupplier lastFrameAgeMs,
++            NetworkTableInstance nt) {
++        this.nt = nt;
+         this.problem = problem;
+         this.nickname = nickname;
+         this.decodeFailures = decodeFailures;
+         this.recoveries = recoveries;
++        this.state = state;
++        this.lastFrameAgeMs = lastFrameAgeMs;
+         // A camera with a problem often has no frames, so no results to publish on: its own timer.
+         org.photonvision.common.util.TimedTaskManager.getInstance()
+-                .addTask("CameraHealthProblem-" + System.identityHashCode(this), this::publishProblem, 1000);
++                .addTask(
++                        "CameraHealthProblem-" + System.identityHashCode(this), this::publishEverySecond, 1000);
+     }
+ 
+-    private synchronized void publishProblem() {
++    private synchronized void publishEverySecond() {
+         try {
+             ensurePublishers();
+             problemPub.set(problem.get());
+             recoveryCount.set(recoveries.getAsLong());
++            statePub.set(state.get());
++            lastFrameAge.set(lastFrameAgeMs.getAsLong());
++            heartbeat.set(++beats);
++            // No result has closed a window for 2 s (the vision thread isn't producing any): 0 fps.
++            if (windowStartNs != 0 && System.nanoTime() - windowStartNs > 2_000_000_000L) fps.set(0);
+         } catch (Exception e) {
+             // NetworkTables not up yet: next second
+         }
+     }
+ 
+     @Override
+-    public void accept(CVPipelineResult result) {
++    public synchronized void accept(CVPipelineResult result) {
+         long now = System.nanoTime();
+         if (windowStartNs == 0) windowStartNs = now;
+         // photonvision-63: the blank results a disabled, unplugged or stuck camera sends (capture
+@@ -127,14 +176,22 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+             frames.close();
+             failures.close();
+             recoveryCount.close();
++            problemPub.close();
++            statePub.close();
++            heartbeat.close();
++            lastFrameAge.close();
+         }
+         NetworkTable t =
+-                NetworkTablesManager.getInstance()
+-                        .getNTInst()
++                (nt != null ? nt : NetworkTablesManager.getInstance().getNTInst())
+                         .getTable("photonvision")
+                         .getSubTable(name)
+                         .getSubTable("health");
+-        fps = t.getDoubleTopic("fps").publish();
++        // photonvision-75: a repeated fps 0 or state still reaches the robot's log each second.
++        var keep = PubSubOption.keepDuplicates(true);
++        fps = t.getDoubleTopic("fps").publish(keep);
++        statePub = t.getStringTopic("state").publish(keep);
++        heartbeat = t.getIntegerTopic("heartbeat").publish();
++        lastFrameAge = t.getIntegerTopic("lastFrameAgeMs").publish();
+         pipelineMs = t.getDoubleTopic("pipelineMs").publish();
+         pipelineMsMax = t.getDoubleTopic("pipelineMsMax").publish();
+         latencyMs = t.getDoubleTopic("latencyMs").publish();
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
+index 3481d6dc..4dc8578d 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
+@@ -206,7 +206,16 @@ public class VisionModule {
+                         () ->
+                                 visionSource.getFrameProvider() instanceof USBFrameProvider usb
+                                         ? usb.getProblem()
+-                                        : ""));
++                                        : "",
++                        // SpectrumJetson (photonvision-75): e.g. "streaming", "gave-up".
++                        () ->
++                                visionSource.getFrameProvider() instanceof USBFrameProvider usb
++                                        ? usb.getHealthState()
++                                        : "",
++                        () ->
++                                visionSource.getFrameProvider() instanceof USBFrameProvider usb
++                                        ? usb.getLastFrameAgeMs()
++                                        : -1));
+         JetsonTelemetry.start();
+         // SpectrumJetson: the camera's mount (height, pitch, roll) from the tags it sees (photonvision-17).
+         addResultConsumer(
+diff --git a/photon-core/src/test/java/org/photonvision/common/dataflow/networktables/NTDataPublisherBlankResultTest.java b/photon-core/src/test/java/org/photonvision/common/dataflow/networktables/NTDataPublisherBlankResultTest.java
+new file mode 100644
+index 00000000..aec0b4fa
+--- /dev/null
++++ b/photon-core/src/test/java/org/photonvision/common/dataflow/networktables/NTDataPublisherBlankResultTest.java
+@@ -0,0 +1,87 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.common.dataflow.networktables;
++
++import static org.junit.jupiter.api.Assertions.*;
++
++import edu.wpi.first.networktables.PubSubOption;
++import java.util.List;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import org.photonvision.common.LoadJNI;
++import org.photonvision.common.util.math.MathUtils;
++import org.photonvision.vision.frame.Frame;
++import org.photonvision.vision.pipeline.result.CVPipelineResult;
++
++/**
++ * SpectrumJetson (photonvision-75): a blank result (capture time 0) publishes no result and no
++ * heartbeat. At TXMAN1 a dead camera's blank results reached the robot ~50 times a second.
++ */
++public class NTDataPublisherBlankResultTest {
++    @BeforeAll
++    public static void init() {
++        LoadJNI.loadLibraries();
++        // NetworkTablesManager needs the targeting JNI (time sync), which is built for Linux only
++        // here: this runs on the build host and the Jetson, and is skipped elsewhere.
++        org.junit.jupiter.api.Assumptions.assumeTrue(
++                org.photonvision.jni.LibraryLoader.loadTargeting(),
++                "no photontargetingJNI on this platform");
++    }
++
++    @Test
++    public void blankResultsPublishNoResultOrHeartbeat() {
++        var inst = NetworkTablesManager.getInstance().getNTInst();
++        var table = inst.getTable("photonvision").getSubTable("blank-test-cam");
++        var all = PubSubOption.keepDuplicates(true);
++        var raw =
++                table
++                        .getRawTopic("rawBytes")
++                        .subscribe("", new byte[0], all, PubSubOption.pollStorage(100));
++        var heartbeat =
++                table.getIntegerTopic("heartbeat").subscribe(-1, all, PubSubOption.pollStorage(100));
++        var enabled =
++                table.getBooleanTopic("enabled").subscribe(false, all, PubSubOption.pollStorage(100));
++
++        var pub =
++                new NTDataPublisher(
++                        "blank-test-cam",
++                        () -> 0,
++                        i -> {},
++                        () -> false,
++                        b -> {},
++                        () -> -1,
++                        i -> {},
++                        () -> true,
++                        b -> {});
++        raw.readQueue();
++        heartbeat.readQueue();
++        enabled.readQueue();
++
++        for (int i = 0; i < 5; i++) pub.accept(new CVPipelineResult(0L, 0, 0, null, new Frame()));
++        assertEquals(0, raw.readQueue().length, "no result for a blank frame");
++        assertEquals(0, heartbeat.readQueue().length, "no heartbeat for a blank frame");
++        assertTrue(enabled.readQueue().length > 0, "the camera's state still goes out");
++        assertTrue(enabled.get());
++
++        var real = new CVPipelineResult(7L, 1e6, 100, List.of(), new Frame());
++        real.setImageCaptureTimestampNanos(MathUtils.wpiNanoTime());
++        pub.accept(real);
++        assertEquals(1, raw.readQueue().length, "a real frame's result goes out");
++        assertEquals(7, heartbeat.get());
++    }
++}
+diff --git a/photon-core/src/test/java/org/photonvision/vision/frame/provider/StuckCameraWatchdogTest.java b/photon-core/src/test/java/org/photonvision/vision/frame/provider/StuckCameraWatchdogTest.java
+index 974b5a3d..829e8504 100644
+--- a/photon-core/src/test/java/org/photonvision/vision/frame/provider/StuckCameraWatchdogTest.java
++++ b/photon-core/src/test/java/org/photonvision/vision/frame/provider/StuckCameraWatchdogTest.java
+@@ -18,12 +18,15 @@
+ package org.photonvision.vision.frame.provider;
+ 
+ import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
+ 
+ import java.util.ArrayList;
+ import org.junit.jupiter.api.Test;
+ import org.photonvision.vision.frame.provider.StuckCameraWatchdog.Action;
++import org.photonvision.vision.frame.provider.StuckCameraWatchdog.State;
+ 
+-/** SpectrumJetson (photonvision-29). */
++/** SpectrumJetson (photonvision-29, -74). */
+ public class StuckCameraWatchdogTest {
+     private long nowNs = 1_000_000_000_000L;
+ 
+@@ -56,7 +59,8 @@ public class StuckCameraWatchdogTest {
+         var w = make();
+         var actions = stuckFor(w, 70);
+         // Reconnect at 3 s; USB reset 5 s later (8 s); then every 30 s (38 s, 68 s).
+-        assertEquals(java.util.List.of("RECONNECT@3", "USB_RESET@8", "USB_RESET@38", "USB_RESET@68"), actions);
++        assertEquals(
++                java.util.List.of("RECONNECT@3", "USB_RESET@8", "USB_RESET@38", "USB_RESET@68"), actions);
+         assertEquals(4, w.recoveries());
+         assertEquals("a USB reset", w.good());
+         assertEquals("", w.good());
+@@ -107,10 +111,100 @@ public class StuckCameraWatchdogTest {
+     @Test
+     public void disconnectedIsNotStuck() {
+         var w = make();
+-        for (int i = 0; i < 40; i++) { // 10 s unplugged
++        assertEquals(0, disconnectedFor(w, 8, false).size()); // unplugged for 8 s
++        assertEquals(State.DISCONNECTED, w.state());
++        assertEquals(0, stuckFor(w, 2.5).size());
++    }
++
++    // photonvision-75
++
++    /**
++     * Polls a disconnected camera every 250 ms for {@code seconds}, collecting actions with times.
++     */
++    private ArrayList<String> disconnectedFor(
++            StuckCameraWatchdog w, double seconds, boolean devicePresent) {
++        var out = new ArrayList<String>();
++        long start = nowNs;
++        while (nowNs - start < (long) (seconds * 1e9)) {
+             nowNs += 250_000_000L;
+-            w.notConnected();
++            var a = w.notConnected(devicePresent);
++            if (a != Action.NONE) out.add(a + "@" + Math.round((nowNs - start) / 1e9));
+         }
+-        assertEquals(0, stuckFor(w, 2.5).size());
++        return out;
++    }
++
++    @Test
++    public void disconnectedWithItsDeviceStillThereGetsUsbResets() {
++        // TXMAN1: the camera's own USB reset left it disconnected, and nothing more was tried.
++        var w = make();
++        assertEquals(
++                java.util.List.of("USB_RESET@5", "USB_RESET@35", "USB_RESET@65"),
++                disconnectedFor(w, 70, true));
++        assertEquals(3, w.recoveries());
++        assertEquals(State.DISCONNECTED, w.state());
++    }
++
++    @Test
++    public void goneFromUsbGivesUp() {
++        var w = make();
++        assertEquals(0, disconnectedFor(w, 9, false).size());
++        assertEquals(State.DISCONNECTED, w.state());
++        assertFalse(w.goneFromUsb());
++        assertEquals(0, disconnectedFor(w, 2, false).size());
++        assertEquals(State.GAVE_UP, w.state());
++        assertTrue(w.goneFromUsb());
++        // Replugged: it streams again.
++        assertEquals("being given up on (replugged, or a later USB reset)", w.good());
++        assertEquals(State.STREAMING, w.state());
++        assertFalse(w.goneFromUsb());
++    }
++
++    @Test
++    public void givesUpAfterFourUsbResetsThenRetriesEveryTwoMinutes() {
++        var w = make();
++        var actions = stuckFor(w, 340);
++        assertEquals(
++                java.util.List.of(
++                        "RECONNECT@3",
++                        "USB_RESET@8",
++                        "USB_RESET@38",
++                        "USB_RESET@68",
++                        "USB_RESET@98",
++                        "USB_RESET@218",
++                        "USB_RESET@338"),
++                actions);
++        assertEquals(State.GAVE_UP, w.state());
++        assertFalse(w.goneFromUsb()); // still connected
++    }
++
++    @Test
++    public void statesAndFrameAge() {
++        var w = make();
++        assertEquals(-1, w.lastFrameAgeMs());
++        nowNs += 250_000_000L;
++        w.noFrame();
++        assertEquals(State.STARTING, w.state());
++        w.good();
++        assertEquals(State.STREAMING, w.state());
++        assertEquals(0, w.lastFrameAgeMs());
++        stuckFor(w, 1.5);
++        assertEquals(State.STALLED, w.state());
++        assertEquals(1500, w.lastFrameAgeMs());
++        stuckFor(w, 2); // reconnect at 3 s
++        assertEquals(State.RECOVERING, w.state());
++        nowNs += 5_000_000_000L; // nobody reads it (robot code disabled it)
++        assertEquals(State.PAUSED, w.state());
++        w.good();
++        assertEquals(State.STREAMING, w.state());
++    }
++
++    @Test
++    public void bandwidthRetriesCountAsRecoveries() {
++        var w = make();
++        for (int i = 0; i < 16; i++) { // 4 s
++            nowNs += 250_000_000L;
++            w.noFrameNoBandwidth();
++        }
++        assertEquals(1, w.recoveries());
+     }
+ }
+diff --git a/photon-core/src/test/java/org/photonvision/vision/processes/CameraHealthPublisherTest.java b/photon-core/src/test/java/org/photonvision/vision/processes/CameraHealthPublisherTest.java
+new file mode 100644
+index 00000000..c3007ab4
+--- /dev/null
++++ b/photon-core/src/test/java/org/photonvision/vision/processes/CameraHealthPublisherTest.java
+@@ -0,0 +1,86 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.vision.processes;
++
++import static org.junit.jupiter.api.Assertions.*;
++
++import edu.wpi.first.networktables.NetworkTableInstance;
++import edu.wpi.first.networktables.PubSubOption;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import org.photonvision.common.LoadJNI;
++
++/**
++ * SpectrumJetson (photonvision-75): a dead camera's health keeps reaching the robot. At TXMAN1 its
++ * values repeated, NetworkTables dropped the repeats, and the robot's log showed nothing for
++ * minutes.
++ */
++public class CameraHealthPublisherTest {
++    @BeforeAll
++    public static void init() {
++        LoadJNI.loadLibraries();
++    }
++
++    @Test
++    public void aDeadCameraKeepsReporting() throws InterruptedException {
++        var inst = NetworkTableInstance.create();
++        var health = inst.getTable("photonvision").getSubTable("health-test-cam").getSubTable("health");
++        PubSubOption[] all = {PubSubOption.keepDuplicates(true), PubSubOption.pollStorage(100)};
++        var heartbeat = health.getIntegerTopic("heartbeat").subscribe(-1, all);
++        var state = health.getStringTopic("state").subscribe("", all);
++        var fps = health.getDoubleTopic("fps").subscribe(-1, all);
++        var age = health.getIntegerTopic("lastFrameAgeMs").subscribe(-2, all);
++
++        // No results at all (the vision thread produces none): only the 1 s timer publishes.
++        new CameraHealthPublisher(
++                () -> "health-test-cam", () -> 0, () -> 2, () -> "", () -> "gave-up", () -> 61_000, inst);
++        Thread.sleep(3500);
++
++        var beats = heartbeat.readQueue();
++        assertTrue(beats.length >= 2, "heartbeat every second: " + beats.length);
++        assertTrue(beats[beats.length - 1].value > beats[0].value, "and it counts up");
++        var states = state.readQueue();
++        assertTrue(states.length >= 2, "a repeated state still goes out each second: " + states.length);
++        assertEquals("gave-up", states[states.length - 1].value);
++        assertEquals(61_000, age.get());
++        assertEquals(-1, fps.get(), "no window has started yet, so no fps");
++    }
++
++    @Test
++    public void resultsStoppingMeansZeroFps() throws InterruptedException {
++        var inst = NetworkTableInstance.create();
++        var health =
++                inst.getTable("photonvision").getSubTable("health-test-cam2").getSubTable("health");
++        var fps =
++                health
++                        .getDoubleTopic("fps")
++                        .subscribe(-1, PubSubOption.keepDuplicates(true), PubSubOption.pollStorage(100));
++
++        var p =
++                new CameraHealthPublisher(
++                        () -> "health-test-cam2", () -> 0, () -> 0, () -> "", () -> "stalled", () -> 0, inst);
++        // One blank result starts a window; then the vision thread produces nothing.
++        p.accept(
++                new org.photonvision.vision.pipeline.result.CVPipelineResult(
++                        0L, 0, 0, null, new org.photonvision.vision.frame.Frame()));
++        Thread.sleep(3500);
++        var values = fps.readQueue();
++        assertTrue(values.length >= 1, "fps 0 from the timer");
++        assertEquals(0.0, values[values.length - 1].value);
++    }
++}
