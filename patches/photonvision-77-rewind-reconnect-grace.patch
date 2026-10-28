@@ -1,0 +1,359 @@
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
+index ccc7445c..e05b06da 100644
+--- a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
++++ b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
+@@ -129,7 +129,9 @@ public class RewindManager {
+     private volatile String manualLabel = "";
+     private volatile String stopReason = "";
+     private volatile boolean diskLow = false;
+-    private volatile long lastRobotRecordTrueUs = 0;
++    private RobotRecordRequest robotRequest; // photonvision-77
++    private volatile boolean robotGraceNow = false;
++    private boolean waitingAfterReconnect = false;
+     private volatile long sessionsBytes = 0;
+     private volatile int sessionCount = 0;
+     private volatile long lastDiskCheckUs = 0;
+@@ -161,6 +163,7 @@ public class RewindManager {
+         NetworkTableInstance nt = NetworkTablesManager.getInstance().getNTInst();
+         NetworkTable t = nt.getTable("photonvision").getSubTable("rewind");
+         recordSub = t.getBooleanTopic("record").subscribe(false);
++        robotRequest = new RobotRecordRequest(nt, recordSub, DISCONNECT_GRACE_US);
+         labelSub = t.getStringTopic("label").subscribe("");
+         recordingPub = t.getBooleanTopic("recording").publish();
+         sessionPub = t.getStringTopic("session").publish();
+@@ -263,6 +266,8 @@ public class RewindManager {
+         var m = INSTANCE;
+         if (m == null) return false;
+         if (m.manual) return true;
++        // photonvision-77: a robot recording kept through a NetworkTables drop counts too.
++        if (m.robotGraceNow) return true;
+         var sub = m.recordSub;
+         return sub != null && NetworkTablesManager.getInstance().getNTInst().isConnected() && sub.get();
+     }
+@@ -273,14 +278,26 @@ public class RewindManager {
+         try {
+             long now = NetworkTablesJNI.now();
+             boolean ntConnected = NetworkTablesManager.getInstance().getNTInst().isConnected();
+-            boolean robotWants = ntConnected && recordSub.get();
+-            if (robotWants) lastRobotRecordTrueUs = now;
+-            // Robot asked to record, then vanished: keep going for the grace period.
+-            boolean robotGrace =
+-                    !ntConnected
+-                            && current != null
+-                            && current.reason().equals("robot")
+-                            && now - lastRobotRecordTrueUs < DISCONNECT_GRACE_US;
++            // Robot asked to record, then vanished: keep going for the grace period. photonvision-77:
++            // also after it reconnects, until it sends record again (see RobotRecordRequest).
++            var robot =
++                    robotRequest.update(
++                            now, ntConnected, current != null && current.reason().equals("robot"));
++            boolean robotWants = robot.wants();
++            boolean robotGrace = robot.grace();
++            robotGraceNow = robotGrace;
++            boolean wasWaiting = waitingAfterReconnect;
++            if (robot.waitingAfterReconnect() != waitingAfterReconnect) {
++                waitingAfterReconnect = robot.waitingAfterReconnect();
++                if (waitingAfterReconnect) {
++                    logger.info(
++                            "Rewind: NetworkTables reconnected; keeping "
++                                    + current.name()
++                                    + " until the robot sends record again");
++                } else if (robotWants) {
++                    logger.info("Rewind: the robot still wants recording; same session");
++                }
++            }
+ 
+             // photonvision-56: never while quiet mode has the scratch partition read-only (and no
+             // tidying either: deleting old recordings is a write too).
+@@ -301,7 +318,11 @@ public class RewindManager {
+                                 ? "disk low"
+                                 : current.reason().equals("bench")
+                                         ? "bench recording stopped"
+-                                        : ntConnected ? "robot stopped" : "robot disconnected");
++                                        : !ntConnected
++                                        ? "robot disconnected"
++                                        : wasWaiting
++                                        ? "robot didn't send record after reconnecting"
++                                        : "robot stopped");
+             }
+ 
+             recordingPub.set(current != null);
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/RobotRecordRequest.java b/photon-core/src/main/java/org/photonvision/rewind/RobotRecordRequest.java
+new file mode 100644
+index 00000000..62ff42e6
+--- /dev/null
++++ b/photon-core/src/main/java/org/photonvision/rewind/RobotRecordRequest.java
+@@ -0,0 +1,82 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.rewind;
++
++import edu.wpi.first.networktables.BooleanSubscriber;
++import edu.wpi.first.networktables.NetworkTableEvent;
++import edu.wpi.first.networktables.NetworkTableInstance;
++import edu.wpi.first.networktables.NetworkTableListenerPoller;
++import java.util.EnumSet;
++
++/**
++ * SpectrumJetson (photonvision-77): whether robot code wants a recording, through NetworkTables
++ * drops.
++ *
++ * <p>When the connection drops, ntcore forgets the robot's values. After the reconnect, {@code
++ * record} reads as its default (false) until the robot's value arrives again, a moment later. Read
++ * as "the robot stopped", that closed the match's recording and opened a new one a tick later: at
++ * TXMAN1 (2026-10-17) a flaky robot switch split Q30, Q32 and a playoff match that way. So a robot
++ * recording keeps its grace through the reconnect, until a {@code record} value arrives that the
++ * robot sent after it. Only an explicit false, or the grace running out, ends it.
++ *
++ * <p>Connects, disconnects and record values are read from one listener poller each tick, in the
++ * order ntcore saw them, so a value is never counted against the wrong connection, and a drop
++ * shorter than a tick still counts. (Listener callbacks on NetworkTables' own thread lost events in
++ * the tests; the poller didn't.)
++ */
++final class RobotRecordRequest {
++    /** What the robot wants this tick. */
++    record State(boolean wants, boolean grace, boolean waitingAfterReconnect) {}
++
++    private final BooleanSubscriber sub;
++    private final long graceUs;
++    private final NetworkTableListenerPoller events;
++    // False at each connect or disconnect, true when a record value arrives from the robot.
++    private boolean heardSinceConnect = false;
++    private long lastTrueUs = Long.MIN_VALUE;
++
++    RobotRecordRequest(NetworkTableInstance nt, BooleanSubscriber sub, long graceUs) {
++        this.sub = sub;
++        this.graceUs = graceUs;
++        events = new NetworkTableListenerPoller(nt);
++        events.addConnectionListener(false);
++        events.addListener(sub, EnumSet.of(NetworkTableEvent.Kind.kValueRemote));
++    }
++
++    /**
++     * Once a tick. robotSessionOpen: a recording the robot asked for is open, the only kind the
++     * grace keeps going.
++     */
++    State update(long nowUs, boolean connected, boolean robotSessionOpen) {
++        for (var e : events.readQueue()) {
++            heardSinceConnect = !e.is(NetworkTableEvent.Kind.kConnection);
++        }
++        boolean wants = connected && sub.get();
++        if (wants) lastTrueUs = nowUs;
++        // Disconnected, or reconnected with no value from the robot yet: what record reads is only
++        // the default.
++        boolean unknown = !connected || !heardSinceConnect;
++        boolean grace =
++                !wants
++                        && unknown
++                        && robotSessionOpen
++                        && lastTrueUs != Long.MIN_VALUE
++                        && nowUs - lastTrueUs < graceUs;
++        return new State(wants, grace, grace && connected);
++    }
++}
+diff --git a/photon-core/src/test/java/org/photonvision/rewind/RobotRecordRequestTest.java b/photon-core/src/test/java/org/photonvision/rewind/RobotRecordRequestTest.java
+new file mode 100644
+index 00000000..a1591a48
+--- /dev/null
++++ b/photon-core/src/test/java/org/photonvision/rewind/RobotRecordRequestTest.java
+@@ -0,0 +1,185 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.rewind;
++
++import static org.junit.jupiter.api.Assertions.*;
++
++import edu.wpi.first.networktables.BooleanPublisher;
++import edu.wpi.first.networktables.BooleanSubscriber;
++import edu.wpi.first.networktables.NetworkTableInstance;
++import edu.wpi.first.networktables.NetworkTablesJNI;
++import java.util.function.BooleanSupplier;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.photonvision.common.LoadJNI;
++
++/**
++ * SpectrumJetson (photonvision-77): a robot recording through a NetworkTables drop, with real
++ * ntcore. A "robot" NetworkTables server and the "Jetson" client on localhost; the drop is the robot
++ * server going away and coming back. Each test ticks {@link RobotRecordRequest} the way
++ * RewindManager's tick does and counts the sessions that would open and close.
++ */
++public class RobotRecordRequestTest {
++    static final int PORT3 = 31735, PORT4 = 35810; // not the real 1735/5810
++    static final long GRACE_US = 60_000_000L;
++
++    NetworkTableInstance jetson, robot;
++    BooleanSubscriber sub;
++    RobotRecordRequest req;
++    RobotRecordRequest.State state;
++    boolean open;
++    int opened, closed;
++
++    @BeforeAll
++    public static void init() {
++        LoadJNI.loadLibraries();
++    }
++
++    @BeforeEach
++    public void connect() throws InterruptedException {
++        jetson = NetworkTableInstance.create();
++        sub = jetson.getTable("photonvision").getSubTable("rewind").getBooleanTopic("record").subscribe(false);
++        req = new RobotRecordRequest(jetson, sub, GRACE_US);
++        jetson.startClient4("jetson");
++        jetson.setServer("127.0.0.1", PORT4);
++    }
++
++    @AfterEach
++    public void close() {
++        if (robot != null) robot.close();
++        jetson.close();
++    }
++
++    /** A robot program starting: its NetworkTables server, and record unpublished until set. */
++    BooleanPublisher startRobot() {
++        robot = NetworkTableInstance.create();
++        robot.startServer("", "127.0.0.1", PORT3, PORT4);
++        return robot.getTable("photonvision").getSubTable("rewind").getBooleanTopic("record").publish();
++    }
++
++    void dropRobot() {
++        robot.close();
++        robot = null;
++    }
++
++    /** One RewindManager tick at nowUs. */
++    void tick(long nowUs) {
++        state = req.update(nowUs, jetson.isConnected(), open);
++        boolean want = state.wants() || state.grace();
++        if (want && !open) {
++            open = true;
++            opened++;
++        } else if (!want && open) {
++            open = false;
++            closed++;
++        }
++    }
++
++    /** Ticks every 20 ms (the real tick is 200 ms: this looks harder for a gap) until ok. */
++    void tickUntil(String what, BooleanSupplier ok) throws InterruptedException {
++        long until = System.currentTimeMillis() + 5000;
++        while (!ok.getAsBoolean()) {
++            assertTrue(System.currentTimeMillis() < until, "timed out waiting for: " + what);
++            tick(NetworkTablesJNI.now());
++            Thread.sleep(20);
++        }
++        tick(NetworkTablesJNI.now());
++    }
++
++    void tickFor(long ms) throws InterruptedException {
++        for (long until = System.currentTimeMillis() + ms; System.currentTimeMillis() < until; ) {
++            tick(NetworkTablesJNI.now());
++            Thread.sleep(20);
++        }
++    }
++
++    /** Recording, then the robot drops off and comes back with record not yet sent. */
++    void recordingThenDropAndReconnect() throws InterruptedException {
++        var record = startRobot();
++        record.set(true);
++        tickUntil("a session opens", () -> open);
++        assertEquals(1, opened);
++
++        dropRobot();
++        tickUntil("disconnected", () -> !jetson.isConnected());
++        tickFor(500);
++        assertTrue(open, "kept through the drop (the disconnect grace)");
++        // ntcore has forgotten the robot's true: this is what tick() used to read after a reconnect.
++        assertFalse(sub.get());
++
++        startRobot();
++        tickUntil("reconnected", jetson::isConnected);
++        tickFor(1000);
++        assertTrue(jetson.isConnected());
++        assertFalse(sub.get(), "record reads its default: nothing from the robot yet");
++        assertTrue(open, "still the same session, not \"robot stopped\"");
++        assertTrue(state.waitingAfterReconnect());
++    }
++
++    @Test
++    public void lateTrueAfterReconnectKeepsOneSession() throws InterruptedException {
++        recordingThenDropAndReconnect();
++        var record = robot.getTable("photonvision").getSubTable("rewind").getBooleanTopic("record").publish();
++        record.set(true);
++        tickUntil("the robot's true arrives", sub::get);
++        tickFor(500);
++        assertTrue(open);
++        assertFalse(state.grace());
++        assertEquals(1, opened, "one session");
++        assertEquals(0, closed);
++
++        // And then the match ends normally.
++        record.set(false);
++        tickUntil("closes", () -> !open);
++        assertEquals(1, opened);
++        assertEquals(1, closed);
++    }
++
++    @Test
++    public void explicitFalseAfterReconnectEndsIt() throws InterruptedException {
++        recordingThenDropAndReconnect();
++        var record = robot.getTable("photonvision").getSubTable("rewind").getBooleanTopic("record").publish();
++        record.set(false);
++        tickUntil("closes on the robot's false", () -> !open);
++        tickFor(300);
++        assertEquals(1, opened);
++        assertEquals(1, closed);
++    }
++
++    @Test
++    public void graceRunsOutWithNoValueAfterReconnect() throws InterruptedException {
++        recordingThenDropAndReconnect();
++        tick(NetworkTablesJNI.now() + GRACE_US);
++        assertFalse(open, "the 60 s grace ends it, connected or not");
++        assertEquals(1, closed);
++    }
++
++    @Test
++    public void noRobotSessionNoGrace() throws InterruptedException {
++        // A bench recording (or none) isn't kept by the robot's grace.
++        var record = startRobot();
++        record.set(true);
++        tickUntil("connected", sub::get);
++        assertTrue(req.update(NetworkTablesJNI.now(), true, false).wants());
++        dropRobot();
++        tickUntil("disconnected", () -> !jetson.isConnected());
++        assertFalse(req.update(NetworkTablesJNI.now(), false, false).grace());
++    }
++}

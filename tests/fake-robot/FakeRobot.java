@@ -14,6 +14,11 @@
 // 08) N seconds ahead of this Jetson's, so PhotonVision sets the Jetson's date N seconds forward;
 // FAKE_ROBOT_CLOCK_AFTER_S=T starts publishing it T seconds after PhotonVision connects. Phases
 // are timed on a monotonic clock, so that jump doesn't cut them short.
+// FAKE_ROBOT_RECORD=1 also asks Rewind to record (/photonvision/rewind/record true, label
+// FAKE_ROBOT_LABEL or "fake-robot") in every phase, except a phase whose state ends in "-norecord"
+// (e.g. fms-enabled-norecord), which leaves record unpublished, like robot code that hasn't set it
+// yet. Record is set false at the end (photonvision-77, tests/rewind-sessions/reconnect.sh).
+import edu.wpi.first.networktables.BooleanPublisher;
 import edu.wpi.first.networktables.NetworkTableInstance;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -21,6 +26,7 @@ import org.photonvision.jni.LibraryLoader;
 
 public class FakeRobot {
     static long word(String state) {
+        if (state.endsWith("-norecord")) state = state.substring(0, state.length() - "-norecord".length());
         long w = 32; // DS attached
         if (state.startsWith("fms-")) {
             w |= 16;
@@ -65,6 +71,25 @@ public class FakeRobot {
                     else control2026.set(w);
                 };
         control.accept(word("disabled"));
+        final boolean recordOn = "1".equals(System.getenv("FAKE_ROBOT_RECORD"));
+        var rewind = nt.getTable("photonvision").getSubTable("rewind");
+        if (recordOn) {
+            String label = System.getenv("FAKE_ROBOT_LABEL");
+            rewind.getStringTopic("label").publish().set(label == null ? "fake-robot" : label);
+            System.out.println("asking Rewind to record");
+        }
+        BooleanPublisher[] record = {null};
+        // Published and true, or unpublished (null: closing the only publisher unpublishes it).
+        java.util.function.Consumer<Boolean> setRecord =
+                on -> {
+                    if (!recordOn) return;
+                    if (on && record[0] == null) record[0] = rewind.getBooleanTopic("record").publish();
+                    if (on) record[0].set(true);
+                    else if (record[0] != null) {
+                        record[0].close();
+                        record[0] = null;
+                    }
+                };
         // The robot's clock: this Jetson's at the start plus the offset, then counted on the
         // monotonic clock (once PhotonVision sets the date, ours has jumped too).
         String offset = System.getenv("FAKE_ROBOT_CLOCK_OFFSET_S");
@@ -96,6 +121,7 @@ public class FakeRobot {
         for (int i = 0; i < args.length; i++) {
             String[] p = args[i].split(":");
             control.accept(word(p[0]));
+            setRecord.accept(!p[0].endsWith("-norecord"));
             nt.flush();
             System.out.println("phase " + i + " " + p[0] + " " + System.currentTimeMillis());
             long until = monoMs.getAsLong() + (long) (Double.parseDouble(p[1]) * 1000);
@@ -110,6 +136,13 @@ public class FakeRobot {
             }
         }
         System.out.println("done " + System.currentTimeMillis());
+        if (recordOn) {
+            if (record[0] == null) record[0] = rewind.getBooleanTopic("record").publish();
+            record[0].set(false);
+            nt.flush();
+            System.out.println("record false " + System.currentTimeMillis());
+            for (long until = monoMs.getAsLong() + 1000; monoMs.getAsLong() < until; Thread.sleep(100)) tick.run();
+        }
         // A run that ends disabled can leave quiet mode on (photonvision-56: a match ended, or 60 s
         // disabled), and with the robot gone it stays on: the bench Jetson's scratch partition
         // read-only, Rewind not recording, until something enables. So such a run ends with a

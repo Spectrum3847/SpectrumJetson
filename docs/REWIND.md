@@ -40,8 +40,26 @@ All topics are under `/photonvision/rewind/` in NetworkTables.
 | `freeGB` | double | Jetson | Free space on the Jetson's SSD. |
 | `framesDropped` | integer | Jetson | Frames it couldn't save (bad JPEGs, write errors, a camera not in MJPEG mode). |
 
-If the robot disconnects while `record` is true (a brownout or reboot), the Jetson keeps recording
-for 60 s, so you get the video of whatever happened.
+If the robot disconnects while `record` is true (a brownout, a reboot, a bad cable), the Jetson
+keeps recording, so you get the video of whatever happened:
+- **An FMS match:** until the robot is back and sends `record` false, or 5 min after its last true
+  (`photonvision-78`). That covers the rest of a match the robot dropped out of.
+- **Anything else:** 60 s. Settings > Rewind > **Record through disconnects** gives every robot
+  recording the match rule. Turn it on at events for practice matches; leave it off on the bench.
+
+**A NetworkTables drop doesn't split a recording** (`photonvision-77`). After a reconnect, `record`
+reads false on the Jetson until the robot's value arrives again. At TXMAN1 (2026-10-17) a flaky
+robot switch dropped NetworkTables for ~2 s in Q30, Q32 and a playoff match, and each time the
+Jetson took that false for "robot stopped": the match's video came out in two recordings. Now the
+grace keeps going after the reconnect until the robot sends `record` again:
+- **true:** the same recording carries on (the log says "the robot still wants recording; same
+  session").
+- **false:** it stops, as "robot stopped".
+- **nothing before the grace runs out:** it stops, as "robot didn't send record after
+  reconnecting".
+
+Robot code that sets `record` every loop needs no change. `tests/rewind-sessions/reconnect.sh`
+drops a fake robot's traffic mid-match and checks for one recording.
 
 Example (Java, WPILib 2027). Keep it in the vision IO layer so AdvantageKit replay stays clean:
 

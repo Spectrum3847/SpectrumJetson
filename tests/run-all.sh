@@ -38,6 +38,7 @@ TESTS=(
   "quiet-clock-jump|jetson|260|tests/quiet-mode/clock-jump.sh"
   "quiet-leave-fails|jetson|260|tests/quiet-mode/leave-fails.sh"
   "rewind-sessions|jetson|200|tests/rewind-sessions/run.sh"
+  "rewind-reconnect|jetson|150|tests/rewind-sessions/reconnect.sh"
   "robot-clock|jetson|200|tests/robot-clock/run.sh"
   "field-map|jetson|260|tests/field-map/run.sh"
   "jetson-telemetry|jetson|120|tests/jetson-telemetry/run.sh"

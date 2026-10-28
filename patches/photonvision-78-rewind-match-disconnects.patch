@@ -1,0 +1,233 @@
+diff --git a/photon-client/src/components/settings/RewindCard.vue b/photon-client/src/components/settings/RewindCard.vue
+index 3285c8f1..272f7ab4 100644
+--- a/photon-client/src/components/settings/RewindCard.vue
++++ b/photon-client/src/components/settings/RewindCard.vue
+@@ -24,7 +24,7 @@ type RewindStatus = {
+   freeGB: number;
+   usedGB: number;
+   sessionCount: number;
+-  settings: { fps: number; quotaGB: number; minFreeGB: number };
++  settings: { fps: number; quotaGB: number; minFreeGB: number; recordThroughDisconnects: boolean };
+   cameras: RewindCamera[];
+   recent: { name: string; MB: number }[];
+ };
+@@ -56,6 +56,11 @@ const post = async (body: object, message: string) => {
+   }
+ };
+ const setManual = (on: boolean) => post({ manual: on }, on ? "Recording (bench)" : "Bench recording stopped");
++const setThroughDisconnects = (on: boolean) =>
++  post(
++    { recordThroughDisconnects: on },
++    on ? "Robot recordings now continue through disconnects" : "Only FMS matches continue through disconnects"
++  );
+ const deleteSession = (name: string) => {
+   if (window.confirm(`Delete recording ${name}?`)) post({ delete: name }, `Deleted ${name}`);
+ };
+@@ -100,6 +105,14 @@ onBeforeUnmount(() => clearInterval(timer));
+         :label-cols="4"
+         @update:model-value="(v) => setManual(!!v)"
+       />
++      <pv-switch
++        :model-value="status.settings.recordThroughDisconnects"
++        :disabled="busy"
++        label="Record through disconnects (events)"
++        tooltip="If the robot disconnects mid-recording, keep recording until it is back and says stop, up to 5 min, as FMS matches always do. On at events for practice matches, off on the bench."
++        :label-cols="4"
++        @update:model-value="(v) => setThroughDisconnects(!!v)"
++      />
+ 
+       <v-table v-if="status.recording" density="compact" class="mb-3">
+         <thead>
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
+index e05b06da..a3882502 100644
+--- a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
++++ b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
+@@ -88,6 +88,9 @@ public class RewindManager {
+     private static final Path SETTINGS_FILE = ROOT.resolve("settings.json");
+     private static final Path SEQ_FILE = ROOT.resolve("next-session-number");
+     private static final long DISCONNECT_GRACE_US = 60_000_000L;
++    // photonvision-78: an FMS match, or any robot recording with recordThroughDisconnects on, is
++    // kept through a drop until the robot is back and says stop, or this long. Longer than a match.
++    private static final long MATCH_DISCONNECT_GRACE_US = 300_000_000L;
+     private static final ObjectMapper json =
+             new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
+ 
+@@ -101,6 +104,12 @@ public class RewindManager {
+ 
+         /** Keep at least this much of the SSD free; stop recording below half of it. */
+         public double minFreeGB = 15;
++
++        /**
++         * photonvision-78: keep any robot recording through a disconnect, as FMS matches always
++         * are (practice matches at an event). On at events, off on the bench.
++         */
++        public boolean recordThroughDisconnects = false;
+     }
+ 
+     public record Session(
+@@ -131,6 +140,7 @@ public class RewindManager {
+     private volatile boolean diskLow = false;
+     private RobotRecordRequest robotRequest; // photonvision-77
+     private volatile boolean robotGraceNow = false;
++    private boolean fmsMatch = false; // photonvision-78: the open recording saw the FMS
+     private boolean waitingAfterReconnect = false;
+     private volatile long sessionsBytes = 0;
+     private volatile int sessionCount = 0;
+@@ -163,7 +173,7 @@ public class RewindManager {
+         NetworkTableInstance nt = NetworkTablesManager.getInstance().getNTInst();
+         NetworkTable t = nt.getTable("photonvision").getSubTable("rewind");
+         recordSub = t.getBooleanTopic("record").subscribe(false);
+-        robotRequest = new RobotRecordRequest(nt, recordSub, DISCONNECT_GRACE_US);
++        robotRequest = new RobotRecordRequest(nt, recordSub);
+         labelSub = t.getStringTopic("label").subscribe("");
+         recordingPub = t.getBooleanTopic("recording").publish();
+         sessionPub = t.getStringTopic("session").publish();
+@@ -228,11 +238,16 @@ public class RewindManager {
+         return s == null ? "" : s.name();
+     }
+ 
+-    public synchronized void updateSettings(Double fps, Double quotaGB, Double minFreeGB) {
++    public synchronized void updateSettings(
++            Double fps, Double quotaGB, Double minFreeGB, Boolean recordThroughDisconnects) {
+         var s = new Settings();
+         s.fps = fps != null ? Math.max(1, Math.min(120, fps)) : settings.fps;
+         s.quotaGB = quotaGB != null ? Math.max(1, quotaGB) : settings.quotaGB;
+         s.minFreeGB = minFreeGB != null ? Math.max(1, minFreeGB) : settings.minFreeGB;
++        s.recordThroughDisconnects =
++                recordThroughDisconnects != null
++                        ? recordThroughDisconnects
++                        : settings.recordThroughDisconnects;
+         settings = s;
+         try {
+             json.writeValue(SETTINGS_FILE.toFile(), s);
+@@ -280,9 +295,19 @@ public class RewindManager {
+             boolean ntConnected = NetworkTablesManager.getInstance().getNTInst().isConnected();
+             // Robot asked to record, then vanished: keep going for the grace period. photonvision-77:
+             // also after it reconnects, until it sends record again (see RobotRecordRequest).
++            var ds = NetworkTablesManager.getInstance().getDriverStation();
++            if (current == null) fmsMatch = false;
++            else if (ds.current().m_fmsAttached()) fmsMatch = true;
++            long graceUs =
++                    fmsMatch || settings.recordThroughDisconnects
++                            ? MATCH_DISCONNECT_GRACE_US
++                            : DISCONNECT_GRACE_US;
+             var robot =
+                     robotRequest.update(
+-                            now, ntConnected, current != null && current.reason().equals("robot"));
++                            now,
++                            ntConnected,
++                            current != null && current.reason().equals("robot"),
++                            graceUs);
+             boolean robotWants = robot.wants();
+             boolean robotGrace = robot.grace();
+             robotGraceNow = robotGrace;
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/RobotRecordRequest.java b/photon-core/src/main/java/org/photonvision/rewind/RobotRecordRequest.java
+index 62ff42e6..be6bb50e 100644
+--- a/photon-core/src/main/java/org/photonvision/rewind/RobotRecordRequest.java
++++ b/photon-core/src/main/java/org/photonvision/rewind/RobotRecordRequest.java
+@@ -44,15 +44,13 @@ final class RobotRecordRequest {
+     record State(boolean wants, boolean grace, boolean waitingAfterReconnect) {}
+ 
+     private final BooleanSubscriber sub;
+-    private final long graceUs;
+     private final NetworkTableListenerPoller events;
+     // False at each connect or disconnect, true when a record value arrives from the robot.
+     private boolean heardSinceConnect = false;
+     private long lastTrueUs = Long.MIN_VALUE;
+ 
+-    RobotRecordRequest(NetworkTableInstance nt, BooleanSubscriber sub, long graceUs) {
++    RobotRecordRequest(NetworkTableInstance nt, BooleanSubscriber sub) {
+         this.sub = sub;
+-        this.graceUs = graceUs;
+         events = new NetworkTableListenerPoller(nt);
+         events.addConnectionListener(false);
+         events.addListener(sub, EnumSet.of(NetworkTableEvent.Kind.kValueRemote));
+@@ -60,9 +58,9 @@ final class RobotRecordRequest {
+ 
+     /**
+      * Once a tick. robotSessionOpen: a recording the robot asked for is open, the only kind the
+-     * grace keeps going.
++     * grace keeps going. graceUs: how long it keeps going after the robot's last true.
+      */
+-    State update(long nowUs, boolean connected, boolean robotSessionOpen) {
++    State update(long nowUs, boolean connected, boolean robotSessionOpen, long graceUs) {
+         for (var e : events.readQueue()) {
+             heardSinceConnect = !e.is(NetworkTableEvent.Kind.kConnection);
+         }
+diff --git a/photon-core/src/test/java/org/photonvision/rewind/RobotRecordRequestTest.java b/photon-core/src/test/java/org/photonvision/rewind/RobotRecordRequestTest.java
+index a1591a48..03ce4b2e 100644
+--- a/photon-core/src/test/java/org/photonvision/rewind/RobotRecordRequestTest.java
++++ b/photon-core/src/test/java/org/photonvision/rewind/RobotRecordRequestTest.java
+@@ -56,7 +56,7 @@ public class RobotRecordRequestTest {
+     public void connect() throws InterruptedException {
+         jetson = NetworkTableInstance.create();
+         sub = jetson.getTable("photonvision").getSubTable("rewind").getBooleanTopic("record").subscribe(false);
+-        req = new RobotRecordRequest(jetson, sub, GRACE_US);
++        req = new RobotRecordRequest(jetson, sub);
+         jetson.startClient4("jetson");
+         jetson.setServer("127.0.0.1", PORT4);
+     }
+@@ -81,7 +81,7 @@ public class RobotRecordRequestTest {
+ 
+     /** One RewindManager tick at nowUs. */
+     void tick(long nowUs) {
+-        state = req.update(nowUs, jetson.isConnected(), open);
++        state = req.update(nowUs, jetson.isConnected(), open, GRACE_US);
+         boolean want = state.wants() || state.grace();
+         if (want && !open) {
+             open = true;
+@@ -177,9 +177,9 @@ public class RobotRecordRequestTest {
+         var record = startRobot();
+         record.set(true);
+         tickUntil("connected", sub::get);
+-        assertTrue(req.update(NetworkTablesJNI.now(), true, false).wants());
++        assertTrue(req.update(NetworkTablesJNI.now(), true, false, GRACE_US).wants());
+         dropRobot();
+         tickUntil("disconnected", () -> !jetson.isConnected());
+-        assertFalse(req.update(NetworkTablesJNI.now(), false, false).grace());
++        assertFalse(req.update(NetworkTablesJNI.now(), false, false, GRACE_US).grace());
+     }
+ }
+diff --git a/photon-server/src/main/java/org/photonvision/server/RequestHandler.java b/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
+index d70dcead..69ad1db6 100644
+--- a/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
++++ b/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
+@@ -474,7 +474,8 @@ public class RequestHandler {
+     }
+ 
+     // SpectrumJetson Rewind. POST body, all optional:
+-    // {"manual": true|false, "fps": 30, "quotaGB": 100, "minFreeGB": 15, "delete": "<session>"}
++    // {"manual": true|false, "fps": 30, "quotaGB": 100, "minFreeGB": 15,
++    //  "recordThroughDisconnects": true|false, "delete": "<session>"}
+     // SpectrumJetson (photonvision-25): copy settings from another camera's or pipeline's settings.
+     private record CopySettingsRequest(
+             String fromCamera, Integer fromPipeline, String toCamera, Integer toPipeline, List<String> groups) {}
+@@ -905,7 +906,12 @@ public class RequestHandler {
+     }
+ 
+     private record RewindRequest(
+-            Boolean manual, Double fps, Double quotaGB, Double minFreeGB, String delete) {}
++            Boolean manual,
++            Double fps,
++            Double quotaGB,
++            Double minFreeGB,
++            Boolean recordThroughDisconnects,
++            String delete) {}
+ 
+     public static void onRewindStatusRequest(Context ctx) {
+         try {
+@@ -922,8 +928,12 @@ public class RequestHandler {
+         try {
+             var req = kObjectMapper.readValue(ctx.body(), RewindRequest.class);
+             var rm = RewindManager.getInstance();
+-            if (req.fps() != null || req.quotaGB() != null || req.minFreeGB() != null) {
+-                rm.updateSettings(req.fps(), req.quotaGB(), req.minFreeGB());
++            if (req.fps() != null
++                    || req.quotaGB() != null
++                    || req.minFreeGB() != null
++                    || req.recordThroughDisconnects() != null) {
++                rm.updateSettings(
++                        req.fps(), req.quotaGB(), req.minFreeGB(), req.recordThroughDisconnects());
+             }
+             if (req.manual() != null) rm.setManual(req.manual());
+             String why = req.delete() != null ? rm.deleteSession(req.delete()) : null;
