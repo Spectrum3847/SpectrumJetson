@@ -47,7 +47,10 @@ What the logs show at each death:
 - **Power falls with it.** Power drops from ~10 W to ~7 W, the same as no cameras running: the GPU work stopped.
 - **The watchdog gives up or never fires.** It tried twice on the right camera (r4, r10, r20), then stopped. On the left camera it never fired at all, including when both died together.
 - **Only a reboot fixes it.** Each new robot log starts with the Jetson booting (a 14-17 s heartbeat gap) and both cameras streaming again. Nothing short of power-cycling brought one back.
-- **The trigger isn't visible.** Battery voltage at death was 8.2-9.6 V. Each run dipped lower than that (6.9-7.5 V) without killing a camera, so a plain brownout isn't the whole story. Both cameras dying at the same instant (r4, r10, r20) points at something they share: the USB controller, its power, or the detector/GPU path. Not over-current: `overCurrentEvents` stayed 0 and `throttle` read None. The kernel log would say which, and we don't have it (F5).
+- **The trigger, from the Jetson's own log (Q13, added 2026-10-27).** The USB hub disabled the camera's port for a signal error: `disabled by hub (EMI?)`. The camera then never answered the kernel again. See [Root cause](#root-cause-in-our-code).
+  - **Not a plain brownout.** Battery voltage at death was 8.2-9.6 V, and each run dipped lower than that (6.9-7.5 V) without killing a camera.
+  - **Not over-current.** `overCurrentEvents` stayed 0 and `throttle` read None.
+  - **Both at once fits a shared cause.** Both cameras dying at the same instant (r4, r10, r20) fits one glitch on the hub they share.
 
 Cost: in r4 the robot had Orin poses for 9 s of a 140 s teleop. In r20, for 7 s of auto and none of teleop.
 
@@ -94,6 +97,13 @@ It has no Jetson Rewind, no PhotonVision log and no `dmesg`. FM's robot code onl
 - we can't say whether the USB device disappeared;
 - we can't say whether uvcvideo logged errors;
 - we can't say what the watchdog tried.
+
+**Update 2026-10-27:** the Jetson's journals (six boots), 16 PhotonVision logs and one Rewind session were uploaded by hand. They answered Q13 (Root cause), and showed three more gaps:
+- **The Jetson's clock often never reached the robot's time.** Several boots logged with the same restored date, "2026-10-15 15:2x", including Q13. A log can be tied to a match only by the `Event: TXMAN1, Match: Q13` line PhotonVision logs on FMS connect. [inferred: the clock file `timesyncd` restores from can't be updated under `ro-root.sh on`.]
+- **Idle boots stop logging after 60 s.** Quiet mode closes the PhotonVision log and moves the journal to RAM after 60 s disabled. That part is lost at power-off.
+- **Most boots aren't there at all.** The journal kept only these six. None of the r4-r20 boots is among them, so their deaths are still unexplained.
+
+R7 (`export-match.sh`) should save each boot's log under its match name, before the next boot can replace it.
 
 ### F6. Most rejected Orin frames are the yaw-rate gate, set for Limelights
 
@@ -143,15 +153,25 @@ Once the heading is off, every sighting fails the gate, and inflating P after 1 
 
 This is from reading the patches. **[code]** means the patch does it. **[inferred]** means it comes from cscore/NT4 behaviour or a hardware hypothesis that the missing Jetson logs (F5) would confirm or rule out.
 
-**The cameras.** The most likely trigger is the camera leaving USB, or its stream stalling while it's still enumerated. After that, a Thriftiest Cam only comes back when its power is cut. Our tests already show this ([TECHNICAL.md](TECHNICAL.md), the USB reset section), and software can't switch USB power on this carrier board. [inferred]
-- **Evidence for USB:** two cameras dying at the same instant points at shared USB, power or ESD.
-- **Ruled out: a hung detector.** The vision loop kept producing results.
-- **What the Jetson's logs from those boots would tell apart:**
-  - `USB disconnect` / `unable to enumerate` (it left the bus);
-  - `uvcvideo ... status -71` / xHCI errors (the stream stalled);
-  - `HC died` (the controller).
+**The cameras: confirmed in one match, Q13.** The Jetson's logs reached robotlog on 2026-10-27. They cover six boots: four idle boots, one shop boot, and the Jetson's boot for Q13. In Q13 robot code wasn't reading the Orin cameras (FM `7b753bb`), but the Jetson ran them anyway. PhotonVision copies kernel messages into its log (`KernelLogLogger`), so the Q13 log has both sides. orin-left (USB port `1-2.1`), 14 s into teleop:
 
-  So would each camera's Rewind CSV: if it ends at the death, the camera stopped. If it keeps going, the fault is inside PhotonVision.
+```
+usb 1-2-port1: disabled by hub (EMI?), re-enabling...
+usb 1-2.1: USB disconnect, device number 4
+usb 1-2.1: new high-speed USB device number 6 using tegra-xusb
+usb 1-2.1: device descriptor read/64, error -110        (x4)
+usb 1-2-port1: attempt power cycle
+usb 1-2.1: device descriptor read/8, error -110         (x4)
+usb 1-2-port1: unable to enumerate USB device
+```
+
+- **What the camera did.**
+  - **The trigger:** the Orin's own USB hub saw a signal error on that port and disabled it. That's the kernel's "EMI?": interference, static discharge, or a connector glitch on the camera's link. It wasn't over-current, and it wasn't the camera's stream stalling.
+  - **Why it stayed dead:** it came back wedged. It never answered the kernel's requests again (error -110, a timeout), which is the same signature as our bench hub-reset test.
+  - **Nothing could revive it:** the kernel's "power cycle" doesn't remove 5 V on this board, so nothing short of a real power cut helps.
+- **What PhotonVision did.** At the same second, cscore logged `VIDIOC_DQBUF failed: No such device`. It then tried to reopen `/dev/v4l/by-path/...2.1` three times a second for the next two minutes. "Error grabbing image" repeated 246 times per 5 s: the ~50 a second of F2. The watchdog took no action, as found from the code. [code]
+- **Why the other runs probably match.** The same pattern holds in the logged runs: a camera going away mid-match, both cameras sometimes at once, no over-current. Two cameras dying together fits one glitch hitting the hub they share. [inferred: the other boots' logs aren't in the upload]
+- **Still to rule out: the controller.** No `HC died` or xHCI errors appear in what we have.
 
 **F2's results with timestamps from boot.** When a grab fails, the vision loop sends `new CVPipelineResult(0, …, new Frame())`, a blank result with capture time 0, and doesn't sleep. [code] `photonvision-63-audit-fixes.patch` ~L623
 - **Why ~50 a second:** with Low Latency Mode off, the grab is `grabRawSinkFrameTimeoutLastTime`, and its `lastTime` only advances on success (`photonvision-09`). After the first 0.25 s timeout, cscore's error frame keeps coming back immediately, and the sink sleeps 20 ms between bad frames. That's ~50 Hz. [inferred]
@@ -186,7 +206,7 @@ R1-R3 are in `photonvision-75` (2026-10-27): unit-tested on the build host, not 
 | R1 | Don't publish `rawBytes` for a result with capture time 0 (the blank-result branches in `photonvision-63`), so a dead camera's `getAllUnreadResults()` comes back empty. Also, sleep in the empty-frame branch. | F2 | must |
 | R2 | Health that can't freeze: a per-camera `heartbeat`, `state` (streaming / stalled / recovering / disconnected / gave-up) and `lastFrameAgeMs`, published from the 1 s timer, not from results; `keepDuplicates` on fps; `problem` stays set until the camera is back; bandwidth retries counted in `recoveries` | F1, F2 | must |
 | R3 | Watchdog escalation (`photonvision-29`, `31`, `43`, `66`). While the camera is disconnected but its device is still in sysfs: reset the port or rebind uvcvideo. Once the device is gone: set state "gone from USB, needs a power cut". Keep retrying while connected with no frames, up to a cap, then report "gave-up". | F1 | must |
-| R4 | Find what kills the cameras. Pull `journalctl -k -b <id>` and the PhotonVision/usb-watchdog journals for the TXMAN1 boots, plus the Rewind CSV tails. On the bench: two cameras at 120 fps for 30 min while the 15 V input dips to 7 V and while flexing the USB cables, A/B testing `urb_packets`/`payload_cap`. | F1 | must |
+| R4 | Found in Q13: the hub disables the port for a signal error ("EMI?"), and the camera comes back wedged (Root cause). Next: reproduce it on the bench with motor wiring and static, and fix the wiring. If more boots' logs arrive, check the other deaths have the same signature. | F1 | must |
 | R4b | Stop the trigger at the source: cables, strain relief, case grounding, ferrites, supply. Report the wedge to The Thrifty Bot. Reconsider usb-watchdog's controller rebind. See [Camera power, or other cameras](#camera-power-or-other-cameras). | F1 | must |
 | R5 | Rewind holds a recording through an NT drop of up to 10 s instead of splitting it | F3 | should |
 | R6 | Publish `bootId`/`uptimeSeconds`, `ntReconnects`, `usbEvents`/`lastUsbEvent` under `/photonvision/jetson/` | F1, F3, F5 | should |
@@ -212,12 +232,14 @@ R1-R3 are in `photonvision-75` (2026-10-27): unit-tested on the build host, not 
 
 A wedged Thriftiest needs its 5 V cut. The Orin devkit's USB ports can't do that: their supplies are always-on ([TECHNICAL.md](TECHNICAL.md), USB hub reset test). So the plan, in order:
 
-1. **Find the trigger (R4).** The answer is in the TXMAN1 journals: the camera left USB, its stream stalled, or the controller died. If it's ESD, cable strain or a supply dip, we fix that at the source:
-   - strain relief and locking/latched cables;
-   - grounded or isolated camera cases;
-   - ferrites;
-   - checking the Jetson's 15 V boost under the brownouts in F3.
-2. **Report it to The Thrifty Bot**, with the repro: `tests/usb-hub-reset`, the kernel's `device descriptor read/64, error -110`, and only a power cut recovering. The camera's firmware should come back after a bus suspend or reset, and they may be able to fix it.
+1. **Stop the glitch (R4).** Q13's log shows the hub disabling the port for a signal error ("EMI?"), not a camera or software fault. So the fixes are on the wiring:
+   - **The cable path:** USB cables away from motor and motor-controller wiring, as short as they reach, ferrites at both ends.
+   - **Shielded cables:** with the shield connected.
+   - **Static:** camera cases grounded to the robot frame or fully isolated, never floating. Static from the carpet is a known FRC USB killer.
+   - **Strain relief and latching connectors**, so a hit doesn't move the plug.
+
+   On the bench, reproduce the glitch: two cameras at 120 fps, then wave a running motor's wiring past the cables, and touch a charged probe to the camera case. Watch for `disabled by hub (EMI?)` in `journalctl -k -f`. Then confirm each fix stops it.
+2. **Report it to The Thrifty Bot**, with Q13's kernel log (above) and the repro: `tests/usb-hub-reset`, the kernel's `device descriptor read/64, error -110`, and only a power cut recovering. The camera's firmware should come back after a bus suspend or reset, and they may be able to fix it.
 3. **Lose less when it happens anyway.** R1-R3 make a dead camera visible at once: on the robot, in Match Ready and in the log. The robot then leans on its other sources, and the pit knows to power-cycle.
 4. **Not chosen: a purpose-built hub that really switches port power.** Spliced cables are out: they add connectors and noise paths, which is the kind of fault we're chasing. Candidates to bench-test, none tried yet:
    - **Yepkit YKUSH3:** per-port switching, with its own control tool, `ykush-control`.
