@@ -7,7 +7,7 @@ index 4df02e7a..b9801687 100644
                              result.inputAndOutputFrame);
          else acceptedResult = result;
 +
-+        // SpectrumJetson (photonvision-75): a blank result (capture time 0: the camera is disabled,
++        // SpectrumJetson (photonvision-81): a blank result (capture time 0: the camera is disabled,
 +        // unplugged or sends nothing usable) isn't a frame. Published, it went out ~50 times a second,
 +        // stamped with just the time-sync offset (TXMAN1: results dated ~26 s into the robot's boot,
 +        // read for minutes after a camera died), and it blanked the calibration and best-target topics.
@@ -50,7 +50,7 @@ index fe4c7f0b..bb740568 100644
 + * held up by a pipeline switch or the shared CUDA lock) counted the pause as 3 s without frames,
 + * and the camera was reconnected for nothing: a 0.5-1 s blackout.
 + *
-+ * <p>photonvision-75, after TXMAN1 (cameras died mid-match and stayed dead):
++ * <p>photonvision-81, after TXMAN1 (cameras died mid-match and stayed dead):
 + *
 + * <ul>
 + *   <li>A camera that disconnects and stays disconnected for {@link #DISCONNECTED_RESET_NS} is
@@ -98,7 +98,7 @@ index fe4c7f0b..bb740568 100644
       */
      static final long NOT_READ_NS = 2_000_000_000L;
  
-+    // photonvision-75
++    // photonvision-81
 +    /** Disconnected this long (not just mid-reconnect), with its USB device still there: reset it. */
 +    static final long DISCONNECTED_RESET_NS = 5_000_000_000L;
 +
@@ -126,7 +126,7 @@ index fe4c7f0b..bb740568 100644
 +    private long lastUsbResetNs = NEVER;
      private int stage = 0; // 0: fine, 1: reconnected, 2: USB reset
      private long recoveries = 0;
-+    // photonvision-75
++    // photonvision-81
 +    private long lastFrameNs = NEVER;
 +    private long disconnectedSinceNs = NEVER;
 +    private int usbResetsSinceFrame = 0;
@@ -161,7 +161,7 @@ index fe4c7f0b..bb740568 100644
 -        lastGoodNs = report();
 +    /**
 +     * The camera isn't connected: unplugged, mid-reconnect, or dropped off USB. Not stuck, so the
-+     * stuck clock restarts. photonvision-75: but a camera that stays disconnected while its USB
++     * stuck clock restarts. photonvision-81: but a camera that stays disconnected while its USB
 +     * device is still there gets USB resets, and one gone from USB for {@link #GONE_NS} has given up.
 +     *
 +     * @param devicePresent its USB device is still in sysfs (enumerated)
@@ -198,7 +198,7 @@ index fe4c7f0b..bb740568 100644
          if (now - lastReconnectNs < BANDWIDTH_RETRY_NS) return Action.NONE;
          lastReconnectNs = now;
          stage = 1;
-+        recoveries++; // photonvision-75: these count too
++        recoveries++; // photonvision-81: these count too
          return Action.RECONNECT;
      }
  
@@ -245,7 +245,7 @@ index fe4c7f0b..bb740568 100644
          return (clockNs.getAsLong() - lastGoodNs) / 1e9;
      }
  
-+    /** photonvision-75: seconds since it disconnected (0 while connected). */
++    /** photonvision-81: seconds since it disconnected (0 while connected). */
 +    synchronized double secondsDisconnected() {
 +        return disconnectedSinceNs == NEVER ? 0 : (clockNs.getAsLong() - disconnectedSinceNs) / 1e9;
 +    }
@@ -256,17 +256,17 @@ index fe4c7f0b..bb740568 100644
          return recoveries;
      }
 +
-+    /** photonvision-75: milliseconds since the last usable frame, or -1 if there hasn't been one. */
++    /** photonvision-81: milliseconds since the last usable frame, or -1 if there hasn't been one. */
 +    synchronized long lastFrameAgeMs() {
 +        return lastFrameNs == NEVER ? -1 : (clockNs.getAsLong() - lastFrameNs) / 1_000_000;
 +    }
 +
-+    /** photonvision-75: it has given up, and the camera's USB device is gone (needs a power cut). */
++    /** photonvision-81: it has given up, and the camera's USB device is gone (needs a power cut). */
 +    synchronized boolean goneFromUsb() {
 +        return gaveUp && goneFromUsb;
 +    }
 +
-+    /** photonvision-75: what the camera is doing. */
++    /** photonvision-81: what the camera is doing. */
 +    synchronized State state() {
 +        long now = clockNs.getAsLong();
 +        if (gaveUp) return State.GAVE_UP;
@@ -288,7 +288,7 @@ index 457b8b94..9ddeaafb 100644
          } else if (!camera.isConnected()) {
 -            stuckWatchdog.notConnected();
 +            String port = usbPort();
-+            // photonvision-75: a camera that stays disconnected with its USB device still there gets
++            // photonvision-81: a camera that stays disconnected with its USB device still there gets
 +            // USB resets; one gone from USB gives up (TXMAN1: nothing was tried for either).
 +            boolean devicePresent =
 +                    port != null
@@ -304,7 +304,7 @@ index 457b8b94..9ddeaafb 100644
              // enumerate it). A USB hub reset leaves a Thriftiest Cam like this, and on this carrier
              // board only a real power cut revives it: USB power can't be switched from software.
 -            String port = usbPort();
-+            // photonvision-75: the problem stays until the camera delivers frames again (it was
++            // photonvision-81: the problem stays until the camera delivers frames again (it was
 +            // cleared 90 s after the kernel's message, with the camera still dead).
              if (org.photonvision.common.hardware.UsbTrouble.connectFailed(port, BANDWIDTH_WINDOW_NS)) {
                  if (!problem.startsWith("not answering")) {
@@ -331,7 +331,7 @@ index 457b8b94..9ddeaafb 100644
                                  true);
                  case NONE -> {}
              }
-+            // photonvision-75: connected, but USB resets haven't brought it back.
++            // photonvision-81: connected, but USB resets haven't brought it back.
 +            if (stuckWatchdog.state() == StuckCameraWatchdog.State.GAVE_UP && problem.isEmpty()) {
 +                problem =
 +                        "no frames after " + StuckCameraWatchdog.MAX_USB_RESETS + " USB resets: power-cycle the robot";
@@ -347,12 +347,12 @@ index 457b8b94..9ddeaafb 100644
          return frame;
      }
  
-+    /** photonvision-75: health/state ("streaming", "stalled", "gave-up", ...). */
++    /** photonvision-81: health/state ("streaming", "stalled", "gave-up", ...). */
 +    public String getHealthState() {
 +        return stuckWatchdog.state().topicValue;
 +    }
 +
-+    /** photonvision-75: milliseconds since the last usable frame, or -1 if none yet. */
++    /** photonvision-81: milliseconds since the last usable frame, or -1 if none yet. */
 +    public long getLastFrameAgeMs() {
 +        return stuckWatchdog.lastFrameAgeMs();
 +    }
@@ -369,7 +369,7 @@ index 457b8b94..9ddeaafb 100644
 -                    java.nio.file.Path.of("/sys/class/video4linux", dev.getFileName().toString(), "device")
 -                            .toRealPath()
 -                            .getParent(); // the USB interface's parent, e.g. .../2-2.3
-+            // photonvision-75: by the USB port (remembered from when the camera was there), so a
++            // photonvision-81: by the USB port (remembered from when the camera was there), so a
 +            // camera that has lost its /dev/video node can be reset too.
 +            String port = usbPort();
 +            if (port == null) throw new java.io.IOException("its USB port isn't known");
@@ -399,7 +399,7 @@ index 4501dab1..220945fa 100644
 + * decoded; a rising count means a corrupt camera stream) and {@code recoveries} (reconnects and USB
 + * resets of a stuck camera since start, photonvision-29).
 + *
-+ * <p>photonvision-75, after TXMAN1: a dead camera's health looked frozen on the robot. Its values
++ * <p>photonvision-81, after TXMAN1: a dead camera's health looked frozen on the robot. Its values
 + * repeated (fps 0, frames unchanged) and NetworkTables drops a repeated value, so nothing reached
 + * the robot's log until a reconnect. Now, from a 1 s timer that doesn't depend on results: {@code
 + * heartbeat} (counts up), {@code state} (streaming, stalled, recovering, disconnected, gave-up,
@@ -443,7 +443,7 @@ index 4501dab1..220945fa 100644
 +        this(nickname, decodeFailures, recoveries, problem, () -> "", () -> -1);
 +    }
 +
-+    /** photonvision-75: also {@code state} and {@code lastFrameAgeMs}. */
++    /** photonvision-81: also {@code state} and {@code lastFrameAgeMs}. */
 +    public CameraHealthPublisher(
 +            Supplier<String> nickname,
 +            LongSupplier decodeFailures,
@@ -516,7 +516,7 @@ index 4501dab1..220945fa 100644
                          .getSubTable(name)
                          .getSubTable("health");
 -        fps = t.getDoubleTopic("fps").publish();
-+        // photonvision-75: a repeated fps 0 or state still reaches the robot's log each second.
++        // photonvision-81: a repeated fps 0 or state still reaches the robot's log each second.
 +        var keep = PubSubOption.keepDuplicates(true);
 +        fps = t.getDoubleTopic("fps").publish(keep);
 +        statePub = t.getStringTopic("state").publish(keep);
@@ -535,7 +535,7 @@ index 3481d6dc..4dc8578d 100644
                                          ? usb.getProblem()
 -                                        : ""));
 +                                        : "",
-+                        // SpectrumJetson (photonvision-75): e.g. "streaming", "gave-up".
++                        // SpectrumJetson (photonvision-81): e.g. "streaming", "gave-up".
 +                        () ->
 +                                visionSource.getFrameProvider() instanceof USBFrameProvider usb
 +                                        ? usb.getHealthState()
@@ -584,7 +584,7 @@ index 00000000..aec0b4fa
 +import org.photonvision.vision.pipeline.result.CVPipelineResult;
 +
 +/**
-+ * SpectrumJetson (photonvision-75): a blank result (capture time 0) publishes no result and no
++ * SpectrumJetson (photonvision-81): a blank result (capture time 0) publishes no result and no
 + * heartbeat. At TXMAN1 a dead camera's blank results reached the robot ~50 times a second.
 + */
 +public class NTDataPublisherBlankResultTest {
@@ -681,7 +681,7 @@ index 974b5a3d..829e8504 100644
 +        assertEquals(0, stuckFor(w, 2.5).size());
 +    }
 +
-+    // photonvision-75
++    // photonvision-81
 +
 +    /**
 +     * Polls a disconnected camera every 250 ms for {@code seconds}, collecting actions with times.
@@ -809,7 +809,7 @@ index 00000000..c3007ab4
 +import org.photonvision.common.LoadJNI;
 +
 +/**
-+ * SpectrumJetson (photonvision-75): a dead camera's health keeps reaching the robot. At TXMAN1 its
++ * SpectrumJetson (photonvision-81): a dead camera's health keeps reaching the robot. At TXMAN1 its
 + * values repeated, NetworkTables dropped the repeats, and the robot's log showed nothing for
 + * minutes.
 + */

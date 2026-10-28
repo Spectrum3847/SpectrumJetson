@@ -583,7 +583,7 @@ Robot-side use is in [issue #10](https://github.com/Spectrum3847/2026-FM-SystemC
 - PhotonVision's own metrics (`/photonvision//metrics/<host>`: CPU temperature and use, RAM,
   disk, uptime) are unchanged.
 
-**`photonvision-76`: what TXMAN1 showed we couldn't see** (2026-10-27, `JetsonDiagnostics` and
+**`photonvision-82`: what TXMAN1 showed we couldn't see** (2026-10-27, `JetsonDiagnostics` and
 `JetsonTelemetry`, same table).
 - **Why:** the Jetson's own logs stop at quiet mode and keep only a few boots, and FM's robot never
   read the metrics protobuf at the event. So nothing showed whether power, USB or the network went
@@ -836,7 +836,7 @@ only goes out when it changes.
   | +9.1 s | Kernel re-enumerated it: "Found UVC 1.00 device Thrifty", the payload cap re-applied, "authorized to connect". cscore reconnected |
   | end of test | "delivering frames again, after a USB reset" |
 
-**`photonvision-75`: a dead camera is dead, and says so** (2026-10-27, after TXMAN1: see
+**`photonvision-81`: a dead camera is dead, and says so** (2026-10-27, after TXMAN1: see
 [TXMAN1-JETSON-REVIEW.md](TXMAN1-JETSON-REVIEW.md), F1 and F2).
 - **No blank results on NetworkTables.** A blank result (capture time 0: the camera is disabled,
   unplugged, or sends nothing usable) used to be published as a result. That's ~50 a second, each

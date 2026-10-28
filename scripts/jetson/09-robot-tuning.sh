@@ -47,7 +47,7 @@
 #                               (spectrum-wifi-retry.sh). After an access point rejected the Jetson
 #                               twice, NetworkManager gave up for the whole boot (2 h 20 min,
 #                               2026-10-01). Nothing happens with the radio switched off (events).
-#  13. SSD health readable    - smartmontools (smartctl) for photonvision-76's SSD topics
+#  13. SSD health readable    - smartmontools (smartctl) for photonvision-82's SSD topics
 #
 # Usage: [FAN=quiet|full|off] 09-robot-tuning.sh [--undo]   (no FAN: keep the saved choice)
 set -euo pipefail
@@ -343,7 +343,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now spectrum-wifi-retry.timer
 
 echo "==> 13. SSD health readable (smartctl)"
-# photonvision-76 reads the SSD's error counts, wear and unsafe shutdowns with smartctl every 5 min
+# photonvision-82 reads the SSD's error counts, wear and unsafe shutdowns with smartctl every 5 min
 # and sends them to the robot; health-check.sh uses it too. smartd (its background monitor) stays
 # off: nothing here reads its mail, and PhotonVision does the checking.
 if command -v smartctl >/dev/null || sudo apt-get install -y smartmontools >/dev/null; then

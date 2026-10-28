@@ -7,7 +7,7 @@ index 04b7e763..596805cd 100644
      private static final Map<String, Long> connectNs = new ConcurrentHashMap<>();
  
 +    /**
-+     * photonvision-76: any USB trouble worth a line in the robot's log. TXMAN1 Q13's camera death was
++     * photonvision-82: any USB trouble worth a line in the robot's log. TXMAN1 Q13's camera death was
 +     * "disabled by hub (EMI?)", "USB disconnect", "device descriptor read ... error -110", "unable to
 +     * enumerate USB device".
 +     */
@@ -26,17 +26,17 @@ index 04b7e763..596805cd 100644
 +
      private UsbTrouble() {}
  
-+    /** photonvision-76: whether a kernel line is USB trouble (see {@link #EVENT}). */
++    /** photonvision-82: whether a kernel line is USB trouble (see {@link #EVENT}). */
 +    public static boolean isEvent(String line) {
 +        return line != null && EVENT.matcher(line).find();
 +    }
 +
-+    /** photonvision-76: USB trouble lines since PhotonVision started. */
++    /** photonvision-82: USB trouble lines since PhotonVision started. */
 +    public static long events() {
 +        return events.get();
 +    }
 +
-+    /** photonvision-76: the latest USB trouble line, without its syslog prefix; null if none. */
++    /** photonvision-82: the latest USB trouble line, without its syslog prefix; null if none. */
 +    public static String lastEvent() {
 +        return lastEvent;
 +    }
@@ -76,7 +76,7 @@ index 00000000..79e3a9d9
 +package org.photonvision.common.hardware.metrics;
 +
 +/**
-+ * SpectrumJetson (photonvision-76): the board's input voltage (the INA3221's VDD_IN), sampled
++ * SpectrumJetson (photonvision-82): the board's input voltage (the INA3221's VDD_IN), sampled
 + * often so a short dip between once-a-second publishes still shows up. Keeps the latest reading, the
 + * lowest since the last {@link #takeSecond()}, and the lowest since PhotonVision started.
 + *
@@ -152,7 +152,7 @@ index 00000000..76f0c7a3
 +import org.photonvision.common.util.TimedTaskManager;
 +
 +/**
-+ * SpectrumJetson (photonvision-76): what TXMAN1 showed we couldn't see, on NetworkTables under
++ * SpectrumJetson (photonvision-82): what TXMAN1 showed we couldn't see, on NetworkTables under
 + * /photonvision/jetson/, so it lands in the robot's log. The Jetson's own logs stop at quiet mode
 + * and keep only a few boots; the robot's log keeps every match.
 + *
@@ -494,7 +494,7 @@ index 5eeb32bc..377f1cfe 100644
   *   <li>{@code gpuLoadPct}; {@code cpuTempC}, {@code gpuTempC}, {@code socTempC} (hottest of the
   *       three SoC sensors), {@code tjTempC} (hottest on the chip); {@code fanRpm}
   *   <li>{@code powerW} (the board's input), {@code cpuGpuPowerW}, {@code socPowerW}
-+ *   <li>photonvision-76: {@code inputVoltageV} (the board's input, VDD_IN), {@code
++ *   <li>photonvision-82: {@code inputVoltageV} (the board's input, VDD_IN), {@code
 + *       inputVoltageMinV} (lowest in the last second, sampled every 20 ms), {@code
 + *       inputVoltageLowestV} (lowest since PhotonVision started)
   *   <li>{@code jpegDecoder} ("nvjpg" or "libjpeg-turbo"), {@code jpegHardwareOff} (the hardware
@@ -504,7 +504,7 @@ index 5eeb32bc..377f1cfe 100644
                          + (fanRpm != null ? ", fan" : "")
                          + (Files.isReadable(GPU_LOAD) ? ", GPU load" : ""));
          TimedTaskManager.getInstance().addTask("JetsonTelemetry", this::tick, 1000, 1000);
-+        // photonvision-76: the input voltage, often enough that a short dip shows in each second's
++        // photonvision-82: the input voltage, often enough that a short dip shows in each second's
 +        // minimum (one small sysfs read).
 +        Path[] in = rails.get("VDD_IN");
 +        if (in != null) {
@@ -519,7 +519,7 @@ index 5eeb32bc..377f1cfe 100644
 +        }
 +    }
 +
-+    // photonvision-76
++    // photonvision-82
 +    static final long INPUT_SAMPLE_MS = 20;
 +    /** Below this, a dip is also written to PhotonVision's log (at most every 5 s). */
 +    static final double LOW_INPUT_V = 12.0;
@@ -527,12 +527,12 @@ index 5eeb32bc..377f1cfe 100644
 +    private final InputVoltage inputVoltage = new InputVoltage();
 +    private volatile double lowestInputV = Double.NaN, lastTjC = Double.NaN;
 +
-+    /** photonvision-76: lowest input voltage since start (NaN if unknown), for JetsonDiagnostics' log line. */
++    /** photonvision-82: lowest input voltage since start (NaN if unknown), for JetsonDiagnostics' log line. */
 +    static Double lowestInputVolts() {
 +        return instance == null ? null : instance.lowestInputV;
      }
  
-+    /** photonvision-76: the latest chip (Tj) temperature, NaN if unknown. */
++    /** photonvision-82: the latest chip (Tj) temperature, NaN if unknown. */
 +    static Double tjTempC() {
 +        return instance == null ? null : instance.lastTjC;
 +    }
@@ -564,7 +564,7 @@ index 5eeb32bc..377f1cfe 100644
          }
      }
  
-+    /** photonvision-76. */
++    /** photonvision-82. */
 +    private void publishInputVoltage() {
 +        double[] v = inputVoltage.takeSecond(); // latest, lowest this second, lowest since start
 +        if (!Double.isNaN(v[0])) put("inputVoltageV", v[0]);
@@ -592,7 +592,7 @@ index c2823c99..247ebb49 100644
 -            // We currently set all logs to debug regardless of their actual level
 -            logger.log(msg, LogLevel.DEBUG);
 +            // We currently set all logs to debug regardless of their actual level.
-+            // SpectrumJetson (photonvision-76): USB trouble at INFO, so it's kept at any log level.
++            // SpectrumJetson (photonvision-82): USB trouble at INFO, so it's kept at any log level.
 +            logger.log(
 +                    msg,
 +                    org.photonvision.common.hardware.UsbTrouble.isEvent(msg) ? LogLevel.INFO : LogLevel.DEBUG);
@@ -607,7 +607,7 @@ index cfb99190..1d43d299 100644
      private static IntegerSubscriber sub;
      private static long lastSetUs = 0;
  
-+    // photonvision-76: for /photonvision/jetson/clockSource and clockLastJumpSeconds.
++    // photonvision-82: for /photonvision/jetson/clockSource and clockLastJumpSeconds.
 +    private static volatile boolean setFromRobot = false;
 +    private static volatile double lastJumpSeconds = 0;
 +
@@ -646,7 +646,7 @@ index 4dc8578d..d4813928 100644
                                          ? usb.getLastFrameAgeMs()
                                          : -1));
          JetsonTelemetry.start();
-+        org.photonvision.common.hardware.metrics.JetsonDiagnostics.start(); // photonvision-76
++        org.photonvision.common.hardware.metrics.JetsonDiagnostics.start(); // photonvision-82
          // SpectrumJetson: the camera's mount (height, pitch, roll) from the tags it sees (photonvision-17).
          addResultConsumer(
                  new MountEstimatePublisher(() -> visionSource.getSettables().getConfiguration().nickname));
@@ -679,7 +679,7 @@ index 00000000..3bf49a4c
 +
 +import org.junit.jupiter.api.Test;
 +
-+/** SpectrumJetson (photonvision-76). */
++/** SpectrumJetson (photonvision-82). */
 +public class InputVoltageTest {
 +    @Test
 +    public void nothingBeforeTheFirstSample() {
@@ -738,7 +738,7 @@ index 00000000..8653b61b
 +import org.junit.jupiter.api.Test;
 +import org.photonvision.common.hardware.UsbTrouble;
 +
-+/** SpectrumJetson (photonvision-76): the parsing behind /photonvision/jetson's diagnostics. */
++/** SpectrumJetson (photonvision-82): the parsing behind /photonvision/jetson's diagnostics. */
 +public class JetsonDiagnosticsTest {
 +    @Test
 +    public void smartctlNvmeJson() {
