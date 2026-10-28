@@ -185,7 +185,7 @@ This is from reading the patches. **[code]** means the patch does it. **[inferre
 | R2 | Health that can't freeze: a per-camera `heartbeat`, `state` (streaming / stalled / recovering / disconnected / gave-up) and `lastFrameAgeMs`, published from the 1 s timer, not from results; `keepDuplicates` on fps; `problem` stays set until the camera is back; bandwidth retries counted in `recoveries` | F1, F2 | must |
 | R3 | Watchdog escalation (`photonvision-29`, `31`, `43`, `66`). While the camera is disconnected but its device is still in sysfs: reset the port or rebind uvcvideo. Once the device is gone: set state "gone from USB, needs a power cut". Keep retrying while connected with no frames, up to a cap, then report "gave-up". | F1 | must |
 | R4 | Find what kills the cameras. Pull `journalctl -k -b <id>` and the PhotonVision/usb-watchdog journals for the TXMAN1 boots, plus the Rewind CSV tails. On the bench: two cameras at 120 fps for 30 min while the 15 V input dips to 7 V and while flexing the USB cables, A/B testing `urb_packets`/`payload_cap`. | F1 | must |
-| R4b | A way to cut a camera's power, or a camera that doesn't need it (see [Camera power, or other cameras](#camera-power-or-other-cameras)). Also strain relief, ferrites and grounding of the camera cases. Reconsider usb-watchdog's controller rebind. | F1 | should |
+| R4b | Stop the trigger at the source: cables, strain relief, case grounding, ferrites, supply. Report the wedge to The Thrifty Bot. Reconsider usb-watchdog's controller rebind. See [Camera power, or other cameras](#camera-power-or-other-cameras). | F1 | must |
 | R5 | Rewind holds a recording through an NT drop of up to 10 s instead of splitting it | F3 | should |
 | R6 | Publish `bootId`/`uptimeSeconds`, `ntReconnects`, `usbEvents`/`lastUsbEvent` under `/photonvision/jetson/` | F1, F3, F5 | should |
 | R7 | `export-match.sh`: one zip per match with `journalctl -k`/`-u photonvision`/`-u usb-watchdog` for the match window, `lsusb -t`, uvcvideo stats, Rewind CSV tails and health, uploadable to robotlog. Keep the journal on disk through quiet mode, or flush it before. Log the port's last kernel lines at INFO when a camera leaves "streaming". | F5 | must |
@@ -203,12 +203,21 @@ This is from reading the patches. **[code]** means the patch does it. **[inferre
 
 ### Camera power, or other cameras
 
-**Decision (2026-10-27): replace the cameras rather than buy switching hubs.** The hubs that really switch port power cost more than new cameras. Option 3 below is the plan. Option 2 is kept for the record.
+**Decision (2026-10-27): keep the Thriftiest Cams and stop what wedges them.**
+- **No switching hubs:** they cost more than the cameras.
+- **No bench Global Shutter (32e4:0144):** it's too limited, with poor connectors and no good case. That's why we bought Thriftiests.
+- **Other OV9281 boards are no better:** the Arducam B0332 (also sold by AndyMark as am-5749) is a bare board with a cable. AndyMark lists it at 100 fps at 1280x800. Whether it recovers from a hub reset is unknown.
 
-A wedged Thriftiest needs its 5 V cut. The Orin devkit's USB ports can't do that: their supplies are always-on ([TECHNICAL.md](TECHNICAL.md), USB hub reset test). Hubs with real per-port power switching are rare and not built for robots. In order of preference:
+A wedged Thriftiest needs its 5 V cut. The Orin devkit's USB ports can't do that: their supplies are always-on ([TECHNICAL.md](TECHNICAL.md), USB hub reset test). So the plan, in order:
 
-1. **Find the trigger first (R4).** If it's ESD, cable strain or a supply dip, fixing that may be enough, whatever camera we use.
-2. **A purpose-built hub that really switches port power.** Spliced cables are out: they add connectors and noise paths, which is the kind of fault we're chasing. Candidates to bench-test, none tried yet:
+1. **Find the trigger (R4).** The answer is in the TXMAN1 journals: the camera left USB, its stream stalled, or the controller died. If it's ESD, cable strain or a supply dip, we fix that at the source:
+   - strain relief and locking/latched cables;
+   - grounded or isolated camera cases;
+   - ferrites;
+   - checking the Jetson's 15 V boost under the brownouts in F3.
+2. **Report it to The Thrifty Bot**, with the repro: `tests/usb-hub-reset`, the kernel's `device descriptor read/64, error -110`, and only a power cut recovering. The camera's firmware should come back after a bus suspend or reset, and they may be able to fix it.
+3. **Lose less when it happens anyway.** R1-R3 make a dead camera visible at once: on the robot, in Match Ready and in the log. The robot then leans on its other sources, and the pit knows to power-cycle.
+4. **Not chosen: a purpose-built hub that really switches port power.** Spliced cables are out: they add connectors and noise paths, which is the kind of fault we're chasing. Candidates to bench-test, none tried yet:
    - **Yepkit YKUSH3:** per-port switching, with its own control tool, `ykush-control`.
    - **Realtek RTS5411-based hubs:** reported to switch port power with uhubctl.
    - **Acroname's industrial managed hubs:** software port enable and per-port current monitoring, through their BrainStem API.
@@ -219,13 +228,7 @@ A wedged Thriftiest needs its 5 V cut. The Orin devkit's USB ports can't do that
    - it survives vibration and a 7 V brownout with two cameras at 120 fps.
 
    Mounting and powering one more box on the robot is its own cost.
-3. **Switch cameras.** The "Global Shutter Camera" (32e4:0144) we already have on the bench re-enumerated and streamed again *by itself* after the same hub reset that wedges the Thriftiest. Before choosing it:
-   - check its 1280x800 MJPEG modes reach 120 fps: we've only run it at 60;
-   - check its JPEG sizes fit two cameras under the USB 2.0 budget;
-   - redo the bench work it would need: calibration, and the exposure/gain controls (`ThriftyOV9281Controls` is Thriftiest-specific);
-   - re-run `tests/usb-hub-reset` and the stuck-camera tests with it.
-
-   MIPI CSI cameras would remove USB entirely, but PhotonVision has no Jetson CSI path. That's a much bigger project.
+MIPI CSI cameras would remove USB entirely, but PhotonVision has no Jetson CSI path. That's a much bigger project.
 
 ### For the shared library
 
