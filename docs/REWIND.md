@@ -174,6 +174,7 @@ sessions/0007_Q12_20261010-143502/
                                                 why it ended
   TopLeft/0007_Q12_20261010-143502_TopLeft_0000.mjpeg   JPEG frames back to back (one file per 5 min)
   TopLeft/0007_Q12_20261010-143502_TopLeft_0000.csv     frame,offset,size,width,height,jetson_us,robot_us
+  0007_Q12_20261010-143502_vision.wpilog        what PhotonVision sent the robot (below)
   TopRight/...
 ```
 
@@ -181,6 +182,13 @@ The number at the start of each name counts up forever, so name order is age ord
 names its recording and camera (`photonvision-75`), so it means the same thing out of its folder:
 robotlog.spectrum3847.org stores files by name. Recordings from before then have `session.json`,
 `0000.mjpeg` and `0000.csv`; the tools here read both.
+
+**`<session>_vision.wpilog`** (`photonvision-79`) holds every result PhotonVision published while
+recording, as the robot would have received it, even through a disconnect: per camera
+`/<camera>/result` (PhotonVision's own message, the bytes PhotonLib reads) and
+`/<camera>/multiTagCameraPose` (a `Pose3d`), plus `/Jetson/ntConnected`, `/Jetson/robotOffsetUs`,
+`/Jetson/robotMode` and `/Jetson/match` when they change. Its timestamps are `jetson_us`, like the
+frame tables; add `robotOffsetUs` for the robot's clock. AdvantageScope opens it.
 
 The label is the robot's `label`, else the FMS match, else the robot's mode when the recording
 started. A recording from the web page's Record now button uses the same fallback.

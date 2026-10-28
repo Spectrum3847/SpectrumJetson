@@ -1,0 +1,201 @@
+diff --git a/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java b/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java
+index b9801687..6e995486 100644
+--- a/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java
++++ b/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java
+@@ -182,11 +182,14 @@ public class NTDataPublisher implements CVPipelineResultConsumer {
+     }
+ 
+     public void updateCameraNickname(String newCameraNickname) {
++        rewindCamera = org.photonvision.rewind.RewindManager.safeName(newCameraNickname);
+         removeEntries();
+         ts.subTable = rootTable.getSubTable(newCameraNickname);
+         updateEntries();
+     }
+ 
++    private String rewindCamera; // photonvision-79: the camera's Rewind folder name
++
+     @Override
+     public void accept(CVPipelineResult result) {
+         CVPipelineResult acceptedResult;
+@@ -243,6 +246,7 @@ public class NTDataPublisher implements CVPipelineResultConsumer {
+ 
+         // random guess at size of the array
+         ts.resultPublisher.set(simplified, 1024);
++        org.photonvision.rewind.VisionLog.result(rewindCamera, simplified, now); // photonvision-79
+         if (ConfigManager.getInstance().getConfig().getNetworkConfig().shouldPublishProto) {
+             ts.protoResultPublisher.set(simplified);
+         }
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
+index a3882502..63cc8ad2 100644
+--- a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
++++ b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
+@@ -350,6 +350,12 @@ public class RewindManager {
+                                         : "robot stopped");
+             }
+ 
++            VisionLog.robot(
++                    now,
++                    ntConnected,
++                    NetworkTablesManager.getInstance().getOffset(),
++                    robotMode(),
++                    (eventSub.get() + " " + matchName()).strip());
+             recordingPub.set(current != null);
+             sessionPub.set(current != null ? current.name() : "");
+             freeGBPub.set(freeBytes() / 1e9);
+@@ -375,6 +381,7 @@ public class RewindManager {
+             return;
+         }
+         current = new Session(name, dir, now, reason, settingsSnapshot());
++        VisionLog.open(dir.resolve(name + "_vision.wpilog")); // photonvision-79
+         stopReason = "";
+         writeSessionJson(current, null);
+         logger.info("Rewind: recording session " + name + " (" + reason + ")");
+@@ -383,6 +390,7 @@ public class RewindManager {
+     private void closeSession(String why) {
+         var s = current;
+         current = null; // recorder threads close their files on their next frame
++        VisionLog.close();
+         stopReason = why;
+         // Give the recorders a moment to close, then record the end in session.json.
+         TimedTaskManager.getInstance()
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/VisionLog.java b/photon-core/src/main/java/org/photonvision/rewind/VisionLog.java
+new file mode 100644
+index 00000000..48a15beb
+--- /dev/null
++++ b/photon-core/src/main/java/org/photonvision/rewind/VisionLog.java
+@@ -0,0 +1,135 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.rewind;
++
++import edu.wpi.first.math.geometry.Pose3d;
++import edu.wpi.first.util.datalog.BooleanLogEntry;
++import edu.wpi.first.util.datalog.DataLog;
++import edu.wpi.first.util.datalog.DataLogBackgroundWriter;
++import edu.wpi.first.util.datalog.IntegerLogEntry;
++import edu.wpi.first.util.datalog.RawLogEntry;
++import edu.wpi.first.util.datalog.StringLogEntry;
++import edu.wpi.first.util.datalog.StructLogEntry;
++import java.nio.file.Path;
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Objects;
++import org.photonvision.common.dataflow.structures.Packet;
++import org.photonvision.common.dataflow.structures.PacketSerde;
++import org.photonvision.common.logging.LogGroup;
++import org.photonvision.common.logging.Logger;
++import org.photonvision.targeting.PhotonPipelineResult;
++
++/**
++ * SpectrumJetson (photonvision-79): {@code <session>_vision.wpilog} beside a Rewind recording's
++ * video, with every result PhotonVision publishes, as the robot would receive it, so a match can be
++ * replayed even when the robot lost the connection.
++ *
++ * <p>Timestamps are the Jetson's clock ({@code jetson_us}, as in the frame tables). Each result
++ * also carries its robot-clock times; {@code /Jetson/robotOffsetUs} converts anything else. Per
++ * camera: {@code /<camera>/result} (PhotonVision's photonstruct, the bytes sent to the robot) and
++ * {@code /<camera>/multiTagCameraPose}. {@code /Jetson/*}: connection, offset, robot mode, match.
++ */
++public final class VisionLog {
++    private static final Logger logger = new Logger(VisionLog.class, LogGroup.General);
++    private static final String RESULT_TYPE = PhotonPipelineResult.photonStruct.getTypeString();
++
++    private static DataLog log;
++    private static final Map<String, RawLogEntry> results = new HashMap<>();
++    private static final Map<String, StructLogEntry<Pose3d>> poses = new HashMap<>();
++    private static IntegerLogEntry offsetEntry;
++    private static BooleanLogEntry connectedEntry;
++    private static StringLogEntry modeEntry;
++    private static StringLogEntry matchEntry;
++    private static Long lastOffset;
++    private static Boolean lastConnected;
++    private static String lastMode;
++    private static String lastMatch;
++
++    private VisionLog() {}
++
++    static synchronized void open(Path file) {
++        close();
++        try {
++            log =
++                    new DataLogBackgroundWriter(
++                            file.getParent().toString(), file.getFileName().toString(), 0.25);
++            addSchema(PhotonPipelineResult.photonStruct);
++            offsetEntry = new IntegerLogEntry(log, "/Jetson/robotOffsetUs");
++            connectedEntry = new BooleanLogEntry(log, "/Jetson/ntConnected");
++            modeEntry = new StringLogEntry(log, "/Jetson/robotMode");
++            matchEntry = new StringLogEntry(log, "/Jetson/match");
++        } catch (RuntimeException e) {
++            logger.error("Rewind: cannot open " + file, e);
++            log = null;
++        }
++    }
++
++    static synchronized void close() {
++        if (log == null) return;
++        log.close();
++        log = null;
++        results.clear();
++        poses.clear();
++        lastOffset = null;
++        lastConnected = null;
++        lastMode = null;
++        lastMatch = null;
++    }
++
++    /** From each camera's vision thread, with the result it just published. */
++    public static synchronized void result(String camera, PhotonPipelineResult r, long nowUs) {
++        if (log == null) return;
++        var packet = new Packet(1024);
++        PhotonPipelineResult.photonStruct.pack(packet, r);
++        results.computeIfAbsent(
++                        camera, c -> new RawLogEntry(log, "/" + c + "/result", "", RESULT_TYPE))
++                .append(packet.getWrittenDataCopy(), nowUs);
++        var multi = r.getMultiTagResult();
++        if (multi.isPresent()) {
++            var t = multi.get().estimatedPose.best;
++            poses.computeIfAbsent(camera, VisionLog::poseEntry)
++                    .append(new Pose3d(t.getTranslation(), t.getRotation()), nowUs);
++        }
++    }
++
++    /** From Rewind's tick: the link to the robot, logged when it changes. */
++    static synchronized void robot(
++            long nowUs, boolean connected, long offsetUs, String mode, String match) {
++        if (log == null) return;
++        if (!Objects.equals(lastConnected, connected)) connectedEntry.append(connected, nowUs);
++        if (!Objects.equals(lastOffset, offsetUs)) offsetEntry.append(offsetUs, nowUs);
++        if (!Objects.equals(lastMode, mode)) modeEntry.append(mode, nowUs);
++        if (!Objects.equals(lastMatch, match)) matchEntry.append(match, nowUs);
++        lastConnected = connected;
++        lastOffset = offsetUs;
++        lastMode = mode;
++        lastMatch = match;
++    }
++
++    private static StructLogEntry<Pose3d> poseEntry(String camera) {
++        return StructLogEntry.create(log, "/" + camera + "/multiTagCameraPose", Pose3d.struct);
++    }
++
++    private static void addSchema(PacketSerde<?> serde) {
++        if (log.hasSchema(serde.getTypeString())) return;
++        log.addSchema(serde.getTypeString(), "photonstructschema", serde.getSchema());
++        for (var inner : serde.getNestedPhotonMessages()) addSchema(inner);
++        for (var inner : serde.getNestedWpilibMessages()) log.addSchema(inner);
++    }
++}
