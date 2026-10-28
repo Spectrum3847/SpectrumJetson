@@ -1,0 +1,46 @@
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
+index 63cc8ad2..9b235362 100644
+--- a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
++++ b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
+@@ -350,6 +350,7 @@ public class RewindManager {
+                                         : "robot stopped");
+             }
+ 
++            clockMark(now, ntConnected);
+             VisionLog.robot(
+                     now,
+                     ntConnected,
+@@ -454,6 +455,33 @@ public class RewindManager {
+         return w.m_autonomous() ? "auto" : "teleop";
+     }
+ 
++    private long lastClockMarkUs = Long.MIN_VALUE;
++    private long lastMarkOffsetUs;
++    private boolean lastMarkConnected;
++
++    /**
++     * photonvision-80: a log line pairing the Jetson's clocks, so tools can place any journal line
++     * (stamped on the kernel's monotonic clock) on jetson_us and the robot's clock. Every 60 s, and
++     * when the robot connects, disconnects or the time-sync offset moves by more than 1 ms.
++     */
++    private void clockMark(long nowUs, boolean connected) {
++        long offset = NetworkTablesManager.getInstance().getOffset();
++        if (nowUs - lastClockMarkUs < 60_000_000L
++                && connected == lastMarkConnected
++                && Math.abs(offset - lastMarkOffsetUs) <= 1000) return;
++        lastClockMarkUs = nowUs;
++        lastMarkOffsetUs = offset;
++        lastMarkConnected = connected;
++        logger.info(
++                String.format(
++                        "Clock mark: jetson_us=%d mono_us=%d unix_ms=%d robot_offset_us=%d nt=%d",
++                        nowUs,
++                        System.nanoTime() / 1000, // CLOCK_MONOTONIC, the journal's monotonic stamp
++                        System.currentTimeMillis(),
++                        offset,
++                        connected ? 1 : 0));
++    }
++
+     private String matchName() {
+         String type =
+                 switch ((int) matchTypeSub.get()) {
