@@ -579,6 +579,38 @@ Robot-side use is in [issue #10](https://github.com/Spectrum3847/2026-FM-SystemC
 - PhotonVision's own metrics (`/photonvision//metrics/<host>`: CPU temperature and use, RAM,
   disk, uptime) are unchanged.
 
+**`photonvision-76`: what TXMAN1 showed we couldn't see** (2026-10-27, `JetsonDiagnostics` and
+`JetsonTelemetry`, same table).
+- **Why:** the Jetson's own logs stop at quiet mode and keep only a few boots, and FM's robot never
+  read the metrics protobuf at the event. So nothing showed whether power, USB or the network went
+  wrong when cameras died ([TXMAN1-JETSON-REVIEW.md](TXMAN1-JETSON-REVIEW.md)). Everything here is
+  a plain topic, so it lands in the robot's log.
+
+| Topic | Type | Every | Source |
+|---|---|---|---|
+| `inputVoltageV`, `inputVoltageMinV`, `inputVoltageLowestV` | double | 1 s | INA3221 `VDD_IN` voltage: latest, lowest in the last second (sampled every 20 ms), lowest since PhotonVision started. A dip below 12 V is also logged. The chip averages over a few ms, so a shorter dip can be missed. |
+| `usbEvents`, `lastUsbEvent` | integer, string | 1 s | Kernel USB trouble since start, and the latest line: `USB disconnect`, `disabled by hub (EMI?)`, `device descriptor read`, `unable to enumerate`, over-current, bandwidth, uvcvideo and xHCI errors (`UsbTrouble`). These lines also go to PhotonVision's log at INFO (they were DEBUG). |
+| `ethInterface`, `ethLinkUp`, `ethSpeedMbps`, `ethCarrierChanges` | string, boolean, integer, integer | 1 s | The wired link (`/sys/class/net/<if>`). Two carrier changes = one link drop: its cable or the switch port, not the NT server. |
+| `ntDisconnects` | integer | 1 s | NetworkTables disconnects PhotonVision has seen |
+| `bootId`, `uptimeSeconds` | string, double | once, 1 s | `/proc/sys/kernel/random/boot_id`, `/proc/uptime`: a reboot changes the boot ID, a reconnect doesn't |
+| `clockSource`, `clockLastJumpSeconds` | string, double | 1 s | `robot` (set from `/photonvision/clock/unixMs`), `internet` (NTP) or `unset` (still the date restored at boot); the last jump (`RobotClockSync`) |
+| `cpuUtilPct`, `ramUsedPct` | double | 1 s | `/proc/stat` (busy share since the last second), `/proc/meminfo` (total minus available) |
+| `ssdTempC` | double | 1 s | hwmon `nvme` |
+| `fsErrors`, `settingsReadOnly`, `scratchReadOnly` | integer, boolean, boolean | 1 s | ext4 `errors_count` summed over mounted partitions; `/proc/mounts`. Scratch is read-only on purpose in quiet mode; settings never should be. |
+| `usbBandwidthUsedBytes`, `usbBandwidthBudgetBytes` | integer | 10 s | the cameras' reservation on the shared USB 2.0 budget (`UsbBandwidth.survey`) |
+| `ssdMediaErrors`, `ssdUnsafeShutdowns`, `ssdPercentUsed`, `ssdCriticalWarning`, `ssdAvailableSparePct` | integer | 5 min | `smartctl -j -H -A /dev/nvme0` (smartmontools: `09-robot-tuning.sh` step 13) |
+
+- **In PhotonVision's own log**, once a minute while it's open (not quiet), one line: CPU and RAM
+  peaks over the minute, lowest input voltage, Tj, SSD temperature, USB events, NT disconnects,
+  Ethernet carrier changes and the clock source. PhotonVision measures CPU and RAM but never logged
+  them.
+- **Tests:** `InputVoltageTest` and `JetsonDiagnosticsTest`: smartctl's NVMe JSON, `/proc/stat`,
+  `/proc/meminfo`, `/proc/mounts`, and TXMAN1 Q13's kernel lines as USB events. Not yet run on the
+  Jetson.
+- **Per match:** `scripts/jetson/export-match.sh Q13 > jetson-Q13.tar.gz` (over SSH) bundles that
+  match's PhotonVision logs and boot journals, Rewind metadata, `lsusb -t`, `smartctl` and a
+  health check, for robotlog.
+
 **Per camera, `/photonvision/<camera>/health/`, every 1 s** (`CameraHealthPublisher`):
 - `fps`: pipeline results per second.
 - `pipelineMs`, `pipelineMsMax`: average and worst over the last second.
