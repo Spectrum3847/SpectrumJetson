@@ -170,6 +170,11 @@ usb 1-2-port1: unable to enumerate USB device
   - **Why it stayed dead:** it came back wedged. It never answered the kernel's requests again (error -110, a timeout), which is the same signature as our bench hub-reset test.
   - **Nothing could revive it:** the kernel's "power cycle" doesn't remove 5 V on this board, so nothing short of a real power cut helps.
 - **What PhotonVision did.** At the same second, cscore logged `VIDIOC_DQBUF failed: No such device`. It then tried to reopen `/dev/v4l/by-path/...2.1` three times a second for the next two minutes. "Error grabbing image" repeated 246 times per 5 s: the ~50 a second of F2. The watchdog took no action, as found from the code. [code]
+- **How often it shows up in the uploaded logs: once.** I searched all 16 PhotonVision logs and 6 journals for USB disconnects, enumeration failures, uvcvideo and xHCI errors, and "No such device". Four FMS matches are in them, tied to a match by PhotonVision's `Event: TXMAN1, Match: ...` line:
+  - **Q13:** orin-left died, as above.
+  - **Q17, Q19, Q24:** no USB errors. Both cameras streamed through the whole match: Rewind recorded 4,241-4,243 teleop frames per camera (2,497 in Q19's teleop session).
+
+  The rest are the shop on Oct 14, two practice connects and idle boots, with no camera errors. The robot logs add the deaths in Q34 and r4-r20, whose Jetson logs weren't uploaded. So at TXMAN1 we can count 8 deaths in 12 runs. One has a kernel log, and it shows this signature.
 - **Why the other runs probably match.** The same pattern holds in the logged runs: a camera going away mid-match, both cameras sometimes at once, no over-current. Two cameras dying together fits one glitch hitting the hub they share. [inferred: the other boots' logs aren't in the upload]
 - **Still to rule out: the controller.** No `HC died` or xHCI errors appear in what we have.
 
