@@ -1,0 +1,19 @@
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java b/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java
+index 6e1c9004..5005e2fa 100644
+--- a/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java
++++ b/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java
+@@ -45,11 +45,12 @@ import org.photonvision.common.logging.Logger;
+  * falls behind it simply skips frames; it can never hold up the vision pipeline's own sink. The
+  * thread runs at nice 10 so the vision threads win any contention for a core.
+  *
+- * <p>Output, per camera, in 60 s segments: {@code NNNN.mjpeg} (JPEG frames back to back) and {@code
++ * <p>Output, per camera, in 5 min segments: {@code NNNN.mjpeg} (JPEG frames back to back) and {@code
+  * NNNN.csv} (one line per frame: offset, size and timestamps). See {@code docs/REWIND.md}.
+  */
+ public class RewindRecorder {
+-    private static final long SEGMENT_US = 60_000_000L;
++    // photonvision-76: longer than a match plus its tail, so a match is one file per camera.
++    private static final long SEGMENT_US = 300_000_000L;
+     private static final long SYNC_US = 2_000_000L;
+ 
+     /** A 1280x800 MJPEG frame is ~50-60 KB; 4 MB covers any mode these cameras have. */

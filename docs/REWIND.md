@@ -154,7 +154,7 @@ sessions/0007_Q12_20261010-143502/
   0007_Q12_20261010-143502_session.json         name, why it recorded, match, label, fps,
                                                 per-camera frame counts, start/end times, and
                                                 why it ended
-  TopLeft/0007_Q12_20261010-143502_TopLeft_0000.mjpeg   JPEG frames back to back (one file per 60 s)
+  TopLeft/0007_Q12_20261010-143502_TopLeft_0000.mjpeg   JPEG frames back to back (one file per 5 min)
   TopLeft/0007_Q12_20261010-143502_TopLeft_0000.csv     frame,offset,size,width,height,jetson_us,robot_us
   TopRight/...
 ```
