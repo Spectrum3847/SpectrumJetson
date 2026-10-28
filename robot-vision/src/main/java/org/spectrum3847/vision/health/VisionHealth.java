@@ -32,7 +32,7 @@ import org.spectrum3847.vision.log.VisionStats;
  *   <li>frames arrive but every candidate is rejected (with the top reason), while enabled
  * </ul>
  *
- * With SpectrumJetson's photonvision-76 diagnostics, also (each stays up until robot code restarts,
+ * With SpectrumJetson's photonvision-82 diagnostics, also (each stays up until robot code restarts,
  * so the pit sees it after the match):
  *
  * <ul>
@@ -71,7 +71,7 @@ public class VisionHealth {
     private final double startedSeconds;
     private double rejectingSince = Double.NaN;
 
-    // SpectrumJetson photonvision-76: the Jetson's diagnostics.
+    // SpectrumJetson photonvision-82: the Jetson's diagnostics.
     private final NetworkTable jetson = pv.getSubTable("jetson");
     private final DoubleSubscriber inputLowest = jetson.getDoubleTopic("inputVoltageLowestV").subscribe(Double.NaN);
     private final IntegerSubscriber usbEvents = jetson.getIntegerTopic("usbEvents").subscribe(-1);
@@ -124,7 +124,7 @@ public class VisionHealth {
     /**
      * SpectrumJetson's {@code health/state} for a camera: "streaming", "stalled", "recovering",
      * "disconnected", "gave-up", "paused" or "starting"; "" when the coprocessor doesn't publish it
-     * (stock PhotonVision, or before SpectrumJetson's photonvision-75). Log it with the camera.
+     * (stock PhotonVision, or before SpectrumJetson's photonvision-81). Log it with the camera.
      */
     public String cameraState(String name) {
         var c = cameras.get(name);
@@ -183,7 +183,7 @@ public class VisionHealth {
         allRejected.set(stuck);
     }
 
-    /** photonvision-76's diagnostics. Each alert stays up until robot code restarts. */
+    /** photonvision-82's diagnostics. Each alert stays up until robot code restarts. */
     private void updateDiagnostics(boolean pastGrace) {
         double lowest = inputLowest.get();
         if (!Double.isNaN(lowest) && lowest < minJetsonInputV) {

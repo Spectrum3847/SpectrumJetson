@@ -217,7 +217,7 @@ usb 1-2-port1: unable to enumerate USB device
 
 ### On the Jetson (this repo)
 
-R1-R3 are in `photonvision-75` (2026-10-27): unit-tested on the build host, not yet run on the Jetson. Details: [TECHNICAL.md](TECHNICAL.md), under `photonvision-29`.
+R1-R3 are in `photonvision-81` (2026-10-27): unit-tested on the build host, not yet run on the Jetson. Details: [TECHNICAL.md](TECHNICAL.md), under `photonvision-29`.
 
 | # | Change | Fixes | Priority |
 |---|---|---|---|
@@ -227,7 +227,7 @@ R1-R3 are in `photonvision-75` (2026-10-27): unit-tested on the build host, not 
 | R4 | Found in Q13: the hub disables the port for a signal error ("EMI?"), and the camera comes back wedged (Root cause). Next: reproduce it on the bench with motor wiring and static, and fix the wiring. If more boots' logs arrive, check the other deaths have the same signature. | F1 | must |
 | R4b | Stop the trigger at the source: cables, strain relief, case grounding, ferrites, supply. Report the wedge to The Thrifty Bot. Reconsider usb-watchdog's controller rebind. See [Camera power, or other cameras](#camera-power-or-other-cameras). | F1 | must |
 | R5 | Rewind holds a recording through an NT drop of up to 10 s instead of splitting it | F3 | should |
-| R6 | Done in `photonvision-76`: diagnostics under `/photonvision/jetson/`. Input voltage; USB events with the latest kernel line; the Ethernet link; NT disconnects; boot ID and uptime; clock source; CPU, RAM; SSD SMART and temperature; filesystem errors and read-only partitions; USB bandwidth. Also a once-a-minute summary in PhotonVision's log, and USB kernel lines at INFO. | F1, F3, F5 | should |
+| R6 | Done in `photonvision-82`: diagnostics under `/photonvision/jetson/`. Input voltage; USB events with the latest kernel line; the Ethernet link; NT disconnects; boot ID and uptime; clock source; CPU, RAM; SSD SMART and temperature; filesystem errors and read-only partitions; USB bandwidth. Also a once-a-minute summary in PhotonVision's log, and USB kernel lines at INFO. | F1, F3, F5 | should |
 | R7 | Done: `scripts/jetson/export-match.sh MATCH > bundle.tar.gz` over SSH. It bundles the match's PhotonVision logs and boot journals, Rewind metadata and CSVs, `lsusb -t`, `smartctl`, ext4 errors and a health check. Still open: keeping the journal on disk through quiet mode, and saving each match's bundle automatically. | F5 | must |
 | R8 | Health-check and Match Ready: report the fan mode and tach, and say "no fan configured" plainly | F4 | nice |
 
