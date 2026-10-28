@@ -206,11 +206,17 @@ This is from reading the patches. **[code]** means the patch does it. **[inferre
 A wedged Thriftiest needs its 5 V cut. The Orin devkit's USB ports can't do that: their supplies are always-on ([TECHNICAL.md](TECHNICAL.md), USB hub reset test). Hubs with real per-port power switching are rare and not built for robots. In order of preference:
 
 1. **Find the trigger first (R4).** If it's ESD, cable strain or a supply dip, fixing that may be enough, whatever camera we use.
-2. **Switch the camera's 5 V ourselves, no hub needed.**
-   - Build a split cable: D+/D−/ground go to the Jetson, and VBUS comes from a separate 5 V regulator. Cut the Jetson's VBUS wire so nothing back-powers.
-   - Switch that regulator from the robot: the PDH's switchable channel, or a load switch or relay on a SystemCore output. Alternatively, a load switch on a Jetson 40-pin GPIO.
-   - When the Jetson reports a camera `gave-up`, robot code cuts its power for ~2 s. The camera is back in about 5-10 s.
-   - That's cheap parts and a small board, and works with any USB camera.
+2. **A purpose-built hub that really switches port power.** Spliced cables are out: they add connectors and noise paths, which is the kind of fault we're chasing. Candidates to bench-test, none tried yet:
+   - **Yepkit YKUSH3:** per-port switching, with its own control tool, `ykush-control`.
+   - **Realtek RTS5411-based hubs:** reported to switch port power with uhubctl.
+   - **Acroname's industrial managed hubs:** software port enable and per-port current monitoring, through their BrainStem API.
+
+   Each one has to pass three tests:
+   - a meter on the port shows 5 V actually drops when switched off. Our Orin's own hub claims per-port switching and doesn't do it;
+   - a wedged Thriftiest comes back, in `tests/usb-hub-reset`;
+   - it survives vibration and a 7 V brownout with two cameras at 120 fps.
+
+   Mounting and powering one more box on the robot is its own cost.
 3. **Switch cameras.** The "Global Shutter Camera" (32e4:0144) we already have on the bench re-enumerated and streamed again *by itself* after the same hub reset that wedges the Thriftiest. Before choosing it:
    - check its 1280x800 MJPEG modes reach 120 fps: we've only run it at 60;
    - check its JPEG sizes fit two cameras under the USB 2.0 budget;
