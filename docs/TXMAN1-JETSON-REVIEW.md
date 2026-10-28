@@ -1,7 +1,8 @@
 # TXMAN1 (Oct 16-17, 2026): what the Jetson did on 8515's robot
 
 **Method.** Read straight from the wpilogs on [robotlog.spectrum3847.org](https://robotlog.spectrum3847.org), team 8515, robot FM (`2026-FM-SystemCore`).
-- **Which logs:** the 8 logs with the Jetson on the network: Q34 and the seven FMS test matches r4-r20 (night of Oct 16-17). Before Q34 the Orin cameras were turned off in robot code (FM `7b753bb`, `c27d772`).
+- **Which logs:** the 8 logs with Jetson data: Q34 (Saturday morning) and the seven FMS matches robotlog files as "Test r4"-"r20" (Saturday, about 12:15-5 PM: the playoff period). On Friday robot code didn't read the Orin cameras (FM `7b753bb`, `c27d772`), though the Jetson ran them.
+- **FM's clock was wrong on Saturday.** From Saturday morning on, FM's robot clock ran **13 h 34 min behind**, so robotlog shows those matches as Friday 7 PM to Saturday 3 AM. Q34 and r19 are in Dye's logs too, at exactly that offset (Q34: Dye 9:54 AM Saturday, FM "8:19 PM Friday"). Q30 and Q32 are probably Saturday too. The times in this review are corrected. A SystemCore without its clock set seems to resume from the time it last saved. The Jetson takes its clock from the robot, so its logs carry the same error. FM's README already asks whether the SystemCore gets its clock from the DS; this suggests it doesn't, at least not reliably.
 - **What the robot logged:** every NetworkTables topic the Jetson publishes (FM's `JetsonNTIO`/`PhotonOrinIO` record them), its own pose sources, and the EKF.
 - **What's missing:** nothing from the Jetson itself. No PhotonVision log, no kernel log, no Rewind files were uploaded (see F5).
 
@@ -29,6 +30,18 @@ Most NT drops weren't the Jetson's fault (F3). They're a robot network problem e
 ## Findings
 
 ### F1. A camera stops mid-match and never comes back until power-cycle (7 of 8 runs)
+
+**It got much more frequent on Saturday.**
+
+| Day | Matches with Jetson data | Camera deaths | From |
+|---|---|---|---|
+| Friday afternoon | Q13, Q17, Q19, Q24 | 1 (Q13) | The Jetson's own logs |
+| Saturday | Q34, then r4-r20 | 7 of 8 (r19 survived) | Robot logs |
+
+The cameras ran the same both days: 120 fps per camera while enabled (Q17's journal), with the same Jetson software. What changed between Friday's last match and Saturday is the first question for the pit crew:
+- Was a camera remounted or a cable rerouted? FM's commits that day measured orin-left's mount from Q17 video and changed the Orin mounts (`1c8ffa1`, `3ab436b`).
+- Was the robot rewired or repaired Friday night?
+- Did robot code start reading the cameras? It did (`c27d772`), but that's NetworkTables traffic. The failure starts in USB, before PhotonVision, so it's an unlikely cause.
 
 | Run | Enabled (auto / teleop start, s) | Camera death (s) | Which | Jetson `recoveries` after |
 |---|---|---|---|---|
@@ -174,7 +187,7 @@ usb 1-2-port1: unable to enumerate USB device
   - **Q13:** orin-left died, as above.
   - **Q17, Q19, Q24:** no USB errors. Both cameras streamed through the whole match: Rewind recorded 4,241-4,243 teleop frames per camera (2,497 in Q19's teleop session).
 
-  The rest are the shop on Oct 14, two practice connects and idle boots, with no camera errors. The robot logs add the deaths in Q34 and r4-r20, whose Jetson logs weren't uploaded. So at TXMAN1 we can count 8 deaths in 12 runs. One has a kernel log, and it shows this signature.
+  The rest are the shop on Oct 14, two practice connects and idle boots, with no camera errors. The robot logs add Saturday's deaths in Q34 and r4-r20, whose Jetson logs weren't uploaded. So at TXMAN1 we can count 8 deaths in 12 runs: 1 of 4 on Friday, 7 of 8 on Saturday. One has a kernel log, and it shows this signature.
 - **Why the other runs probably match.** The same pattern holds in the logged runs: a camera going away mid-match, both cameras sometimes at once, no over-current. Two cameras dying together fits one glitch hitting the hub they share. [inferred: the other boots' logs aren't in the upload]
 - **Still to rule out: the controller.** No `HC died` or xHCI errors appear in what we have.
 
@@ -227,6 +240,7 @@ R1-R3 are in `photonvision-75` (2026-10-27): unit-tested on the build host, not 
 | C3 | orin-right pitch to about -20.5° and roll -1.3°, from the Jetson's estimate. Then replay r4 and r16 and compare Roll/Pitch rejections. | F7 |
 | C4 | Find why the ethernet segment drops: switch power source, cable strain, SystemCore port. Log the radio/switch voltage if possible. | F3 |
 | C5 | TagEkf: accept multi-tag pose updates for heading, detect divergence (rejection fraction over 1 s), reset to the fused pose | F8 |
+| C6 | The robot clock: set it from the DS/FMS time each boot, and make a pre-match check fail when it's more than a minute off. FM ran 13 h 34 min behind all Saturday, so the Jetson, Rewind names and robotlog were all wrong. | F5 |
 
 ### Camera power, or other cameras
 
