@@ -1,0 +1,141 @@
+diff --git a/photon-core/src/main/java/org/photonvision/common/logging/JetsonLogMirror.java b/photon-core/src/main/java/org/photonvision/common/logging/JetsonLogMirror.java
+new file mode 100644
+index 00000000..da622f7b
+--- /dev/null
++++ b/photon-core/src/main/java/org/photonvision/common/logging/JetsonLogMirror.java
+@@ -0,0 +1,86 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.common.logging;
++
++import edu.wpi.first.networktables.NetworkTableInstance;
++import edu.wpi.first.networktables.PubSubOption;
++import edu.wpi.first.networktables.StringPublisher;
++import java.util.function.BooleanSupplier;
++
++/**
++ * SpectrumJetson (photonvision-83): PhotonVision's log lines on {@code /photonvision/jetson/log},
++ * so robot code can keep them in the robot's log. In quiet mode the Jetson's own logs live in RAM
++ * and are lost when the robot is switched off; this is the copy that survives.
++ *
++ * <p>Warnings and errors always; every line at INFO while quiet (the window otherwise lost). At
++ * most {@link #MAX_PER_S} lines a second, then a count of the dropped ones.
++ */
++public final class JetsonLogMirror {
++    static final int MAX_PER_S = 20;
++
++    private static volatile StringPublisher pub;
++    private static volatile BooleanSupplier quiet = () -> false;
++    private static final ThreadLocal<Boolean> inside = ThreadLocal.withInitial(() -> false);
++    private static long windowStartMs = 0;
++    private static int sentInWindow = 0;
++    private static int dropped = 0;
++
++    private JetsonLogMirror() {}
++
++    /** Once NetworkTables is up (the logger runs long before it). */
++    public static void start(NetworkTableInstance nt, BooleanSupplier quietNow) {
++        quiet = quietNow;
++        pub =
++                nt.getStringTopic("/photonvision/jetson/log")
++                        .publish(PubSubOption.sendAll(true), PubSubOption.keepDuplicates(true));
++    }
++
++    /** Whether a line at this level goes out now (checked before it's formatted). */
++    static boolean wants(LogLevel level) {
++        if (pub == null || inside.get() || level.code > LogLevel.INFO.code) return false;
++        return level != LogLevel.INFO || quiet.getAsBoolean();
++    }
++
++    static void accept(String line) {
++        inside.set(true); // publishing must not log its way back here
++        try {
++            String out = admit(line);
++            if (out != null) pub.set(out);
++        } finally {
++            inside.set(false);
++        }
++    }
++
++    /** The line to publish, with any dropped count before it, or null to drop it. */
++    private static synchronized String admit(String line) {
++        long now = System.nanoTime() / 1_000_000;
++        if (now - windowStartMs >= 1000) {
++            windowStartMs = now;
++            sentInWindow = 0;
++        }
++        if (sentInWindow >= MAX_PER_S) {
++            dropped++;
++            return null;
++        }
++        sentInWindow++;
++        if (dropped == 0) return line;
++        String out = "(" + dropped + " lines dropped) " + line;
++        dropped = 0;
++        return out;
++    }
++}
+diff --git a/photon-core/src/main/java/org/photonvision/common/logging/Logger.java b/photon-core/src/main/java/org/photonvision/common/logging/Logger.java
+index ad1d20ee..bc8ff50e 100644
+--- a/photon-core/src/main/java/org/photonvision/common/logging/Logger.java
++++ b/photon-core/src/main/java/org/photonvision/common/logging/Logger.java
+@@ -198,6 +198,9 @@ public class Logger {
+             var formattedMessage = format(message, level, group, clazz, shouldColor);
+             a.log(formattedMessage, level);
+         }
++        if (JetsonLogMirror.wants(level)) { // photonvision-83
++            JetsonLogMirror.accept(format(message, level, group, clazz, false));
++        }
+         if (!connected) {
+             synchronized (uiBacklog) {
+                 uiBacklog.add(Pair.of(format(message, level, group, clazz, false), level));
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/QuietMode.java b/photon-core/src/main/java/org/photonvision/vision/processes/QuietMode.java
+index 320ec0ed..50d18258 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/QuietMode.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/QuietMode.java
+@@ -58,6 +58,7 @@ public final class QuietMode {
+     private static volatile String reason = "";
+     private static volatile String lastError = "";
+     private static volatile boolean matchEnded = false;
++    private static final long AFTER_MATCH_MS = 20_000; // photonvision-83
+     private static volatile long disabledSinceMs = 0;
+     private static volatile long retryAfterMs = 0;
+     private static volatile boolean started = false;
+@@ -89,6 +90,8 @@ public final class QuietMode {
+         var ntm = NetworkTablesManager.getInstance();
+         var ds = ntm.getDriverStation();
+         if (ds == null) return;
++        // photonvision-83
++        org.photonvision.common.logging.JetsonLogMirror.start(ntm.getNTInst(), QuietMode::quiet);
+         started = true;
+         var t = ntm.getNTInst().getTable("/photonvision/jetson");
+         robotSays = t.getBooleanTopic("quiet").subscribe(false);
+@@ -179,7 +182,12 @@ public final class QuietMode {
+         if (robotSays.exists()) return robotSays.get() ? "robot code asked" : "";
+         if (word.m_enabled()) return "";
+         var s = IdleMode.getSettings();
+-        if (s.quietAfterMatch && matchEnded) return "the match ended";
++        // photonvision-83: the first seconds after a match still reach the SSD; whatever happens
++        // then (a camera dying, the robot being carried off) is worth keeping, and a robot is
++        // rarely switched off sooner.
++        if (s.quietAfterMatch && matchEnded && nowMs() - disabledSinceMs >= AFTER_MATCH_MS) {
++            return "the match ended";
++        }
+         if (disabledSinceMs == 0) disabledSinceMs = nowMs();
+         if (s.quietAfterDisabledSeconds > 0
+                 && nowMs() - disabledSinceMs >= s.quietAfterDisabledSeconds * 1000L) {
