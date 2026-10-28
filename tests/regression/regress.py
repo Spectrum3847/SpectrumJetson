@@ -55,7 +55,10 @@ def calib_args(session: Path):
     """--calib CAMERA=fx,fy,cx,cy,k1..k6 for each camera with a lens calibration in session.json
     (folder names are the camera names with spaces as dashes, as Rewind writes them)."""
     try:
-        cams = json.loads((session / "session.json").read_text())["settings"]["cameras"]
+        meta = session / f"{session.resolve().name}_session.json"
+        if not meta.exists():
+            meta = session / "session.json"
+        cams = json.loads(meta.read_text())["settings"]["cameras"]
     except (OSError, KeyError, ValueError):
         return []
     args = []

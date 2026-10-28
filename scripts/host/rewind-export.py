@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn a Rewind recording (copied from the Jetson with rewind-pull.sh) into videos.
 
-Each camera's recording is its own MJPEG frames in 60 s segments (NNNN.mjpeg + NNNN.csv). This
+Each camera's recording is its own MJPEG frames in 60 s segments (.mjpeg + .csv, docs/REWIND.md). This
 writes one MJPEG .avi per camera, with no re-encoding and no dependencies (plain Python), which
 VLC, mpv and most players open. The frame rate in the .avi is the recording's average; the exact
 per-frame times (Jetson clock and robot clock) are in <camera>.frames.csv next to it, for lining
@@ -197,7 +197,7 @@ def export_mp4(frames, path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("session", type=Path, help="a session folder (contains session.json)")
+    ap.add_argument("session", type=Path, help="a session folder (contains <session>_session.json)")
     ap.add_argument("--out", type=Path, help="output folder (default: <session>/export)")
     ap.add_argument("--mp4", action="store_true", help="also write H.264 .mp4 files (needs ffmpeg)")
     a = ap.parse_args()
@@ -205,7 +205,9 @@ def main():
         sys.exit(f"{a.session} is not a folder")
     out = a.out or a.session / "export"
     out.mkdir(parents=True, exist_ok=True)
-    meta = a.session / "session.json"
+    meta = a.session / f"{a.session.resolve().name}_session.json"
+    if not meta.exists():
+        meta = a.session / "session.json"  # before photonvision-75
     if meta.exists():
         m = json.loads(meta.read_text())
         print(f"{m.get('name')}: {m.get('reason')}, match '{m.get('match')}', label '{m.get('label')}'"

@@ -113,7 +113,7 @@ pv=$("${SSH[@]}" '~/SpectrumJetson/scripts/jetson/health-check.sh' | sed -n '/==
 echo "$pv"
 fails=$((fails + $(grep -c "  FAIL" <<<"$pv")))
 echo "== The recording"
-"${SSH[@]}" "cat /opt/photonvision/rewind/sessions/$session/session.json" | python3 -c '
+"${SSH[@]}" "cat /opt/photonvision/rewind/sessions/$session/${session}_session.json" | python3 -c '
 import json, sys
 m = json.load(sys.stdin)
 print("  session.json:", "ended cleanly (" + m["endReason"] + ")" if m.get("endReason") else "no end recorded (expected: power was cut)")'
