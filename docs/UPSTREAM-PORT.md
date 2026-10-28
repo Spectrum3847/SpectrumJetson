@@ -148,7 +148,9 @@ v2026.3.4) teaches PhotonVision about our camera (USB `1bcf:28c5`):
   Wi-Fi default route still wins (lower metric).
 - **NT reconnect (#2398):** upstream removed its 5-second "restart the NT client" workaround;
   ntcore does the reconnecting now. **Test on the SystemCore:** Jetson booting before the robot,
-  robot reboot, and Ethernet unplugged and replugged.
+  robot reboot, and Ethernet unplugged and replugged. **6324 reported the first case failing
+  (Oct 2026):** PhotonVision never connected until robot code restarted. Not patched yet; see Known
+  issues in the README.
 - **Exposure order (#2429):** by the code, manual exposure ends in the same state. Check that
   exposure 50 survives a reboot.
 - **Unchanged:** camera matching by USB path, calibration storage, and the settings DB schema.

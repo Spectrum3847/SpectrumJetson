@@ -328,7 +328,7 @@ Both cameras use the same PhotonVision settings. Each one needs its own calibrat
 - Low Latency Mode **off**
 - Processing Mode **3D** and **multi-tag on** (Output tab), once the camera is calibrated. The robot's pose code needs both.
 - Stream Resolution: small, to save CPU (it only affects the video you watch in the browser)
-- AprilTag field layout: **2026 Rebuilt AndyMark**. The robot code must use the same layout.
+- AprilTag field layout: **2026 Rebuilt AndyMark** until the robot connects. Robot code sends its own map, and the Jetson loads it, keeps it for the next boot and reports which one it's using (`photonvision-74`, below).
 
 **New cameras start with these settings automatically.** A camera PhotonVision has never seen gets AprilTagCuda, 1280x800 MJPEG, exposure 50, decision margin 15, brightness 100, white balance 2800 K, Low Latency off and multi-tag on (`TeamCameraDefaults` in `photonvision-06`). 3D can't work without a calibration, so it starts off and turns itself on (with multi-tag) as soon as a calibration is saved or imported for the resolution the camera uses. It never turns 3D off. Existing cameras keep their saved settings.
 
@@ -450,7 +450,7 @@ A page in PhotonVision's web UI (**Field Calibration** in the sidebar, `photonvi
 4. **Results:**
    - **Tags:** each tag marked as drawn or moved, with its offset.
    - **Cameras:** each mount compared with robot code's, plus a Java snippet.
-   - **Use this layout in PhotonVision:** loads the corrected layout; **Undo** puts the old one back.
+   - **Use this layout in PhotonVision:** loads the corrected layout; **Undo** puts the old one back. A robot that sends its own field map replaces it as soon as it connects, so for matches put the corrected layout in robot code instead.
 
 Robot code has to publish each camera's `robotToCamera` (a `Transform3d` struct) at `/photonvision/<camera>/robotToCamera`, from CAD or the last calibration. Without it, height, pitch and roll are still found, but x, y and yaw are only relative to one camera. The solved mounts come back at `/photonvision/<camera>/fieldcal/robotToCamera`.
 
@@ -509,6 +509,13 @@ PhotonVision's Object Detection pipeline runs YOLO models on the Jetson's GPU th
 - **What to do:** if cameras are stuck, power-cycle instead of rebooting.
 - **To find the cause:** with a DisplayPort monitor plugged in, run `tests/usb-hub-reset/run.sh`, then `sudo reboot`, and see where the boot stops.
 
+**PhotonVision may never connect to NT if it starts before robot code** (reported by 6324, Oct 2026; not seen on our robot yet).
+- **What happens:** PhotonVision comes up before the robot's NT server and never starts talking over NT. Restarting robot code fixes it.
+- **Likely cause:** upstream #2398 (in patch 00) removed the loop that restarted the NT client every 5 s while it was disconnected. That loop was written for exactly this case ("if Photon starts before the robot NT server does, and both aren't static IP, it'll never connect"). Upstream removed it because the restarts seemed to break connections NT4 was still setting up. See `docs/UPSTREAM-PORT.md`.
+- **Not known yet:** whether the client was stuck disconnected or showed connected with no data flowing, and whether the NT server address (team number or IP) or a static Jetson IP matters.
+- **Our decision:** no patch for now. A watchdog that restarts the NT client after ~15 s disconnected, waiting longer between tries up to 60 s, is the likely fix if we see it. It has trade-offs (restarts can break a connection about to succeed, and every restart republishes topics), so we'll only add it with evidence.
+- **If you see it:** save the PhotonVision log from that boot (the connection listener logs connects and disconnects), note the NT server setting and whether the Jetson's IP was static, and add it here. Restarting robot code, or pressing Save on PhotonVision's Settings page, gets it connected.
+
 ## Troubleshooting quick reference
 
 | Symptom | Likely cause | What to do |
@@ -527,6 +534,7 @@ PhotonVision's Object Detection pipeline runs YOLO models on the Jetson's GPU th
 | Calibration fails ("Negative corner", null intrinsics) | Board width/height swapped | Width 12, height 9. Check with `check_board.py`. Restart PhotonVision to clear bad snapshots. |
 | Settings page missing Device Control / Restart | Old browser (no `Intl.DurationFormat`) | Update the browser. Fixed in our patch too. |
 | A camera's stream won't show | The browser's connection limit (each open stream holds one) | Close extra PhotonVision tabs, then Ctrl+Shift+R. |
+| PhotonVision never shows up on NT after a boot; restarting robot code fixes it | PhotonVision started before robot code and its NT client got stuck (see Known issues) | Restart robot code, or press Save on PhotonVision's Settings page. Save the PhotonVision log first. |
 | PhotonVision won't start ("corrupt jarfile") | A bad jar was installed | Reinstall a good jar with `06-install-fork-jar.sh`, or copy back `photonvision.jar.prev`. |
 | Robot code throws about a PhotonLib version or message mismatch | Robot PhotonLib upgraded past alpha-6 | Keep `photonlib v2027.0.0-alpha-2`. |
 | Gradle build fails with a PKIX/SSL error | The shop network's filter blocked `frcmaven.wpi.edu` | Use another network, or get it allowlisted. |
@@ -599,6 +607,7 @@ PhotonVision's Object Detection pipeline runs YOLO models on the Jetson's GPU th
 - **Use the Jetson's camera names** (`TopLeft`, `TopRight`, …), exactly as the dashboard shows them.
 - **Call `setEnabled(true)` on every camera at robot init** (*). A camera robot code disabled stays disabled if robot code restarts (PhotonVision keeps it in memory), and returns empty results.
 - **Drop the tags in `/photonvision/excludedTagsActive`** (*). They're left out of multi-tag, but still sent as single-tag targets.
+- **Send the field map, and check the Jetson's** (`photonvision-74`). Robot code publishes the map it uses: `/SpectrumVision/FieldMap/Json` (WPILib's AprilTagFieldLayout JSON), `Hash` and `Name`. The Jetson loads it only if the JSON hashes to `Hash`, saves it for the next boot, and reports the map it's actually using: `/photonvision/jetson/FieldMap/Hash`, `Name`, `LoadedAt` (unix seconds) and `Error`. Alert when its `Hash` isn't yours. The hash is defined in [docs/TECHNICAL.md](docs/TECHNICAL.md#the-field-map-comes-from-the-robot-2026-10-23-photonvision-74): the 2026 AndyMark field is `2792cd4e868967b8`, welded `ca28a7c1139ed099`. Hash the JSON you publish, not the layout you loaded it from: WPILib 2027's JSON writer drops the sign of a `-0.0`, which changes the hash.
 - **The event profile wins at field connect.** With "switch to the event pipeline when the FMS connects" on, a pipeline robot code chose before the field connected is replaced. Set it again after `DriverStation.isFMSAttached()` if robot code picks pipelines.
 - **After a NetworkTables reconnect**, results in the first ~1 s can carry an unsynced timestamp: skip results whose `metadata.timeSinceLastPong` is large (*: the `timeSynced` gate).
 - **The robot's control word:** both formats work. A 2026 roboRIO publishes `/FMSInfo/FMSControlData`, and WPILib 2027 publishes the `/FMSInfo/ControlWord` struct (`photonvision-62`). Before this, PhotonVision read a 2027 robot as always disabled, so cameras idled at ~30 fps through matches.
@@ -699,6 +708,7 @@ The detailed technical reference, with exact versions, commits and measurements,
 - [x] Full backup image of the SSD with PhotonVision's settings (`scripts/host/04-backup-ssd.sh`: 8.7 GB, 7 min). Keep it on the team drive, never GitHub (it holds the Wi-Fi password and SSH keys)
 - [x] GitHub release [v2026.09.24](https://github.com/Spectrum3847/SpectrumJetson/releases/tag/v2026.09.24): the PhotonVision jar, TensorRT backend, camera driver and settings
 - [ ] Clone a spare SSD from the backup (`scripts/host/05-restore-ssd.sh`)
+- [ ] Field map from the robot (`photonvision-74`): run `tests/field-map/run.sh` on the Jetson, then check on the robot that `/photonvision/jetson/FieldMap/Hash` matches robot code's and stays put through a Jetson power cycle
 
 
 ## Credits and licenses

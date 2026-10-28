@@ -103,7 +103,8 @@ Settings shared by the scripts live in [config.env](../config.env).
 **Target event:** October 2026 off-season, playing as **team 8515**. Robot code is
 [`Spectrum3847/2026-FM-SystemCore`](https://github.com/Spectrum3847/2026-FM-SystemCore)
 (WPILib 2027.0.0-alpha-6 on a **SystemCore**, vendordep `photonlib v2027.0.0-alpha-2`).
-The field is the **2026 Rebuilt AndyMark** layout, on the Jetson and in robot code.
+The field is the **2026 Rebuilt AndyMark** layout, on the Jetson and in robot code. Since
+`photonvision-74` robot code sends the Jetson its map, and the Jetson reports the one it loaded.
 
 **Decision:** the Jetson runs the **unmodified 2026** `FRC-Team-4143/photonvision` fork
 (`d8c9e8e`, WPILib 2026.2.1) with 971's CUDA detector. The robot uses **stock**
@@ -1909,6 +1910,95 @@ and only a PhotonVision restart helped.
   view. So `Frame.unshareProcessed()` gives `processedImage` its own copy right before a frame goes
   to the stream (at most 30 a second, `photonvision-15`) or to that debug view. Detection is always
   finished with the frame by then.
+
+### The field map comes from the robot (2026-10-23, `photonvision-74`)
+
+**Before:** the field map was PhotonVision's own setting, `apriltagFieldLayout` in
+`photon.sqlite`. It starts as WPILib's default field and changes only when someone uploads a JSON
+on the Settings page (or Field Calibration applies one). Nothing told robot code which map the
+Jetson had, apart from a fingerprint in `settingsJson` in another format. Every multi-tag pose
+depends on it.
+
+**Now robot code's map is the one used.** Robot code publishes it to every camera; the Jetson
+checks it, loads it, keeps it, and says what it loaded.
+
+| Topic | Type | From | What |
+| --- | --- | --- | --- |
+| `/SpectrumVision/FieldMap/Json` | string | robot | WPILib `AprilTagFieldLayout` JSON |
+| `/SpectrumVision/FieldMap/Hash` | string | robot | its hash (below) |
+| `/SpectrumVision/FieldMap/Name` | string | robot | e.g. `k2026RebuiltAndymark` |
+| `/photonvision/jetson/FieldMap/Hash` | string | Jetson | hash of the map in use, however it was set |
+| `/photonvision/jetson/FieldMap/Name` | string | Jetson | the robot's name for it, or `photonvision-settings` |
+| `/photonvision/jetson/FieldMap/LoadedAt` | double | Jetson | unix seconds by the Jetson's clock (right once the robot has set it, patch 08) |
+| `/photonvision/jetson/FieldMap/Error` | string | Jetson | why the robot's last map wasn't used; empty when it was |
+
+**The hash** (`FieldMapHash`; robot code computes the same): tags sorted by ID, one line each,
+`id,x,y,z,qw,qx,qy,qz` (meters, the tag pose's rotation quaternion), then `field,<length>,<width>`.
+Every number is Java's `String.format(Locale.ROOT, "%.4f", v)`. Lines joined with `\n`, no trailing
+newline, SHA-256 of the UTF-8 bytes, the first 16 lowercase hex characters. 2026 AndyMark:
+`2792cd4e868967b8`; 2026 welded: `ca28a7c1139ed099` (the same with WPILib 2026.2.1 on the Jetson's
+Java 17, with 2027 alpha-6 on Java 25, and with an independent Python version).
+- **Rounding is Java's.** `%.4f` rounds the shortest decimal form of the double half-up. Python's
+  `f"{v:.4f}"` rounds the exact binary value half-even, and the Rebuilt field hits the difference:
+  its 0.55245 m tags are `0.5525` in Java and `0.5524` in Python, so plain Python gets
+  `90dbef151859080a` for AndyMark. A Python version must round
+  `Decimal(repr(v)).quantize(Decimal("0.0001"), ROUND_HALF_UP)` and keep the sign of zero.
+- **`-0.0` counts.** Java prints a value that rounds to zero with its sign (`-0.0000`). WPILib's
+  AndyMark and welded JSONs have `"X": -0.0` in four tags. WPILib 2027's JSON writer
+  (`AprilTagFieldLayout.serialize`) writes those as `0.0`, so the JSON it produces for AndyMark
+  hashes to `a0a75cd9a602dcc1`, not `2792cd4e868967b8`. Robot code must hash the JSON it publishes
+  (parse it back, or publish WPILib's resource file as is), or the Jetson refuses its map.
+
+**What the Jetson does** (`FieldMapSync`, `FieldMapNT`, polled every 200 ms on PhotonVision's timer
+thread):
+- Waits until `Json`, `Hash` and `Name` have stopped changing for one poll (the robot publishes them
+  one after another), then parses the JSON and checks it: at least one tag, no ID twice, field 1–30 m
+  each way, every tag finite and on the field (2 m margin, under 5 m high).
+- Loads it only if its hash equals `Hash`. On a mismatch or a bad JSON the map in use stays and
+  `Error` says why.
+- **Loading** sets PhotonVision's own setting (`setApriltagFieldLayout`, as upstream's
+  `/photonvision/apriltag_field_layout` does) and asks for a settings save. On a camera thread that's
+  a reference swap: the parsing and checks happen on the timer thread, and each AprilTag and Aruco
+  pipeline now reads the layout once per frame, so a frame's multi-tag and single-tag poses always
+  use one map and a change lands between frames. Nothing heavy runs on a camera thread, so a load
+  isn't held until the robot is disabled (the Jetson could tell, through `NTDriverStation`): after a
+  Jetson reboot mid-match, the robot's map is back before the cameras are.
+- **Kept for the next boot** in `photonvision_config/spectrum/field-map.json`: the robot's JSON, its
+  hash and name, written to a temporary file, flushed, and renamed over the old one. At boot, before
+  the cameras start, it's loaded if its hash still checks out; otherwise PhotonVision's own setting
+  is used and `Error` says the saved one was unusable.
+- The same map again (the robot reconnecting) is not reloaded or rewritten.
+- A layout uploaded on the Settings page, or applied or undone by Field Calibration, deletes the
+  saved robot map, so the next boot uses it, until the robot sends its map again.
+
+**PhotonVision's own ways to set the map, and why they aren't used as they are:**
+- `POST /api/settings/aprilTagFieldLayout` (the Settings page's upload, multipart key `data`):
+  `saveUploadedAprilTagFieldLayout` writes it to the database, then **restarts PhotonVision**, about
+  20 s without cameras.
+- `/photonvision/apriltag_field_layout` (string, upstream `NetworkTablesManager`): any JSON published
+  there replaces the map at once and is saved. No hash, no checks beyond parsing, and nothing tells
+  the robot what was loaded. It's still there and nothing of ours publishes to it; if something
+  does, the Jetson's `FieldMap/Hash` reports that map, named `photonvision-settings`.
+
+**Checked** (laptop, Windows, the fork with patches 00–74):
+- `FieldMapHashTest`: both reference fields, the canonical text (the 0.55245 tie), formatting of
+  `-0.0`, a negative-zero map against a hash computed in Python, and a JSON round trip.
+- `FieldMapSyncTest`: loads and saves; refuses a hash mismatch, a missing hash, and nine bad JSONs
+  (not JSON, no tags, empty tags, zero and 165 m fields, a duplicate ID, a tag off the field, a
+  negative ID, a truncated file) with the map in use untouched; keeps the robot's map when a
+  refused one follows; doesn't reload or rewrite the same map; uses the saved map at the next boot;
+  ignores a saved file that was edited or truncated; forgets the saved map; reports a map set some
+  other way; and the NetworkTables side on a local instance (a JSON a poll ahead of its hash isn't
+  reported as a mismatch).
+- AprilTag, Aruco and tag-quality pipeline tests still pass.
+- End to end, two processes: PhotonVision's configuration, `FieldMapNT.start()` and an NT client on
+  one side, `tests/field-map/FieldMapRobot.java` as the NT server on the other. A wrong hash was
+  refused and reported; a map written by WPILib 2027's serializer, sent with its own hash, loaded;
+  the reference map loaded and was echoed. After a restart with the robot silent the saved map was
+  in use from the start, also with PhotonVision's database deleted. A stand-in camera loop reading
+  the layout every 8 ms saw each change between two reads; the slowest read took 0.3 ms.
+- **On a Jetson:** `tests/field-map/run.sh` (also in `tests/run-all.sh`) runs the same checks
+  against the real service, plus every camera's fps through the swap. Not run yet.
 
 ## Changes from the handoff
 
