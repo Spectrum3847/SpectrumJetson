@@ -203,6 +203,8 @@ This is from reading the patches. **[code]** means the patch does it. **[inferre
 
 ### Camera power, or other cameras
 
+**Decision (2026-10-27): replace the cameras rather than buy switching hubs.** The hubs that really switch port power cost more than new cameras. Option 3 below is the plan. Option 2 is kept for the record.
+
 A wedged Thriftiest needs its 5 V cut. The Orin devkit's USB ports can't do that: their supplies are always-on ([TECHNICAL.md](TECHNICAL.md), USB hub reset test). Hubs with real per-port power switching are rare and not built for robots. In order of preference:
 
 1. **Find the trigger first (R4).** If it's ESD, cable strain or a supply dip, fixing that may be enough, whatever camera we use.
