@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn a Rewind recording (copied from the Jetson with rewind-pull.sh) into videos.
 
-Each camera's recording is its own MJPEG frames in 60 s segments (.mjpeg + .csv, docs/REWIND.md). This
+Each camera's recording is its own MJPEG frames in 5 min segments (.mjpeg + .csv, docs/REWIND.md). This
 writes one MJPEG .avi per camera, with no re-encoding and no dependencies (plain Python), which
 VLC, mpv and most players open. The frame rate in the .avi is the recording's average; the exact
 per-frame times (Jetson clock and robot clock) are in <camera>.frames.csv next to it, for lining
