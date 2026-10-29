@@ -217,6 +217,18 @@ for intf in /sys/bus/usb/drivers/uvcvideo/*:1.0; do
       fail "$name is streaming ${actual} ${pixfmt}, but PhotonVision set ${want% *}: the detector gets an upscaled image (restart PhotonVision)"
     else pass "$name streaming ${actual} ${pixfmt}${want:+, as set}"; fi
   fi
+  # Thriftiest Cam firmware 5.13 (experimental, 2026-09-26) restores the sensor's gain control,
+  # which older firmware doesn't report. So no gain control = not updated (docs/THRIFTIEST-CAM-FIRMWARE.md).
+  # bcdDevice is printed too, so we can learn which revision value 5.13 reports.
+  if [[ -n $vdev ]]; then
+    rev=$(cat "$dev/bcdDevice" 2>/dev/null)
+    vid=$(cat "$dev/idVendor" 2>/dev/null)
+    if v4l2-ctl -d "$vdev" -l 2>/dev/null | grep -qE '^ *gain '; then
+      pass "${name:-$hubport}: USB rev ${rev:-?}, has gain control"
+    elif [[ $vid != 32e4 ]]; then   # 32e4 = the bench Global Shutter / colour cameras
+      warn "${name:-$hubport}: USB rev ${rev:-?}, no gain control: Thriftiest Cam firmware older than 5.13? (docs/THRIFTIEST-CAM-FIRMWARE.md)"
+    fi
+  fi
 done
 if [[ $cams -lt $EXPECT ]]; then fail "$cams camera(s) found, expected $EXPECT"; fi
 # USB 2.0 bandwidth: stock uvcvideo lets a Thriftiest Cam reserve ~196 Mbps, so only 2 fit on the
