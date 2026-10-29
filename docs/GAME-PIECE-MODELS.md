@@ -42,3 +42,5 @@ we cap it at 30 fps.
 - **Next:** A/B it against `project516_yolo26n_fuel_v1_raw` (same input and output, ~17% fewer FLOPs, similar speed) on footage from our own colour camera. Rewind recordings are good for this.
 - **By October:** fine-tune on our own camera's frames, with motion blur, bumpers and yellow distractors, and keep the 640 input. Through an ultrawide lens, a ball 5 m away is only ~9 px wide at 640.
 - **Rebuild the engines** from the ONNX after any JetPack or TensorRT change. Engines only run on the TensorRT version and GPU they were built for.
+
+Camera hardware for game pieces (colour, global shutter, USB 3): see [CAMERA-OPTIONS.md](CAMERA-OPTIONS.md).

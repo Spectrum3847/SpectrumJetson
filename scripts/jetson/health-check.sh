@@ -217,6 +217,19 @@ for intf in /sys/bus/usb/drivers/uvcvideo/*:1.0; do
       fail "$name is streaming ${actual} ${pixfmt}, but PhotonVision set ${want% *}: the detector gets an upscaled image (restart PhotonVision)"
     else pass "$name streaming ${actual} ${pixfmt}${want:+, as set}"; fi
   fi
+  # Thriftiest Cam (1bcf:28c5) firmware is its USB bcdDevice: 0x0513 = 5.13. The factory build
+  # also reports 5.13 but hides gain, so a gain control is what tells the published 5.13 apart.
+  # Update with thriftiest-fw.py (docs/THRIFTIEST-CAM-FIRMWARE.md).
+  if [[ $(cat "$dev/idVendor" 2>/dev/null):$(cat "$dev/idProduct" 2>/dev/null) == 1bcf:28c5 ]]; then
+    rev=$(cat "$dev/bcdDevice" 2>/dev/null)
+    fw=$((16#${rev:0:2})).${rev:2:2}
+    gain=$( [[ -n $vdev ]] && v4l2-ctl -d "$vdev" -l 2>/dev/null | grep -qE '^ *gain ' && echo yes)
+    if [[ $((16#${rev:-0})) -lt $((16#0513)) ]]; then
+      warn "${name:-$hubport}: Thriftiest Cam firmware $fw, 5.13 is out (scripts/host/thriftiest-flash.sh flash $hubport ...)"
+    elif [[ -z $gain ]]; then
+      warn "${name:-$hubport}: Thriftiest Cam firmware $fw factory build, no gain control (scripts/host/thriftiest-flash.sh flash $hubport ...)"
+    else pass "${name:-$hubport}: Thriftiest Cam firmware $fw, gain control present"; fi
+  fi
 done
 if [[ $cams -lt $EXPECT ]]; then fail "$cams camera(s) found, expected $EXPECT"; fi
 # USB 2.0 bandwidth: stock uvcvideo lets a Thriftiest Cam reserve ~196 Mbps, so only 2 fit on the
