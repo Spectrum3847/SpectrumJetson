@@ -121,7 +121,7 @@ The vision stack has four parts. Two are built on the Jetson, one on the laptop,
 | 1 | PhotonVision service | Jetson (installer) | `jetson/03-photonvision.sh` | Installs the systemd service that starts PhotonVision at boot. We then replace its jar with the fork. |
 | 2 | allwpilib `v2026.2.1` | Jetson | `jetson/04-build-allwpilib.sh` | Libraries the CUDA detector links against. Must be the **v2026.2.1 tag**: its `main` branch has moved on and won't compile with the detector. Took 17 minutes. |
 | 3 | CUDA detector `lib971apriltag.so` | Jetson | `jetson/07-build-bos-detector.sh`, then `08-select-detector.sh bos --mwbd 20 --jpeg nvjpg` | Austin Schuh's current code (see below) plus our JNI wrapper in `detector/`. `--jpeg nvjpg` decodes the camera JPEGs on the Jetson's JPEG hardware (`libspectrumnvjpg.so`, see Performance), gray and colour; it uses ~180 MB of memory per camera. Leave it out to decode on the CPU. |
-| 4 | PhotonVision fork jar | Laptop | `host/03-build-photonvision-fork.sh`, then `jetson/06-install-fork-jar.sh` | The 4143 fork, upstream v2026.3.4 (patch 00) and our patches 01–85. It builds on the laptop in about 30 s instead of taxing the Jetson. The Jetson runs it on Java 17. The build also bundles the training site (`training/`) as the sidebar's Documentation page, so the course works on the robot with no internet. |
+| 4 | PhotonVision fork jar | Laptop | `host/03-build-photonvision-fork.sh`, then `jetson/06-install-fork-jar.sh` | The 4143 fork, upstream v2026.3.4 (patch 00) and our patches 01–86. It builds on the laptop in about 30 s instead of taxing the Jetson. The Jetson runs it on Java 17. The build also bundles the training site (`training/`) as the sidebar's Documentation page, so the course works on the robot with no internet. |
 | 5 | Camera driver with a bandwidth cap | Jetson | `jetson/11-uvcvideo-payload-cap.sh --install` | Needed for 3–4 cameras on the USB-A ports (see Performance). |
 | 6 | TensorRT backend `libspectrumtrt.so` | Jetson | built by `07-build-bos-detector.sh`; install to `/usr/lib` | Game-piece detection. Models go in with `jetson/12-install-yolo-model.sh`. |
 | 7 | USB controller watchdog | Jetson | `jetson/14-usb-watchdog.sh --install` | Resets the USB controller if the kernel says it died, so the cameras come back without a person. It never reboots (see Known issues). |
@@ -332,7 +332,13 @@ Both cameras use the same PhotonVision settings. Each one needs its own calibrat
 
 **New cameras start with these settings automatically.** A camera PhotonVision has never seen gets AprilTagCuda, 1280x800 MJPEG, exposure 50, decision margin 15, brightness 100, white balance 2800 K, Low Latency off and multi-tag on (`TeamCameraDefaults` in `photonvision-06`). 3D can't work without a calibration, so it starts off and turns itself on (with multi-tag) as soon as a calibration is saved or imported for the resolution the camera uses. It never turns 3D off. Existing cameras keep their saved settings.
 
-**Cameras are named after their USB port.** Every Thriftiest Cam reports the same name and serial number, so PhotonVision tells them apart only by the port they're plugged into, and each name (and its calibration) stays with its port. The robot code uses the same names, e.g. `new PhotonCamera("TopLeft")`.
+**Give each camera a serial of its own, and its name and calibration go with it** (`photonvision-86`). Out of the box every Thriftiest Cam reports the same serial (`01.00.00`), so PhotonVision can only tell them apart by the USB port they're plugged into: each name (and its calibration) stays with its port, and a camera in the wrong port silently gets another camera's calibration. Store a serial in each camera once, from the laptop, robot disabled:
+
+```bash
+JETSON=10.85.15.15 scripts/host/thriftiest-flash.sh rename 2.1 SJ-TC01   # port, serial
+```
+
+Serials must start with `SJ-` (PhotonVision only trusts serials we stored) and be unique: label the camera with it. At its next start PhotonVision moves that camera's saved settings and calibration from the port to the serial, and from then on finds it in any port (tested 2026-10-29: two cameras swapped ports, then moved to a third port; each kept its calibration). Cameras without one are still matched by port, as in the table below. The robot code uses the names, e.g. `new PhotonCamera("TopLeft")`, either way.
 
 | Name | Physical port (looking at the ports) | USB hub port |
 | --- | --- | --- |
@@ -343,7 +349,7 @@ Both cameras use the same PhotonVision settings. Each one needs its own calibrat
 
 All the Jetson's USB 2.0 ports share one bandwidth budget: the four USB-A ports, the USB-C port, and anything on a hub (see Performance). Four cameras fit only with our capped camera driver installed (`scripts/jetson/11-uvcvideo-payload-cap.sh --install`; the health check shows which driver is loaded). With the stock driver, only two fit.
 
-A calibration belongs to one physical camera and lens, so if you move a camera to another port, recalibrate it there.
+A calibration belongs to one physical camera and lens. With a serial stored in it, the calibration follows the camera; without one, if you move a camera to another port, recalibrate it there. One camera's calibration on another is off by about 3.8° (27 cm at 4 m) on our two: see [TECHNICAL.md](docs/TECHNICAL.md), "Cameras known by their serial".
 
 **Focusing a lens** (`photonvision-34`): the Camera page's **Focus** card scores how sharp the image is, like Limelight's focus tool.
 1. Turn on **Measure**, and point the camera at something detailed that stays still: a tag or the calibration board, about as far away as the tags you care about most.
@@ -663,7 +669,7 @@ The detailed technical reference, with exact versions, commits and measurements,
 - [x] Rewind: record every camera to the SSD when robot code asks (bench-tested, no fps cost)
 - [x] Jetson sets its date from the robot's clock when it has no internet (`photonvision-08`; robot code publishes `/photonvision/clock/unixMs`, issue #10)
 - [ ] Test on the robot network with the SystemCore (NetworkTables, time sync, PhotonLib reading results, Rewind's robot-clock timestamps, the Jetson's date from the robot). Include pulling the Ethernet cable for 5 s mid-test: NetworkTables and time sync should reconnect by themselves
-- [ ] Hot glue the USB connectors and add strain relief. Label the cables and ports: every Thriftiest Cam has the same serial number, so a camera in the wrong port silently swaps calibrations
+- [ ] Hot glue the USB connectors and add strain relief. Label each camera with its stored serial (`SJ-TC01`, ...); a camera without one in the wrong port silently swaps calibrations
 - [ ] Lock each lens after focusing (glue or silicone, like 6328), then recalibrate. Vibration can turn a lens and spoil its calibration
 - [ ] Turn off Wi-Fi for competition (Bluetooth is already off)
 - [ ] Write the vision subsystem in `2026-FM-SystemCore` using the AndyMark field layout, with photonlib kept at alpha-2

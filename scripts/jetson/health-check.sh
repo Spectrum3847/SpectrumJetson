@@ -161,32 +161,44 @@ for (cfg,) in db.execute("select config_json from cameras"):
     print(cfg)
 PY
 }
-# PhotonVision camera nickname bound to a USB port (it matches identical cameras by port).
-cam_name() {
-  camera_configs | python3 -c "
-import json, sys, re
-text = sys.stdin.read()
-for chunk in re.split(r'(?m)^\\{', text):
-    if 'usb-0:$1:1.0' in chunk:
-        m = re.search(r'\"nickname\" : \"([^\"]*)\"', chunk)
-        if m: print(m.group(1)); break
-" 2>/dev/null
-}
-# Every camera PhotonVision knows (its settings name a USB port) that isn't on USB now: the loop
-# below only sees cameras that are there, so an unplugged or stuck one used to pass unnoticed
-# (2026-10-01: BottomLeft gone from port 2.2, and Match Ready said nothing about it).
-while IFS=$'\t' read -r name port; do
-  [[ -n $port ]] || continue
-  ls /dev/v4l/by-path/*usb-0:"$port":1.0-video-index0 >/dev/null 2>&1 \
-    || fail "$name isn't on USB (its port $port is empty): replug it, or power-cycle the robot if it's a stuck Thriftiest Cam"
-done < <(camera_configs | python3 -c "
-import sys, re
-text = sys.stdin.read()
-for chunk in re.split(r'(?m)^\{', text):
-    n = re.search(r'\"nickname\" : \"([^\"]*)\"', chunk)
-    p = re.search(r'usb-0:([0-9.]+):1\.0', chunk)
-    if n and p: print(n.group(1) + '\t' + p.group(1))
-" 2>/dev/null)
+# Each PhotonVision camera: nickname, the USB port it's on now ("" if it isn't), and what it's
+# known by. PhotonVision matches identical cameras by their port; photonvision-86: a camera with a
+# serial of its own (thriftiest-flash.sh rename) by that serial, in any port, so its port is
+# looked up from its /dev/v4l/by-id link.
+CAMS=$(python3 - "$DB" <<'PY' 2>/dev/null
+import json, os, re, sqlite3, sys
+db = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True, timeout=2)
+for (cfg,) in db.execute("select config_json from cameras"):
+    c = json.loads(cfg)
+    info = c.get("matchedCameraInfo") or {}
+    info = info.get("PVUsbCameraInfo", info)
+    ident = info.get("uniquePath") or ""
+    port = ""
+    if "/by-id/" in ident:
+        if os.path.exists(ident):
+            dev = os.path.realpath("/sys/class/video4linux/%s/device" % os.path.basename(os.path.realpath(ident)))
+            port = os.path.basename(dev).split(":")[0].split("-", 1)[-1]  # 1-2.3:1.0 -> 2.3
+    else:
+        m = re.search(r"usb-0:([0-9.]+):1\.0", ident)
+        if not m:
+            continue
+        port = m.group(1) if os.path.exists(ident) else ""
+        ident = "port " + m.group(1)
+    print("%s\t%s\t%s" % (c.get("nickname", ""), port, ident))
+PY
+)
+cam_name() { awk -F'\t' -v p="$1" '$2 == p { print $1; exit }' <<<"$CAMS"; }
+# Every camera PhotonVision knows that isn't on USB now: the loop below only sees cameras that are
+# there, so an unplugged or stuck one used to pass unnoticed (2026-10-01: BottomLeft gone from
+# port 2.2, and Match Ready said nothing about it).
+while IFS=$'\t' read -r name port ident; do
+  [[ -n $name && -z $port ]] || continue
+  if [[ $ident == "port "* ]]; then
+    fail "$name isn't on USB (its ${ident} is empty): replug it, or power-cycle the robot if it's a stuck Thriftiest Cam"
+  else
+    fail "$name isn't on USB (${ident##*/} isn't there): replug it, or power-cycle the robot if it's a stuck Thriftiest Cam"
+  fi
+done <<<"$CAMS"
 cams=0
 for intf in /sys/bus/usb/drivers/uvcvideo/*:1.0; do
   [[ -e $intf ]] || continue
