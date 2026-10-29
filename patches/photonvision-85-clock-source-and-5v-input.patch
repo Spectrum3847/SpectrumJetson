@@ -1,0 +1,90 @@
+diff --git a/photon-core/src/main/java/org/photonvision/common/hardware/metrics/InputVoltage.java b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/InputVoltage.java
+index 6c4f8d2d..1cfe6318 100644
+--- a/photon-core/src/main/java/org/photonvision/common/hardware/metrics/InputVoltage.java
++++ b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/InputVoltage.java
+@@ -18,7 +18,9 @@
+ package org.photonvision.common.hardware.metrics;
+ 
+ /**
+- * SpectrumJetson (photonvision-82): the board's input voltage (the INA3221's VDD_IN), sampled
++ * SpectrumJetson (photonvision-82): the module's 5 V input (the INA3221's VDD_IN; photonvision-85:
++ * on the Orin Nano dev kit that's after the carrier board's regulator, about 4.95 V, and the
++ * carrier's own 12 V input isn't measured), sampled
+  * often so a short dip between once-a-second publishes still shows up. Keeps the latest reading, the
+  * lowest since the last {@link #takeSecond()}, and the lowest since PhotonVision started.
+  *
+diff --git a/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonDiagnostics.java b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonDiagnostics.java
+index c0ec33b9..d1794a54 100644
+--- a/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonDiagnostics.java
++++ b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonDiagnostics.java
+@@ -55,7 +55,8 @@ import org.photonvision.common.util.TimedTaskManager;
+  *       the switch port lost link
+  *   <li>{@code ntDisconnects}: NetworkTables disconnects this process has seen
+  *   <li>{@code bootId}, {@code uptimeSeconds}: a reboot changes the boot ID; a reconnect doesn't
+- *   <li>{@code clockSource} ("robot", "internet" or "unset": the date restored at boot), {@code
++ *   <li>{@code clockSource} ("robot": set from or checked against the robot's clock, "internet" or
++ *       "unset": the date restored at boot), {@code
+  *       clockLastJumpSeconds}
+  *   <li>{@code cpuUtilPct}, {@code ramUsedPct}
+  *   <li>{@code ssdTempC}; {@code fsErrors} (ext4 errors recorded on any mounted partition), {@code
+diff --git a/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonTelemetry.java b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonTelemetry.java
+index b8ec9630..9ef4f50e 100644
+--- a/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonTelemetry.java
++++ b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/JetsonTelemetry.java
+@@ -45,7 +45,7 @@ import org.photonvision.jni.JetsonStatusJNI;
+  *   <li>{@code gpuLoadPct}; {@code cpuTempC}, {@code gpuTempC}, {@code socTempC} (hottest of the
+  *       three SoC sensors), {@code tjTempC} (hottest on the chip); {@code fanRpm}
+  *   <li>{@code powerW} (the board's input), {@code cpuGpuPowerW}, {@code socPowerW}
+- *   <li>photonvision-82: {@code inputVoltageV} (the board's input, VDD_IN), {@code
++ *   <li>photonvision-82: {@code inputVoltageV} (the module's 5 V input, VDD_IN), {@code
+  *       inputVoltageMinV} (lowest in the last second, sampled every 20 ms), {@code
+  *       inputVoltageLowestV} (lowest since PhotonVision started)
+  *   <li>{@code jpegDecoder} ("nvjpg" or "libjpeg-turbo"), {@code jpegHardwareOff} (the hardware
+@@ -109,8 +109,13 @@ public final class JetsonTelemetry {
+ 
+     // photonvision-82
+     static final long INPUT_SAMPLE_MS = 20;
+-    /** Below this, a dip is also written to PhotonVision's log (at most every 5 s). */
+-    static final double LOW_INPUT_V = 12.0;
++    /**
++     * Below this, a dip is also written to PhotonVision's log (at most every 5 s). photonvision-85:
++     * VDD_IN is the module's 5 V input (after the carrier board's regulator), not the 12 V supply,
++     * which no sensor measures: 4.75 V is the bottom of 5 V +-5%. At 12 V every reading was a "dip",
++     * logged every 5 s.
++     */
++    static final double LOW_INPUT_V = 4.75;
+ 
+     private final InputVoltage inputVoltage = new InputVoltage();
+     private volatile double lowestInputV = Double.NaN, lastTjC = Double.NaN;
+diff --git a/photon-core/src/main/java/org/photonvision/common/util/RobotClockSync.java b/photon-core/src/main/java/org/photonvision/common/util/RobotClockSync.java
+index d109fda1..488796a3 100644
+--- a/photon-core/src/main/java/org/photonvision/common/util/RobotClockSync.java
++++ b/photon-core/src/main/java/org/photonvision/common/util/RobotClockSync.java
+@@ -79,8 +79,13 @@ public class RobotClockSync {
+ 
+     /**
+      * Where this boot's clock came from: "internet" (NTP), "robot" (set from robot code's clock at
+-     * least once), or "unset" (still the date restored at boot: whatever was saved last, possibly
+-     * long ago). TXMAN1: several boots stayed "unset" all match, so their logs carried a wrong date.
++     * least once, or checked against it and within {@link #MAX_ERROR_MS}), or "unset" (still the
++     * date restored at boot: whatever was saved last, possibly long ago). TXMAN1: several boots
++     * stayed "unset" all match, so their logs carried a wrong date.
++     *
++     * <p>photonvision-84: "robot" also when the clock already agrees with the robot's. After a
++     * PhotonVision restart the clock was right, so it was never set, and this read "unset" with a
++     * correct clock (robot code's bench check, 2026-10-29). {@link #lastJumpSeconds()} stays 0 then.
+      */
+     public static String source() {
+         if (NTP_SYNCED.exists()) return "internet";
+@@ -113,7 +118,10 @@ public class RobotClockSync {
+             if (ageUs < 0 || ageUs > MAX_AGE_US) return;
+             long robotNowMs = robotMs + ageUs / 1000;
+             long errorMs = robotNowMs - System.currentTimeMillis();
+-            if (Math.abs(errorMs) <= MAX_ERROR_MS) return;
++            if (Math.abs(errorMs) <= MAX_ERROR_MS) {
++                setFromRobot = true; // photonvision-84: checked against the robot's, and right
++                return;
++            }
+             // Internet time wins: with NTP (shop Wi-Fi), timesyncd would undo our change at once
+             // and the two would fight. The robot's clock is for when there's no internet (events).
+             if (NTP_SYNCED.exists()) {

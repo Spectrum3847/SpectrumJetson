@@ -1,0 +1,499 @@
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/StuckCameraWatchdog.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/StuckCameraWatchdog.java
+index 9204bf02..dc4f5581 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/StuckCameraWatchdog.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/StuckCameraWatchdog.java
+@@ -57,6 +57,24 @@ import java.util.function.LongSupplier;
+  *       else.
+  *   <li>{@link #state()} says which of these the camera is in, for health/state on NetworkTables.
+  * </ul>
++ *
++ * <p>photonvision-84, from the 2026-10-29 USB tests (Thriftiest Cams on the "usbrecov" firmware come
++ * back from a USB drop, but only if the port's link is restarted; a reset takes ~2 s). Most of a
++ * recovery was waiting to act (11 s for a port the hub disabled), so every wait is shorter:
++ *
++ * <ul>
++ *   <li>Stuck after {@link #STUCK_NS} (1.5 s, was 3 s; a camera runs at 30-120 fps, and a pause in
++ *       reading it still restarts the clock); a USB reset {@link #AFTER_RECONNECT_NS} (2 s, was 5 s)
++ *       after the reconnect; a disconnected camera reset after {@link #DISCONNECTED_RESET_NS} (2 s,
++ *       was 5 s).
++ *   <li>USB resets every {@link #USB_RESET_EVERY_NS} (5 s), not 30 s, and {@link #MAX_USB_RESETS}
++ *       (6) before giving up: each is ~2-3 s now.
++ *   <li>A camera gone from USB is reset too (its port's power switched off and on, which makes the
++ *       kernel enumerate it again), from {@link #GONE_RESET_NS}. Before, it was only declared given
++ *       up. Giving up now comes from {@link #MAX_USB_RESETS} resets without a frame, as for a
++ *       camera that's there.
++ *   <li>{@link #usbResetsSinceFrame()} lets the caller escalate: the first reset is the gentle one.
++ * </ul>
+  */
+ final class StuckCameraWatchdog {
+     enum Action {
+@@ -86,9 +104,9 @@ final class StuckCameraWatchdog {
+         }
+     }
+ 
+-    static final long STUCK_NS = 3_000_000_000L;
+-    static final long AFTER_RECONNECT_NS = 5_000_000_000L;
+-    static final long USB_RESET_EVERY_NS = 30_000_000_000L;
++    static final long STUCK_NS = 750_000_000L; // photonvision-84: was 3 s
++    static final long AFTER_RECONNECT_NS = 500_000_000L; // photonvision-84: was 5 s
++    static final long USB_RESET_EVERY_NS = 5_000_000_000L; // photonvision-84: was 30 s
+     // SpectrumJetson (photonvision-31): with the kernel refusing the camera USB bandwidth, a reset
+     // can't help (the camera asks for the same reservation again): just retry now and then, in case
+     // another camera has gone and freed some.
+@@ -102,15 +120,16 @@ final class StuckCameraWatchdog {
+ 
+     // photonvision-81
+     /** Disconnected this long (not just mid-reconnect), with its USB device still there: reset it. */
+-    static final long DISCONNECTED_RESET_NS = 5_000_000_000L;
++    static final long DISCONNECTED_RESET_NS = 1_000_000_000L; // photonvision-84: was 5 s
+ 
+-    /**
+-     * Gone from USB this long: it won't come back by itself (a wedged Thriftiest needs a power cut).
+-     */
++    /** Gone from USB this long: said so (with {@link #goneFromUsb()}, once it has given up). */
+     static final long GONE_NS = 10_000_000_000L;
+ 
+-    /** USB resets without a frame before giving up (~2 min at one per 30 s). */
+-    static final int MAX_USB_RESETS = 4;
++    /** photonvision-84: gone from USB this long: switch its port's power off and on. */
++    static final long GONE_RESET_NS = 500_000_000L;
++
++    /** USB resets without a frame before giving up (~30 s at one per 5 s; photonvision-84: was 4). */
++    static final int MAX_USB_RESETS = 6;
+ 
+     static final long GAVE_UP_RETRY_NS = 120_000_000_000L;
+ 
+@@ -176,11 +195,11 @@ final class StuckCameraWatchdog {
+         if (disconnectedSinceNs == NEVER) disconnectedSinceNs = now;
+         long disconnected = now - disconnectedSinceNs;
+         if (!devicePresent) {
+-            if (disconnected >= GONE_NS && !gaveUp) {
+-                gaveUp = true;
+-                goneFromUsb = true;
+-            }
+-            return Action.NONE;
++            // photonvision-84: reset it (the caller switches its port's power off and on) instead of
++            // only giving up: a Thriftiest Cam on the usbrecov firmware comes back from that.
++            if (disconnected >= GONE_NS) goneFromUsb = true;
++            if (disconnected < GONE_RESET_NS) return Action.NONE;
++            return usbResetIfDue(now);
+         }
+         goneFromUsb = false;
+         if (disconnected < DISCONNECTED_RESET_NS) return Action.NONE;
+@@ -220,7 +239,7 @@ final class StuckCameraWatchdog {
+         return usbResetIfDue(now);
+     }
+ 
+-    /** A USB reset, at most every 30 s; after {@link #MAX_USB_RESETS}, gave up: every 2 min. */
++    /** A USB reset, at most every 5 s; after {@link #MAX_USB_RESETS}, gave up: every 2 min. */
+     private Action usbResetIfDue(long now) {
+         if (usbResetsSinceFrame >= MAX_USB_RESETS) gaveUp = true;
+         long every = gaveUp ? GAVE_UP_RETRY_NS : USB_RESET_EVERY_NS;
+@@ -233,6 +252,11 @@ final class StuckCameraWatchdog {
+         return Action.USB_RESET;
+     }
+ 
++    /** photonvision-84: USB resets since the last usable frame, counting the one just returned. */
++    synchronized int usbResetsSinceFrame() {
++        return usbResetsSinceFrame;
++    }
++
+     /** Seconds since the last usable frame. */
+     synchronized double secondsWithoutFrames() {
+         return (clockNs.getAsLong() - lastGoodNs) / 1e9;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+index 22daa83e..eda2a76c 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+@@ -122,11 +122,13 @@ public class USBFrameProvider extends CpuImageProcessor {
+                     port != null
+                             && java.nio.file.Files.exists(java.nio.file.Path.of("/sys/bus/usb/devices", port));
+             if (stuckWatchdog.notConnected(devicePresent) == StuckCameraWatchdog.Action.USB_RESET) {
+-                usbReset(
++                recoverUsb(
+                         String.format(
+-                                "disconnected for %.0f s with its USB device still there",
++                                devicePresent
++                                        ? "disconnected for %.0f s with its USB device still there"
++                                        : "gone from USB for %.0f s", // photonvision-84
+                                 stuckWatchdog.secondsDisconnected()),
+-                        true);
++                        devicePresent);
+             }
+             // SpectrumJetson (photonvision-33): it's plugged in but won't answer (the kernel couldn't
+             // enumerate it). A USB hub reset leaves a Thriftiest Cam like this, and on this carrier
+@@ -140,8 +142,9 @@ public class USBFrameProvider extends CpuImageProcessor {
+                             "The camera on USB port "
+                                     + port
+                                     + " is plugged in but won't answer (the kernel can't enumerate it). A USB hub reset"
+-                                    + " can leave a camera like this; only cutting its power fixes it: replug it, or"
+-                                    + " power-cycle the robot.");
++                                    + " can leave a camera like this. Switching its port's power off and on is tried"
++                                    + " (a Thriftiest Cam on the usbrecov firmware comes back from that); if it"
++                                    + " doesn't, it needs its power cut: replug it, or power-cycle the robot.");
+                 }
+             } else if (stuckWatchdog.goneFromUsb() && problem.isEmpty()) {
+                 problem = "gone from USB port " + port + ": replug it, or power-cycle the robot";
+@@ -149,9 +152,12 @@ public class USBFrameProvider extends CpuImageProcessor {
+                         "The camera has been gone from USB port "
+                                 + port
+                                 + " for over "
+-                                + StuckCameraWatchdog.GONE_NS / 1_000_000_000L
+-                                + " s. If it's still plugged in, it needs its power cut: replug it, or"
+-                                + " power-cycle the robot. Look in the kernel log (journalctl -k) for why it left.");
++                                + Math.round(stuckWatchdog.secondsDisconnected())
++                                + " s, and "
++                                + StuckCameraWatchdog.MAX_USB_RESETS
++                                + " port power toggles haven't brought it back. If it's still plugged in, it"
++                                + " needs its power cut: replug it, or power-cycle the robot. Look in the kernel"
++                                + " log (journalctl -k) for why it left.");
+             }
+         } else if (org.photonvision.common.hardware.UsbTrouble.bandwidthFailed(usbPort(), BANDWIDTH_WINDOW_NS)) {
+             // SpectrumJetson (photonvision-31): the kernel refuses this camera USB bandwidth. Say so,
+@@ -176,7 +182,7 @@ public class USBFrameProvider extends CpuImageProcessor {
+                                         "no usable frames for %.1f s while connected (e.g. only corrupt JPEGs); reconnecting it",
+                                         stuckWatchdog.secondsWithoutFrames()));
+                 case USB_RESET ->
+-                        usbReset(
++                        recoverUsb(
+                                 String.format(
+                                         "still no usable frames %.1f s later", stuckWatchdog.secondsWithoutFrames()),
+                                 true);
+@@ -323,7 +329,7 @@ public class USBFrameProvider extends CpuImageProcessor {
+      * its USB device's sysfs "authorized" off and on, so it re-enumerates and the driver probes it
+      * again. PhotonVision opens cameras by their /dev/v4l/by-path name, so it finds it again.
+      */
+-    private void usbReset(String why, boolean asError) {
++    private boolean usbReset(String why, boolean asError) {
+         try {
+             // photonvision-81: by the USB port (remembered from when the camera was there), so a
+             // camera that has lost its /dev/video node can be reset too.
+@@ -335,13 +341,126 @@ public class USBFrameProvider extends CpuImageProcessor {
+             if (asError) logger.error(msg);
+             else logger.info(msg);
+             java.nio.file.Files.writeString(authorized, "0");
+-            Thread.sleep(1000);
++            Thread.sleep(300); // photonvision-84: was 1 s
+             java.nio.file.Files.writeString(authorized, "1");
++            return true;
+         } catch (InterruptedException e) {
+             Thread.currentThread().interrupt();
+         } catch (Exception e) {
+             logger.error("USB reset failed: " + e);
+         }
++        return false;
++    }
++
++    /**
++     * SpectrumJetson (photonvision-84): the watchdog's USB-level recovery, escalating. Found on the
++     * robot 2026-10-29 (tests/usb-port-glitch): after a USB drop a camera can stay registered but
++     * unusable ("can't set config #1, error -71"), and turning its "authorized" off and on (above)
++     * fails the same way, every time. Switching its hub port's power off and on makes the kernel
++     * enumerate it from scratch: a Thriftiest Cam on the usbrecov firmware streamed again 2 s later,
++     * with the other cameras on the hub untouched. (The carrier board's USB 5 V stays on, so a camera
++     * on the stock firmware stays wedged; nothing in software helps that one.)
++     *
++     * <ul>
++     *   <li>The first reset since the last frame is the gentle one, if the device is there.
++     *   <li>Later ones, a failed one, or a camera gone from USB: the port's power, off and on.
++     *   <li>Then cscore reopens the device: after the camera came back, cscore once kept failing on
++     *       the old one ("could not queue buffer 0" every 2 s) and never opened the new one, until
++     *       PhotonVision was restarted.
++     * </ul>
++     */
++    private void recoverUsb(String why, boolean devicePresent) {
++        String port = usbPort();
++        if (port == null) {
++            logger.error("Can't reset the camera (" + why + "): its USB port isn't known");
++            return;
++        }
++        boolean gentle = devicePresent && stuckWatchdog.usbResetsSinceFrame() <= 1;
++        if (!gentle || !usbReset(why, true)) {
++            portPowerCycle(port, gentle ? "the USB reset failed" : why);
++        }
++        reopenCamera();
++    }
++
++    // usbdevfs from Python: Java can't issue the ioctl, and python3 is always on the Jetson (PhotonVision
++    // runs as root). ClearPortFeature(PORT_POWER), 0.5 s, SetPortFeature(PORT_POWER) on the hub port.
++    private static final String PORT_POWER_SCRIPT =
++            String.join(
++                    "\n",
++                    "import fcntl, os, struct, sys, time",
++                    "hub, port = sys.argv[1], int(sys.argv[2])",
++                    "d = '/sys/bus/usb/devices/' + hub",
++                    "bus, dev = (int(open(d + '/' + f).read()) for f in ('busnum', 'devnum'))",
++                    "fd = os.open('/dev/bus/usb/%03d/%03d' % (bus, dev), os.O_RDWR)",
++                    "def feature(req):",
++                    "    ctl = struct.pack('=BBHHHI4xQ', 0x23, req, 8, port, 0, 1000, 0)",
++                    "    fcntl.ioctl(fd, 0xC0185500, bytearray(ctl))  # USBDEVFS_CONTROL, 64-bit",
++                    "try:",
++                    "    feature(1)",
++                    "    time.sleep(0.1)",
++                    "    feature(3)",
++                    "finally:",
++                    "    os.close(fd)");
++
++    /** photonvision-84: switches the camera's hub port's power off and on (port e.g. "1-2.3"). */
++    private void portPowerCycle(String port, String why) {
++        String hub;
++        String num;
++        int dot = port.lastIndexOf('.');
++        if (dot >= 0) { // on a hub: 1-2.3 is port 3 of hub 1-2
++            hub = port.substring(0, dot);
++            num = port.substring(dot + 1);
++        } else { // on the root hub: 1-2 is port 2 of usb1
++            int dash = port.indexOf('-');
++            hub = "usb" + port.substring(0, dash);
++            num = port.substring(dash + 1);
++        }
++        logger.error("Switching USB port " + port + "'s power off and on: " + why);
++        try {
++            Process p =
++                    new ProcessBuilder("python3", "-c", PORT_POWER_SCRIPT, hub, num)
++                            .redirectErrorStream(true)
++                            .start();
++            if (!p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
++                p.destroyForcibly();
++                logger.error("USB port power toggle timed out");
++            } else if (p.exitValue() != 0) {
++                logger.error(
++                        "USB port power toggle failed: "
++                                + new String(p.getInputStream().readAllBytes()).strip());
++            }
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++        } catch (Exception e) {
++            logger.error("USB port power toggle failed: " + e);
++        }
++    }
++
++    /**
++     * photonvision-84: once the camera's device node is back (up to 5 s) and it has had {@link
++     * #SETTLE_MS} to start, makes cscore close whatever it holds and open it again (cscore's SetPath
++     * does that even with the same path). Found on the robot 2026-10-29: the camera answers USB at
++     * once after a power toggle, but its video controls fail (-71) for about a second; cscore,
++     * reopened in that second, couldn't set the format and stayed stuck ("could not queue buffer 0")
++     * through every later toggle. Reopening only if no frame had come 1.2 s later was tried: cscore
++     * rarely came back by itself first, so it was 0.2-0.4 s slower.
++     */
++    private static final long SETTLE_MS = 300;
++
++    private void reopenCamera() {
++        String path = camera.getPath();
++        long deadline = System.nanoTime() + 5_000_000_000L;
++        try {
++            while (!java.nio.file.Files.exists(java.nio.file.Path.of(path)) && System.nanoTime() < deadline) {
++                Thread.sleep(100);
++            }
++            Thread.sleep(SETTLE_MS);
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++            return;
++        }
++        // UsbCamera.setPath isn't public in this WPILib; this is the call it makes.
++        edu.wpi.first.cscore.CameraServerJNI.setUsbCameraPath(camera.getHandle(), path);
+     }
+ 
+     private CapturedFrame grabInputMat() {
+diff --git a/photon-core/src/test/java/org/photonvision/vision/frame/provider/StuckCameraWatchdogTest.java b/photon-core/src/test/java/org/photonvision/vision/frame/provider/StuckCameraWatchdogTest.java
+index bf2a1d57..3a154138 100644
+--- a/photon-core/src/test/java/org/photonvision/vision/frame/provider/StuckCameraWatchdogTest.java
++++ b/photon-core/src/test/java/org/photonvision/vision/frame/provider/StuckCameraWatchdogTest.java
+@@ -49,71 +49,94 @@ public class StuckCameraWatchdogTest {
+     @Test
+     public void shortGapsDoNothing() {
+         var w = make();
+-        assertEquals(0, stuckFor(w, 2.5).size());
++        assertEquals(0, stuckFor(w, 0.5).size());
+         assertEquals("", w.good());
+-        assertEquals(0, stuckFor(w, 2.5).size());
++        assertEquals(0, stuckFor(w, 0.5).size());
+     }
+ 
+     @Test
+-    public void escalatesReconnectThenUsbResetThenEvery30s() {
++    public void escalatesReconnectThenUsbResetThenEvery5s() {
+         var w = make();
+-        var actions = stuckFor(w, 70);
+-        // Reconnect at 3 s; USB reset 5 s later (8 s); then every 30 s (38 s, 68 s).
++        var actions = stuckFor(w, 28);
++        // photonvision-84: reconnect at 0.75 s; USB reset 0.5 s later (1.25 s); then every 5 s until
++        // it gives up after 6. (Times are rounded to whole seconds.)
+         assertEquals(
+-                java.util.List.of("RECONNECT@3", "USB_RESET@8", "USB_RESET@38", "USB_RESET@68"), actions);
+-        assertEquals(4, w.recoveries());
+-        assertEquals("a USB reset", w.good());
++                java.util.List.of(
++                        "RECONNECT@1",
++                        "USB_RESET@1",
++                        "USB_RESET@6",
++                        "USB_RESET@11",
++                        "USB_RESET@16",
++                        "USB_RESET@21",
++                        "USB_RESET@26"),
++                actions);
++        assertEquals(7, w.recoveries());
++        assertEquals(6, w.usbResetsSinceFrame());
++        assertEquals("being given up on (replugged, or a later USB reset)", w.good());
++        assertEquals(0, w.usbResetsSinceFrame());
+         assertEquals("", w.good());
+     }
+ 
++    @Test
++    public void aUsbResetThatWorksSaysSo() {
++        var w = make();
++        assertEquals(java.util.List.of("RECONNECT@1", "USB_RESET@1", "USB_RESET@6"), stuckFor(w, 7));
++        assertEquals(2, w.usbResetsSinceFrame());
++        assertEquals("a USB reset", w.good());
++    }
++
+     @Test
+     public void aReconnectThatWorksStopsThere() {
+         var w = make();
+-        assertEquals(java.util.List.of("RECONNECT@3"), stuckFor(w, 4));
++        assertEquals(java.util.List.of("RECONNECT@1"), stuckFor(w, 1));
+         assertEquals("a reconnect", w.good());
+-        assertEquals(0, stuckFor(w, 2).size());
++        assertEquals(0, stuckFor(w, 0.5).size());
+     }
+ 
+     @Test
+     public void modeFixReconnectsShareTheThrottle() {
+         var w = make();
+-        nowNs += 2_000_000_000L;
+-        w.noteReconnect(); // photonvision-27 reconnected at 2 s
+-        // Stuck from the start: no reconnect of our own until 5 s after that one (7 s).
+-        assertEquals(java.util.List.of("RECONNECT@5"), stuckFor(w, 5.5));
++        assertEquals(0, stuckFor(w, 0.5).size());
++        w.noteReconnect(); // photonvision-27 reconnected at 0.5 s
++        // Stuck at 0.75 s, but no reconnect of our own until 0.5 s after that one (1 s): 0.5 s into
++        // this second look (shown rounded, as 1). Without the shared throttle it would be at 0.
++        assertEquals(java.util.List.of("RECONNECT@1"), stuckFor(w, 0.75));
+     }
+ 
+     @Test
+     public void aPauseInReadingIsNotStuck() {
+         // photonvision-66: frames, then nobody reads the camera for 10 s (robot code disabled it),
+-        // then the first grabs fail. That's 3 s of failures from here, not 10 s already.
++        // then the first grabs fail. That's 0.75 s of failures from here, not 10 s already.
+         var w = make();
+         nowNs += 250_000_000L;
+         assertEquals("", w.good());
+         nowNs += 10_000_000_000L;
+-        assertEquals(0, stuckFor(w, 2.5).size());
+-        assertEquals(java.util.List.of("RECONNECT@1"), stuckFor(w, 1));
++        assertEquals(0, stuckFor(w, 0.5).size());
++        assertEquals(java.util.List.of("RECONNECT@1"), stuckFor(w, 0.5)); // at 0.5 s, rounded
+     }
+ 
+     @Test
+     public void slowReadsStillCount() {
+         // A camera with a low frame-rate limit is read every 1.25 s (the limit's sleep and the grab
+-        // timeout): below NOT_READ_NS, so a stuck one is still found at 3 s.
++        // timeout): below NOT_READ_NS, so a stuck one is still found, at the first failed read.
++        // (A healthy one at a low rate isn't: each of its reads brings a frame.)
+         var w = make();
+         var actions = new ArrayList<String>();
+-        for (int i = 1; i <= 4; i++) {
++        for (int i = 1; i <= 1; i++) {
+             nowNs += 1_250_000_000L;
+             if (w.noFrame() != Action.NONE) actions.add("at " + i * 1.25 + " s");
+         }
+-        assertEquals(java.util.List.of("at 3.75 s"), actions);
++        assertEquals(java.util.List.of("at 1.25 s"), actions);
+     }
+ 
+     @Test
+     public void disconnectedIsNotStuck() {
+         var w = make();
+-        assertEquals(0, disconnectedFor(w, 8, false).size()); // unplugged for 8 s
++        // Unplugged for 8 s: photonvision-84 tries its port's power at 0.5 s and 5.5 s, but it isn't
++        // stuck.
++        assertEquals(java.util.List.of("USB_RESET@1", "USB_RESET@6"), disconnectedFor(w, 8, false));
+         assertEquals(State.DISCONNECTED, w.state());
+-        assertEquals(0, stuckFor(w, 2.5).size());
++        assertEquals(0, stuckFor(w, 0.5).size());
+     }
+ 
+     // photonvision-81
+@@ -138,19 +161,24 @@ public class StuckCameraWatchdogTest {
+         // TXMAN1: the camera's own USB reset left it disconnected, and nothing more was tried.
+         var w = make();
+         assertEquals(
+-                java.util.List.of("USB_RESET@5", "USB_RESET@35", "USB_RESET@65"),
+-                disconnectedFor(w, 70, true));
++                java.util.List.of("USB_RESET@1", "USB_RESET@6", "USB_RESET@11"),
++                disconnectedFor(w, 12, true));
+         assertEquals(3, w.recoveries());
+         assertEquals(State.DISCONNECTED, w.state());
+     }
+ 
+     @Test
+-    public void goneFromUsbGivesUp() {
++    public void goneFromUsbIsResetThenGivesUp() {
++        // photonvision-84: a camera gone from USB gets resets (its port's power switched off and on)
++        // from 0.5 s, every 5 s, and gives up after 6, like one that's there.
+         var w = make();
+-        assertEquals(0, disconnectedFor(w, 9, false).size());
++        assertEquals(java.util.List.of("USB_RESET@1", "USB_RESET@6"), disconnectedFor(w, 9, false));
+         assertEquals(State.DISCONNECTED, w.state());
+         assertFalse(w.goneFromUsb());
+-        assertEquals(0, disconnectedFor(w, 2, false).size());
++        // 10.5, 15.5, 20.5 and 25.5 s, counted from 9 s; gave up at 30.5 s.
++        assertEquals(
++                java.util.List.of("USB_RESET@2", "USB_RESET@7", "USB_RESET@12", "USB_RESET@17"),
++                disconnectedFor(w, 22, false));
+         assertEquals(State.GAVE_UP, w.state());
+         assertTrue(w.goneFromUsb());
+         // Replugged: it streams again.
+@@ -160,18 +188,21 @@ public class StuckCameraWatchdogTest {
+     }
+ 
+     @Test
+-    public void givesUpAfterFourUsbResetsThenRetriesEveryTwoMinutes() {
++    public void givesUpAfterSixUsbResetsThenRetriesEveryTwoMinutes() {
++        // photonvision-84: six resets every 5 s, then every 2 min.
+         var w = make();
+-        var actions = stuckFor(w, 340);
++        var actions = stuckFor(w, 300);
+         assertEquals(
+                 java.util.List.of(
+-                        "RECONNECT@3",
+-                        "USB_RESET@8",
+-                        "USB_RESET@38",
+-                        "USB_RESET@68",
+-                        "USB_RESET@98",
+-                        "USB_RESET@218",
+-                        "USB_RESET@338"),
++                        "RECONNECT@1",
++                        "USB_RESET@1",
++                        "USB_RESET@6",
++                        "USB_RESET@11",
++                        "USB_RESET@16",
++                        "USB_RESET@21",
++                        "USB_RESET@26",
++                        "USB_RESET@146",
++                        "USB_RESET@266"),
+                 actions);
+         assertEquals(State.GAVE_UP, w.state());
+         assertFalse(w.goneFromUsb()); // still connected
+@@ -187,11 +218,14 @@ public class StuckCameraWatchdogTest {
+         w.good();
+         assertEquals(State.STREAMING, w.state());
+         assertEquals(0, w.lastFrameAgeMs());
+-        stuckFor(w, 1.5);
+-        assertEquals(State.STALLED, w.state());
+-        assertEquals(1500, w.lastFrameAgeMs());
+-        stuckFor(w, 2); // reconnect at 3 s
++        // photonvision-84: the reconnect (0.75 s) now comes before the last frame is old enough (1 s)
++        // to stop counting as streaming, so it shows as recovering from 1 s, never as stalled.
++        stuckFor(w, 0.5);
++        assertEquals(State.STREAMING, w.state());
++        assertEquals(500, w.lastFrameAgeMs());
++        stuckFor(w, 0.5); // reconnect at 0.75 s
+         assertEquals(State.RECOVERING, w.state());
++        assertEquals(1000, w.lastFrameAgeMs());
+         nowNs += 5_000_000_000L; // nobody reads it (robot code disabled it)
+         assertEquals(State.PAUSED, w.state());
+         w.good();

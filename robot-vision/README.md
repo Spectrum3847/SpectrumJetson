@@ -237,7 +237,7 @@ System.out.println(s.stats().summary());
 | Camera X: N fps | below 20 fps while enabled | SpectrumJetson |
 | Camera X: problem | the camera reports one: stuck, wrong mode, USB | SpectrumJetson |
 | Camera X won't recover by itself: power-cycle the robot | its `health/state` is `gave-up` and it reports no problem | SpectrumJetson with `photonvision-81` |
-| Jetson input voltage dipped to N V | `inputVoltageLowestV` below `minJetsonInputV` (12 V; set it a few volts under your supply) | SpectrumJetson with `photonvision-82` |
+| Jetson 5 V input dipped to N V | `inputVoltageLowestV` below `minJetsonInputV` (4.75 V: it's the module's 5 V input after the carrier's regulator, about 4.95 V; the 12 V supply isn't measured) | SpectrumJetson with `photonvision-82` |
 | Jetson USB trouble (N): kernel line | `usbEvents` rose since robot code started | SpectrumJetson with `photonvision-82` |
 | Jetson Ethernet link dropped N time(s) | `ethCarrierChanges` rose by 2 or more: its cable or the switch port | SpectrumJetson with `photonvision-82` |
 | Jetson rebooted | `bootId` changed | SpectrumJetson with `photonvision-82` |

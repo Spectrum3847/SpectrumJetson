@@ -567,7 +567,7 @@ Robot-side use is in [issue #10](https://github.com/Spectrum3847/2026-FM-SystemC
 | `gpuLoadPct` | double | `/sys/devices/platform/bus@0/17000000.gpu/load` (per mille) |
 | `cpuTempC`, `gpuTempC`, `tjTempC`, `socTempC` | double | thermal zones `cpu-`, `gpu-`, `tj-thermal`; hottest of `soc0..2-thermal` |
 | `fanRpm` | double | hwmon `pwm_tach` `rpm` |
-| `powerW`, `cpuGpuPowerW`, `socPowerW` | double | INA3221 rails `VDD_IN` (board input), `VDD_CPU_GPU_CV`, `VDD_SOC` (mV x mA) |
+| `powerW`, `cpuGpuPowerW`, `socPowerW` | double | INA3221 rails `VDD_IN` (the module's 5 V input), `VDD_CPU_GPU_CV`, `VDD_SOC` (mV x mA) |
 | `jpegDecoder` | string | `nvjpg` or `libjpeg-turbo` (the decoder in use) |
 | `jpegHardwareOff` | boolean | the hardware decoder was switched off (a check differed, or CUDA failed) |
 | `jpegChecksOk`, `jpegChecksDiffer` | integer | hardware-vs-CPU frame checks since start |
@@ -593,12 +593,12 @@ Robot-side use is in [issue #10](https://github.com/Spectrum3847/2026-FM-SystemC
 
 | Topic | Type | Every | Source |
 |---|---|---|---|
-| `inputVoltageV`, `inputVoltageMinV`, `inputVoltageLowestV` | double | 1 s | INA3221 `VDD_IN` voltage: latest, lowest in the last second (sampled every 20 ms), lowest since PhotonVision started. A dip below 12 V is also logged. The chip averages over a few ms, so a shorter dip can be missed. |
+| `inputVoltageV`, `inputVoltageMinV`, `inputVoltageLowestV` | double | 1 s | INA3221 `VDD_IN` voltage: latest, lowest in the last second (sampled every 20 ms), lowest since PhotonVision started. That's the module's 5 V input after the carrier board's regulator, about 4.95 V; the carrier's 12 V input has no sensor. A dip below 4.75 V is also logged (`photonvision-85`; it was 12 V, so every reading was logged as a dip). The chip averages over a few ms, so a shorter dip can be missed. |
 | `usbEvents`, `lastUsbEvent` | integer, string | 1 s | Kernel USB trouble since start, and the latest line: `USB disconnect`, `disabled by hub (EMI?)`, `device descriptor read`, `unable to enumerate`, over-current, bandwidth, uvcvideo and xHCI errors (`UsbTrouble`). These lines also go to PhotonVision's log at INFO (they were DEBUG). |
 | `ethInterface`, `ethLinkUp`, `ethSpeedMbps`, `ethCarrierChanges` | string, boolean, integer, integer | 1 s | The wired link (`/sys/class/net/<if>`). Two carrier changes = one link drop: its cable or the switch port, not the NT server. |
 | `ntDisconnects` | integer | 1 s | NetworkTables disconnects PhotonVision has seen |
 | `bootId`, `uptimeSeconds` | string, double | once, 1 s | `/proc/sys/kernel/random/boot_id`, `/proc/uptime`: a reboot changes the boot ID, a reconnect doesn't |
-| `clockSource`, `clockLastJumpSeconds` | string, double | 1 s | `robot` (set from `/photonvision/clock/unixMs`), `internet` (NTP) or `unset` (still the date restored at boot); the last jump (`RobotClockSync`) |
+| `clockSource`, `clockLastJumpSeconds` | string, double | 1 s | `robot` (set from `/photonvision/clock/unixMs`, or checked against it and within 1 s: `photonvision-84`, so it reads `robot` after a PhotonVision restart too), `internet` (NTP) or `unset` (still the date restored at boot); the last jump (`RobotClockSync`, 0 if the clock was already right) |
 | `cpuUtilPct`, `ramUsedPct` | double | 1 s | `/proc/stat` (busy share since the last second), `/proc/meminfo` (total minus available) |
 | `ssdTempC` | double | 1 s | hwmon `nvme` |
 | `fsErrors`, `settingsReadOnly`, `scratchReadOnly` | integer, boolean, boolean | 1 s | ext4 `errors_count` summed over mounted partitions; `/proc/mounts`. Scratch is read-only on purpose in quiet mode; settings never should be. |
@@ -880,6 +880,74 @@ only goes out when it changes.
   Afterwards the health check passed: both cameras streaming 1280x800 MJPG as set, NVJPG 242
   frames/s with checks ok, 122 fps each.
 - **Unit tests:** `StuckCameraWatchdogTest` 5/5 and `DirectDecodeTest` 4/4.
+
+### USB drops: per-port recovery in about 3 s (2026-10-29, `photonvision-84`)
+
+Found on the robot with both Thriftiest Cams on the usbrecov firmware
+([THRIFTIEST-CAM-FIRMWARE.md](THRIFTIEST-CAM-FIRMWARE.md)), using two new tests:
+`tests/usb-port-glitch/run.sh PORT disable|remove|reset` (one camera's port: disabled at the hub,
+as TXMAN1 Q13's "disabled by hub (EMI?)"; the camera forgotten by the kernel; a port reset) and
+`tests/usb-recovery-bench/run.sh` (each of those on each camera, plus `tests/usb-hub-reset`).
+
+- **What didn't work before.**
+  - **The USB reset failed.** `photonvision-29`'s reset is the device's sysfs `authorized` 0/1. After
+    a port drop the camera stays registered but unusable (`can't set config #1, error -71`), and
+    `authorized` fails the same way ("Protocol error"), every 30 s, forever.
+  - **A camera gone from USB was only given up on** (after 10 s).
+  - **cscore could stay stuck after the camera came back.** If it reopened the camera in the second
+    after a power-up, while the camera answers USB but its video controls still return -71, it
+    couldn't set the format, then repeated "could not queue buffer 0" every 2 s on a dead handle and
+    never opened the new device. Only a PhotonVision restart fixed it.
+- **What `photonvision-84` does.**
+  - **Escalates to the port's power.** The first reset since the last frame is still the gentle one.
+    A later one, a failed one, or one for a camera gone from USB switches its hub port's power off
+    and on (`ClearPortFeature`/`SetPortFeature(PORT_POWER)` through usbdevfs, from a small Python
+    snippet: Java can't issue the ioctl). The carrier's 5 V stays on, but the hub drops the link and
+    the kernel enumerates the camera from scratch about 0.6 s later (the hub's own power-good wait
+    is 500 ms). The other cameras on the hub aren't touched.
+  - **Reopens in cscore** once the device node is back plus 300 ms (`CameraServerJNI.setUsbCameraPath`,
+    what `UsbCamera.setPath` calls: it closes and reopens even with the same path). Reopening only if
+    no frame had come 1.2 s later was tried: cscore rarely came back by itself first, so it was
+    0.2-0.4 s slower.
+  - **Acts sooner.** Tuned on the robot until it stopped being worth it:
+
+    | Wait | Before | Now |
+    | --- | --- | --- |
+    | No usable frames, before a reconnect | 3 s | 0.75 s |
+    | After the reconnect, before a USB reset | 5 s | 0.5 s |
+    | Disconnected with the device still there, before a reset | 5 s | 1 s |
+    | Gone from USB, before a port power toggle | never (gave up at 10 s) | 0.5 s |
+    | Between USB resets | 30 s | 5 s |
+    | USB resets before giving up | 4 | 6 |
+    | `authorized` off / port power off | 1 s / - | 0.3 s / 0.1 s |
+
+    Detection stays at 0.75 s: a video-mode change pauses frames for 0.3-0.6 s, and a shorter wait
+    would reconnect cameras that are fine. A pause in reading the camera (robot code disabled it,
+    the vision thread held up) still restarts the clock (`photonvision-66`).
+- **Result** (`tests/usb-recovery-bench`, both cameras, 2-3 rounds of each setting; every drop came
+  back by itself). Seconds until the camera streams again:
+
+  | Drop | Before | After |
+  | --- | --- | --- |
+  | Port disabled at the hub | never | 2.9-3.5 |
+  | Camera gone from USB | never | 2.1-2.7 |
+  | Port reset | 1.0 | 1.0 |
+  | Whole hub reset (from the hub coming back) | 2.2-2.5 (never with one camera wedged) | 2.2-2.4 |
+
+  With the factory or published firmware none of this helps: the camera wedges (`-110` on every
+  descriptor read) and only a replug brings it back.
+- **Not tested:** a real EMI or cable-shake drop (the kernel didn't log "disabled by hub (EMI?)" for
+  a port disabled on request), and the robot enabled and driving.
+- **Tests:** `StuckCameraWatchdogTest` 13/13, at the new timings.
+
+**`photonvision-85`: two diagnostics fixes** (2026-10-29, from robot code's bench check).
+- **`clockSource` read `unset` with a correct clock** after a PhotonVision restart: it read `robot`
+  only once the clock had been set, which needs it to be more than 1 s off. Now it's also `robot`
+  when the clock has been checked against the robot's and agrees (`clockLastJumpSeconds` stays 0).
+- **The input voltage is the module's 5 V, not 12 V.** `VDD_IN` on the Orin Nano dev kit is the
+  module's input after the carrier board's regulator: about 4.95 V. The carrier's 12 V input has no
+  sensor. The dip warning was set at 12 V, so every reading was logged as a dip, every 5 s. It's
+  4.75 V now (5 V -5%), and SpectrumVision's `minJetsonInputV` default with it.
 
 ### Field calibration page (2026-09-24, `photonvision-30`)
 

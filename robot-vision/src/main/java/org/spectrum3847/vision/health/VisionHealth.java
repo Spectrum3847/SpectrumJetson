@@ -53,8 +53,12 @@ public class VisionHealth {
     public double maxJetsonTempC = 92;
     public double startupGraceSeconds = 10;
     public double allRejectedAfterSeconds = 3;
-    /** The Jetson's input should hold steady: set this a few volts under your supply's output. */
-    public double minJetsonInputV = 12.0;
+    /**
+     * The Jetson module's 5 V input (VDD_IN, after the carrier board's regulator: about 4.95 V; the
+     * 12 V supply itself isn't measured). Below 4.75 V (5 V -5%) the regulator is dropping out:
+     * a sagging battery or bad wiring to the carrier.
+     */
+    public double minJetsonInputV = 4.75;
     public double maxJetsonRamPct = 90;
 
     private final NetworkTable pv = NetworkTableInstance.getDefault().getTable("photonvision");
@@ -187,7 +191,7 @@ public class VisionHealth {
     private void updateDiagnostics(boolean pastGrace) {
         double lowest = inputLowest.get();
         if (!Double.isNaN(lowest) && lowest < minJetsonInputV) {
-            lowInputAlert.setText(String.format("Jetson input voltage dipped to %.1f V (power supply or wiring)", lowest));
+            lowInputAlert.setText(String.format("Jetson 5 V input dipped to %.2f V (power supply or wiring)", lowest));
             lowInputAlert.set(true);
         }
         long usb = usbEvents.get();

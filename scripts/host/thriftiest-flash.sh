@@ -9,8 +9,8 @@
 #        thriftiest-flash.sh dump PORT                # read a camera's flash into ~/thriftiest-backups
 #        thriftiest-flash.sh flash PORT FIRMWARE      # FIRMWARE: a .bin file, its URL, or a
 #                                                     # published version number such as 5.13
-# PORT is the USB port health-check.sh shows, e.g. 2.1. Robot disabled: the camera leaves
-# PhotonVision for about a minute. Flash one camera, check it, then the next.
+# PORT is the USB port health-check.sh shows, e.g. 2.1. Robot disabled: PhotonVision is stopped
+# for about a minute (every camera), then started again. Flash one camera, check it, then the next.
 #
 # Environment: JETSON (default 192.168.55.1, the USB-C cable; 10.85.15.15 on the robot),
 #              KEY (default ~/.ssh/jetson_ed25519; ssh's own keys if that file doesn't exist),
@@ -70,12 +70,21 @@ gain_report() {
     g=$(v4l2-ctl -d "$v" -l 2>/dev/null | grep -E "^ *gain " | sed "s/.*: //"); echo "  $p gain: ${g:-none}"; done'
 }
 
+# dump and flash take the camera away from PhotonVision, whose camera watchdog (photonvision-81)
+# resets a camera's USB port after 5 s without frames: mid-write that could leave the flash
+# half-written. So PhotonVision is stopped first and always started again, whatever happens.
+if [[ $cmd != list ]]; then
+  trap '"${REMOTE[@]}" "sudo -n systemctl start photonvision" && echo "PhotonVision started again"' EXIT
+fi
+stop_pv() { echo "==> Stopping PhotonVision (all cameras off until it's started again)"; "${REMOTE[@]}" "sudo -n systemctl stop photonvision"; }
+
 case $cmd in
 list)
   "${REMOTE[@]}" "$RUN list"
   gain_report ;;
 dump)
   out=dump-$port-$(date +%Y%m%d-%H%M%S).bin
+  stop_pv
   "${REMOTE[@]}" "$RUN dump --port $port ~/thriftiest-backups/$out" </dev/null
   "${SCP[@]}" "$JETSON_USER@$JETSON:thriftiest-backups/$out" "$BACKUPS/"
   echo "Saved $BACKUPS/$out" ;;
@@ -89,6 +98,7 @@ flash)
     read -r -p "Flash $name onto the camera on port $port? Robot disabled? [y/N] " ok
     [[ $ok == [yY]* ]] || die "not flashed"
   fi
+  stop_pv
   "${REMOTE[@]}" "$RUN flash --port $port ~/thriftiest-fw/$name --yes" </dev/null
   echo "==> After the update"
   sleep 5
