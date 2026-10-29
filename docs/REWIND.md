@@ -147,7 +147,7 @@ With no name it copies the newest recording; `--all` copies everything. Recordin
 On the robot network, set the address: `JETSON=10.85.15.15 scripts/host/rewind-pull.sh`.
 
 **For robotlog.spectrum3847.org:** `scripts/host/jetson-pull.sh` copies every recording,
-PhotonVision's logs and the system journal (one `journal/boot-N.json.gz` per boot, as JSON so each
+PhotonVision's logs and the system journal (one `journal/boot-<boot id>.json.gz` for every boot still in it, as JSON so each
 line keeps its boot and monotonic time) into `~/jetson-pull/<date>/`. Upload that folder with
 robotlog's `npm run import -- --team 8515 <folder>`. PhotonVision logs a `Clock mark:` line
 (`photonvision-80`) every 60 s and whenever the robot connects, disconnects or the time-sync offset
