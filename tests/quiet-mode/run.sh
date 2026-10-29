@@ -2,7 +2,7 @@
 # Quiet mode test (photonvision-56). Run ON THE JETSON, off the robot. A fake robot (tests/fake-robot)
 # plays a match: auto 5 s, teleop 5 s, disabled 20 s, then enabled 10 s, all with the field
 # attached. Checks:
-#   - quiet mode starts after the match ends, within 5 s,
+#   - quiet mode starts 20 s after the match ends (photonvision-83), not before and within 5 s more,
 #   - the scratch partition is then mounted read-only, and Rewind isn't recording,
 #   - the cameras keep running while quiet,
 #   - a recording someone asks for (Record now, as field calibration does) ends quiet mode and
@@ -42,13 +42,13 @@ findmnt -n /data/scratch >/dev/null || { echo "No scratch partition: run 10-data
 [[ -n $(state) ]] || { echo "PhotonVision's /api/robotState isn't answering"; exit 1; }
 ro && { echo "The scratch partition is already read-only: leave quiet mode first"; exit 1; }
 
-echo "== Fake match: fms-auto 5 s, fms-enabled 5 s, fms-disabled 30 s (a bench recording in it), fms-enabled 10 s"
-timeout -k 10 120 "$ROOT/tests/fake-robot/run.sh" fms-auto:5 fms-enabled:5 fms-disabled:30 fms-enabled:10 > "$LOG" 2>&1 &
+echo "== Fake match: fms-auto 5 s, fms-enabled 5 s, fms-disabled 60 s (a bench recording in it), fms-enabled 10 s"
+timeout -k 10 150 "$ROOT/tests/fake-robot/run.sh" fms-auto:5 fms-enabled:5 fms-disabled:60 fms-enabled:10 > "$LOG" 2>&1 &
 robot=$!
 
 # Watch 20 times a second until the fake robot finishes.
 t_disabled="" t_quiet="" t_ro="" t_enabled="" t_rw="" quiet_reason="" fps_while_quiet=""
-end=$((SECONDS + 150))
+end=$((SECONDS + 180))
 while kill -0 $robot 2>/dev/null && ((SECONDS < end)); do
   now=$(ms)
   # FakeRobot prints "phase <n> <state> <unix ms>" to the fake robot's own log.
@@ -77,7 +77,7 @@ wait $robot 2>/dev/null
 
 echo "== Results"
 check "quiet mode started after the match ended ($( [[ -n $t_quiet ]] && echo "$(( t_quiet - t_disabled )) ms after disable, reason: ${quiet_reason//_/ }" || echo never))" \
-      "[[ -n \$t_quiet ]] && (( t_quiet - t_disabled < 5000 ))"
+      "[[ -n \$t_quiet ]] && (( t_quiet - t_disabled >= 19000 && t_quiet - t_disabled < 25000 ))"
 check "the reason was the match ending" "[[ \$quiet_reason == *match* ]]"
 check "the scratch partition went read-only" "[[ -n \$t_ro ]]"
 check "nothing was writing to it while quiet" "[[ \${writers:-0} == 0 ]]"

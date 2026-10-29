@@ -70,10 +70,10 @@ check "labelled with the robot's mode (no-robot), not bench" "[[ \$name == *_no-
 check "files named for the recording and camera (photonvision-75)" \
   "sudo -n test -f \$dir/\${name}_session.json && sudo -n find \$dir -mindepth 2 -name \"\${name}_*_0000.mjpeg\" | grep -q ."
 
-echo "== 2. A fake match ends (fms-enabled 3 s, fms-disabled 20 s, then enabled 5 s); delete while quiet"
-timeout -k 10 90 "$ROOT/tests/fake-robot/run.sh" fms-enabled:3 fms-disabled:20 enabled:5 > "$LOG" 2>&1 &
+echo "== 2. A fake match ends (fms-enabled 3 s, fms-disabled 40 s, then enabled 5 s); delete while quiet"
+timeout -k 10 110 "$ROOT/tests/fake-robot/run.sh" fms-enabled:3 fms-disabled:40 enabled:5 > "$LOG" 2>&1 &
 robot=$!
-for _ in $(seq 1 60); do sleep 0.5; [[ $(quiet) == True ]] && ro && break; done
+for _ in $(seq 1 90); do sleep 0.5; [[ $(quiet) == True ]] && ro && break; done
 reply=$(rewind "{\"delete\": \"$name\"}")
 echo "  delete answered: $reply"
 check "refused in quiet mode, saying why" "[[ \$reply == 400* && \$reply == *quiet* ]]"
