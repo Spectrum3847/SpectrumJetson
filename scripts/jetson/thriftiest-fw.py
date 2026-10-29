@@ -16,7 +16,8 @@ flash profiles must match, two full backup reads must agree, every erase and 1 K
 read back, the whole flash is compared at the end, and on failure the touched sectors are put
 back. A backup of the flash is saved first (--backup-dir). See docs/THRIFTIEST-CAM-FIRMWARE.md.
 
-The camera drops out of PhotonVision while this runs (uvcvideo lets go of it) and comes back after.
+PhotonVision must be stopped first (its camera watchdog resets a camera that stops streaming);
+scripts/host/thriftiest-flash.sh does that and starts it again after.
 First used 2026-10-29 on both robot cameras: ~45 s each, and the camera left maintenance mode and
 restarted by itself. Needs pyusb: sudo apt install python3-usb, or from a laptop (the Jetson has no
 internet) scripts/host/thriftiest-flash.sh, which brings pyusb along.
@@ -545,6 +546,14 @@ def main():
             die("pyusb isn't installed: sudo apt install python3-usb")
         if os.geteuid() != 0:
             die("needs sudo (raw USB access)")
+    # PhotonVision's camera watchdog (photonvision-81) resets the USB port of a camera that stops
+    # streaming for 5 s while its USB device is still there: exactly what this tool does to it. A
+    # reset mid-read broke a flash on 2026-10-29 (before anything was written); mid-write it could
+    # leave the flash half-written. scripts/host/thriftiest-flash.sh stops it and starts it again.
+    if a.cmd in ("dump", "flash", "rename") or (a.cmd == "list" and a.identity):
+        if os.system("systemctl is-active --quiet photonvision") == 0:
+            die("PhotonVision is running, and its camera watchdog would reset the camera mid-operation:"
+                " sudo systemctl stop photonvision first (start it again after)")
     {"list": cmd_list, "check-image": cmd_check_image, "diff": cmd_diff, "dump": cmd_dump,
      "flash": cmd_flash, "rename": cmd_rename}[a.cmd](a)
 

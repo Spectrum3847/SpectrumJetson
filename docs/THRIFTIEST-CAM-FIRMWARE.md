@@ -10,12 +10,15 @@ see [CAMERA-OPTIONS.md](CAMERA-OPTIONS.md).
 
 ## Where we are (2026-10-29)
 
-Both robot cameras (orin-left on port 2.1, orin-right on 2.3) run the **published 5.13**, flashed from
-the Jetson without unplugging them. Both now have a `gain` control (16–128, default 32), stream
-1280x800 MJPEG at 120 fps, and pass `health-check.sh`.
+Both robot cameras were flashed from the Jetson without unplugging them. orin-left (port 2.1) runs
+the **published 5.13**. orin-right (port 2.3) runs the **unofficial "usbrecov" 5.13** (below), which
+**came back by itself after a USB hub reset, twice**, where the published 5.13 and the factory firmware
+stay stuck until replugged. Both have a `gain` control (16–128), stream 1280x800 MJPEG at 120 fps, and
+pass `health-check.sh`.
 
 Not checked yet: PhotonVision's Camera Gain slider on the new firmware, exposure retuning with gain,
-and `tests/usb-hub-reset/run.sh` (it can leave a Thriftiest Cam stuck until the robot is power-cycled).
+usbrecov over a longer run on the robot (and a real EMI drop, not a software hub reset), and
+`rename`.
 
 ## Update a camera (quick start)
 
@@ -34,7 +37,10 @@ saves the camera's whole flash first to `~/thriftiest-backups` on the Jetson, an
 those backups to `~/thriftiest-backups` on the laptop. A camera that already has the image is left
 alone ("Already up to date").
 
-What to expect: the camera leaves PhotonVision for about 45 s (uvcvideo lets go of it), switches into
+What to expect: **PhotonVision is stopped** while it works (every camera is off for about a minute) and
+started again after. Its camera watchdog (`photonvision-81`) resets the USB port of a camera that
+stops streaming for 5 s, which broke a flash mid-read on 2026-10-29; mid-write it could leave the flash
+half-written, so `thriftiest-fw.py` refuses to run while PhotonVision is up. The camera switches into
 ROM maintenance mode (it re-enumerates as `1bcf:0b12`), only the 4 KiB sectors that differ are
 rewritten, and it **restarts by itself**: no replug on either of our cameras. PhotonVision reopens
 it at its saved mode the moment it's back. Flash one camera, check it, then the next.
@@ -75,6 +81,9 @@ For a new release, or a modified image such as the "usbrecov" patch below:
 |---|---|---|---|---|
 | 2026-10-29 | orin-right (2.3) | factory 5.13, no gain | published 5.13 | 4 sectors, 43 s, restarted by itself; gain 16–128; health check READY |
 | 2026-10-29 | orin-left (2.1) | factory 5.13, no gain | published 5.13 | same as 2.3 |
+| 2026-10-29 | both | published 5.13 | (hub-reset test) | `run.sh` and `run.sh 1-2 10`: **both stuck** both times (`-110` on every descriptor read, "unable to enumerate", not in `lsusb`) until replugged |
+| 2026-10-29 | orin-right (2.3) | published 5.13 | usbrecov 5.13 | 1 sector (0x15000), restarted by itself. A first try failed mid-read when PhotonVision's watchdog reset the camera (nothing written); with PhotonVision stopped it worked |
+| 2026-10-29 | 2.3 usbrecov, 2.1 published (control) | | (hub-reset test) | `run.sh`: **2.3 streaming again at 22.8 s by itself**, 2.1 stuck. `run.sh 1-2 10`: **2.3 at 21.5 s**, 2.1 stuck. 2.3 enumerated on its first try with no errors; the ~20 s is the hub retrying the stuck 2.1 first. 2.1 needed a replug both times |
 
 ## Releases and images
 
@@ -97,9 +106,13 @@ Against the published image it differs in 11 bytes:
 
 The factory dump is kept with the backups (`port2.3-orin-right-fw5.13-factory-20261029.bin`).
 
-**"ThriftiestCam-Firmware-v5.13-PATCH-usbrecov.bin"** (from a coach, sha256 `9a6eedb6…`): the published
-5.13 with 4 bytes changed (two JNZ → NOP at 0x15037/0x1503D), meant to help recover from USB resets.
-Unverified and not from Thrifty Bot: a spare camera only, after the published 5.13.
+**"ThriftiestCam-Firmware-v5.13-PATCH-usbrecov.bin"** (from a coach, sha256
+`9a6eedb66b30c18e741903aa3733d56c0f7c2159ff42d03b41ee04a38aa690a9`, 111,729 bytes): the published 5.13
+with 4 bytes changed, `70 1e` → `00 00` at 0x15037 and `70 18` → `00 00` at 0x1503D (two 8051 `JNZ`
+branches replaced by `NOP`s, so the code they skipped always runs). Meant to let the camera recover
+from a USB reset, and in our hub-reset tests it did (test log). Not from Thrifty Bot, and we don't know
+what else those branches guard: on orin-right only, until it has run on the robot for a while.
+Going back: `scripts/host/thriftiest-flash.sh flash 2.3 5.13`.
 
 ## How the camera is updated (found 2026-10-29)
 
