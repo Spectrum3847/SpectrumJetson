@@ -217,17 +217,13 @@ for intf in /sys/bus/usb/drivers/uvcvideo/*:1.0; do
       fail "$name is streaming ${actual} ${pixfmt}, but PhotonVision set ${want% *}: the detector gets an upscaled image (restart PhotonVision)"
     else pass "$name streaming ${actual} ${pixfmt}${want:+, as set}"; fi
   fi
-  # Thriftiest Cam firmware 5.13 (experimental, 2026-09-26) restores the sensor's gain control,
-  # which older firmware doesn't report. So no gain control = not updated (docs/THRIFTIEST-CAM-FIRMWARE.md).
-  # bcdDevice is printed too, so we can learn which revision value 5.13 reports.
-  if [[ -n $vdev ]]; then
+  # Thriftiest Cam (1bcf:28c5) firmware is its USB bcdDevice: 0x0513 = 5.13, which restores gain.
+  # Update with thriftiest-fw.py (docs/THRIFTIEST-CAM-FIRMWARE.md).
+  if [[ $(cat "$dev/idVendor" 2>/dev/null):$(cat "$dev/idProduct" 2>/dev/null) == 1bcf:28c5 ]]; then
     rev=$(cat "$dev/bcdDevice" 2>/dev/null)
-    vid=$(cat "$dev/idVendor" 2>/dev/null)
-    if v4l2-ctl -d "$vdev" -l 2>/dev/null | grep -qE '^ *gain '; then
-      pass "${name:-$hubport}: USB rev ${rev:-?}, has gain control"
-    elif [[ $vid != 32e4 ]]; then   # 32e4 = the bench Global Shutter / colour cameras
-      warn "${name:-$hubport}: USB rev ${rev:-?}, no gain control: Thriftiest Cam firmware older than 5.13? (docs/THRIFTIEST-CAM-FIRMWARE.md)"
-    fi
+    fw=$((16#${rev:0:2})).${rev:2:2}
+    if [[ $((16#${rev:-0})) -ge $((16#0513)) ]]; then pass "${name:-$hubport}: Thriftiest Cam firmware $fw"
+    else warn "${name:-$hubport}: Thriftiest Cam firmware $fw, 5.13 is out (sudo scripts/jetson/thriftiest-fw.py flash --port $hubport ...)"; fi
   fi
 done
 if [[ $cams -lt $EXPECT ]]; then fail "$cams camera(s) found, expected $EXPECT"; fi

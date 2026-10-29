@@ -323,7 +323,7 @@ Both cameras use the same PhotonVision settings. Each one needs its own calibrat
 - Type: **AprilTagCuda**
 - Resolution: **1280x800 at 120 FPS, MJPEG**. Don't use YUYV, which only manages 5 fps at this resolution.
 - Auto Exposure off, Exposure **50** (5 ms), Brightness 100
-- **Camera Gain:** the slider appears since `photonvision-21` (upstream's Thriftiest Cam support), but our cameras' firmware reports no gain control, so it probably does nothing. Thriftiest Cam firmware 5.13 (experimental) restores gain: see [docs/THRIFTIEST-CAM-FIRMWARE.md](docs/THRIFTIEST-CAM-FIRMWARE.md). Test it before relying on it ([docs/UPSTREAM-PORT.md](docs/UPSTREAM-PORT.md)).
+- **Camera Gain:** the slider appears since `photonvision-21` (upstream's Thriftiest Cam support), but our cameras' firmware reports no gain control, so it probably does nothing. Thriftiest Cam firmware 5.13 (experimental) restores gain, and can be flashed from the Jetson: see [docs/THRIFTIEST-CAM-FIRMWARE.md](docs/THRIFTIEST-CAM-FIRMWARE.md). Test it before relying on it ([docs/UPSTREAM-PORT.md](docs/UPSTREAM-PORT.md)).
 - AprilTagCuda tab: decision margin cutoff **15**
 - Low Latency Mode **off**
 - Processing Mode **3D** and **multi-tag on** (Output tab), once the camera is calibrated. The robot's pose code needs both.
