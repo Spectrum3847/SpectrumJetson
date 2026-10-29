@@ -54,7 +54,28 @@ Chief Delphi background: [object detection camera, 2026](https://www.chiefdelphi
 [PhotonVision object cameras](https://www.chiefdelphi.com/t/photonvision-object-cameras/470053),
 [Arducam housings](https://www.chiefdelphi.com/t/housing-for-arducam-global-shutter-camera/441822).
 
-## AprilTag camera alternative: SWYFT USB Camera vs Thriftiest Cam
+## AprilTag cameras we have or are getting
+
+Three options: Thriftiest Cam (on the robot now), ThriftyCam (2 on order), SWYFT USB Camera (not bought).
+
+### ThriftyCam (USB 3, 2 on order)
+
+[Product](https://www.thethriftybot.com/products/thriftycam), [docs](https://docs.thethriftybot.com/electrical/thriftycam/latest/overview).
+$120. OmniVision **OG02B1B**, 2 MP (1600x1304) **mono** global shutter, 60 fps at full resolution over
+**USB 3.0**, USB-C with a locking cable (TTB-0243) included, 80° lens pre-installed (92° available).
+USB ID **`05c8:0a00`** (from Thrifty Config's code; product string "USB 2.0 Camera").
+
+- **No firmware published** (2026-10-29): Thrifty Bot's firmware page covers only the Thriftiest Cam, and
+  Thrifty Config only knows the ThriftyCam for calibration: no firmware or name/serial tools for it.
+  Different bridge chip from the Thriftiest (not Sunplus), so `thriftiest-fw.py` doesn't apply.
+- **Why it's interesting:** on USB 3 it doesn't use the shared USB 2.0 budget the Thriftiest Cams fill,
+  and it has more pixels (longer tag range). Thrifty Bot says up to 5 per Jetson Orin.
+- **To check when they arrive:** `lsusb -t` (5000M on a USB 3 port), `v4l2-ctl --list-formats-ext`
+  (MJPEG or only YUYV/GREY at 1600x1304; our hardware JPEG decoding only helps with MJPEG),
+  `--list-ctrls` (gain, minimum exposure), whether every unit has the same serial (likely, as with
+  the Thriftiest), detector timing at 1600x1304, and `tests/usb-hub-reset/run.sh`.
+
+### SWYFT USB Camera vs Thriftiest Cam
 
 [SWYFT USB Camera](https://swyftrobotics.com/electrical/swyft-usb-camera) ($49.99, cable $4.99).
 Same sensor (OV9281), different USB bridge chip, so different firmware, tools and USB behaviour.

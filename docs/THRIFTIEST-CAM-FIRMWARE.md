@@ -5,6 +5,9 @@ Thrifty Bot publishes Thriftiest Cam firmware at
 Check that page for new releases: Thrifty Bot is now shipping updates, so a fix for the
 "stuck after a USB hub reset" problem (README, Known issues) may come this way.
 
+The **ThriftyCam** (USB 3, OG02B1B, `05c8:0a00`) is a different camera with no published firmware;
+see [CAMERA-OPTIONS.md](CAMERA-OPTIONS.md).
+
 ## Releases
 
 | Version | Date | Status | Notes | Download |
