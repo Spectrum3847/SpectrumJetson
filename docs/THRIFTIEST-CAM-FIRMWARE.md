@@ -10,15 +10,16 @@ see [CAMERA-OPTIONS.md](CAMERA-OPTIONS.md).
 
 ## Where we are (2026-10-29)
 
-Both robot cameras were flashed from the Jetson without unplugging them. orin-left (port 2.1) runs
-the **published 5.13**. orin-right (port 2.3) runs the **unofficial "usbrecov" 5.13** (below), which
-**came back by itself after a USB hub reset, twice**, where the published 5.13 and the factory firmware
-stay stuck until replugged. Both have a `gain` control (16–128), stream 1280x800 MJPEG at 120 fps, and
-pass `health-check.sh`.
+Both robot cameras (orin-left on port 2.1, orin-right on 2.3) run the **unofficial "usbrecov" 5.13**
+(below), flashed from the Jetson without unplugging them. It **comes back by itself after a USB hub
+reset**, where the published 5.13 and the factory firmware stay stuck until replugged; with
+PhotonVision's port power toggle (`photonvision-84`) a dropped port is back in about 3 s. Both have
+a `gain` control (16–128), stream 1280x800 MJPEG at 120 fps, and pass `health-check.sh`. Neither
+camera reset or dropped off USB by itself in the hours of testing (every USB event was a test, a
+flash or a replug), but that was on the bench, mostly with the robot disabled.
 
 Not checked yet: PhotonVision's Camera Gain slider on the new firmware, exposure retuning with gain,
-usbrecov over a longer run on the robot (and a real EMI drop, not a software hub reset), and
-`rename`.
+usbrecov on a driving robot and through a real EMI or cable-shake drop, and `rename`.
 
 ## Update a camera (quick start)
 
@@ -84,6 +85,9 @@ For a new release, or a modified image such as the "usbrecov" patch below:
 | 2026-10-29 | both | published 5.13 | (hub-reset test) | `run.sh` and `run.sh 1-2 10`: **both stuck** both times (`-110` on every descriptor read, "unable to enumerate", not in `lsusb`) until replugged |
 | 2026-10-29 | orin-right (2.3) | published 5.13 | usbrecov 5.13 | 1 sector (0x15000), restarted by itself. A first try failed mid-read when PhotonVision's watchdog reset the camera (nothing written); with PhotonVision stopped it worked |
 | 2026-10-29 | 2.3 usbrecov, 2.1 published (control) | | (hub-reset test) | `run.sh`: **2.3 streaming again at 22.8 s by itself**, 2.1 stuck. `run.sh 1-2 10`: **2.3 at 21.5 s**, 2.1 stuck. 2.3 enumerated on its first try with no errors; the ~20 s is the hub retrying the stuck 2.1 first. 2.1 needed a replug both times |
+| 2026-10-29 | orin-left (2.1) | published 5.13 | usbrecov 5.13 | 1 sector, restarted by itself |
+| 2026-10-29 | both usbrecov | | (hub-reset test) | **PASS**: both streaming again 2.2 s and 2.5 s after the hub came back, detectors at 3.4 s |
+| 2026-10-29 | both usbrecov, PhotonVision with `photonvision-84` | | `tests/usb-recovery-bench` | every drop came back by itself: port disabled 2.9-3.5 s, gone from USB 2.1-2.7 s, port reset 1.0 s, hub reset 2.2-2.4 s |
 
 ## Releases and images
 

@@ -11,10 +11,12 @@
 #                  hub does on a signal error, and the kernel finds it and re-enables it (default)
 #         reset    a port reset of the camera (USBDEVFS_RESET), as the kernel and PhotonVision's
 #                  watchdog do
+#         remove   the kernel forgets the camera (sysfs remove): it's gone from USB until something
+#                  makes the hub enumerate the port again (PhotonVision's port power toggle)
 #   WAIT: seconds to wait for it to stream again (default 60)
 # Exit 0 if the camera streams again by itself within WAIT.
 set -uo pipefail
-port=${1:?usage: $0 PORT [disable|reset] [WAIT]}
+port=${1:?usage: $0 PORT [disable|reset|remove] [WAIT]}
 [[ $port == *-* ]] || port=1-$port
 sudo -n python3 - "$port" "${2:-disable}" "${3:-60}" <<'PY'
 import fcntl, json, os, re, struct, subprocess, sys, time, urllib.request, ctypes
@@ -58,6 +60,9 @@ t0 = time.time()
 if kind == "disable":
     print(f"ClearPortFeature(PORT_ENABLE) on hub {hub} port {hubport}")
     hub_request(0x23, 1, 1, int(hubport))   # CLEAR_FEATURE, PORT_ENABLE (1), port
+elif kind == "remove":
+    print(f"sysfs remove of {port}")
+    open(dev + "/remove", "w").write("1")
 elif kind == "reset":
     print(f"USBDEVFS_RESET on {port}")
     fd = os.open(node(dev), os.O_WRONLY)
