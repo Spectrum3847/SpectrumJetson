@@ -23,7 +23,6 @@ internet) scripts/host/thriftiest-flash.sh, which brings pyusb along.
 """
 import argparse
 import datetime
-import json
 import os
 import sys
 import time
