@@ -3,6 +3,7 @@
 
   sudo python3 thriftiest-fw.py list [--identity]          # every Thriftiest Cam: port, firmware (, name)
   sudo python3 thriftiest-fw.py check-image FILE.bin       # what a firmware file is (no camera needed)
+  python3 thriftiest-fw.py diff A.bin B.bin               # bytes that differ between two images/dumps
   sudo python3 thriftiest-fw.py dump --port 2.1 OUT.bin    # read the camera's flash (256 KiB)
   sudo python3 thriftiest-fw.py flash --port 2.1 FILE.bin --yes
   sudo python3 thriftiest-fw.py rename --port 2.1 --name TopLeft --serial TL1 --yes
@@ -16,7 +17,9 @@ read back, the whole flash is compared at the end, and on failure the touched se
 back. A backup of the flash is saved first (--backup-dir). See docs/THRIFTIEST-CAM-FIRMWARE.md.
 
 The camera drops out of PhotonVision while this runs (uvcvideo lets go of it) and comes back after.
-Needs pyusb: sudo apt install python3-usb
+First used 2026-10-29 on both robot cameras: ~45 s each, and the camera left maintenance mode and
+restarted by itself. Needs pyusb: sudo apt install python3-usb, or from a laptop (the Jetson has no
+internet) scripts/host/thriftiest-flash.sh, which brings pyusb along.
 """
 import argparse
 import datetime
@@ -340,6 +343,12 @@ def write_flash(port, make_candidate, backup_dir, label):
         print("Reading the camera (normal mode)…")
         normal = s.read(0, NORMAL_READ_LIMIT, progress=True)
         s.check_normal_profile()
+        # Already there? Checked here, so a camera that needs nothing never enters maintenance mode.
+        pad = bytes(FLASH_SIZE - NORMAL_READ_LIMIT)
+        pre = bytes(make_candidate(normal + pad))
+        if pre == normal + pad:
+            print("Already up to date: nothing to write.")
+            return
         print("Switching to maintenance mode…")
         s.poke_maintenance(MAINT_ENTER)
     finally:
@@ -347,6 +356,7 @@ def write_flash(port, make_candidate, backup_dir, label):
     dev = wait_for(full_port, PID_MAINT, 20) or die("camera didn't come back in maintenance mode: replug it and retry")
     s = Session(dev)
     restored = False
+    nothing = False
     try:
         s.check_maint_profile()
         print("Backing up the whole flash (twice)…")
@@ -365,7 +375,9 @@ def write_flash(port, make_candidate, backup_dir, label):
         cand = bytes(make_candidate(baseline))
         sectors = sorted({a - a % SECTOR for a in range(FLASH_SIZE) if baseline[a] != cand[a]})
         if not sectors:
-            print("Already up to date: nothing to write.")
+            print("Already up to date: nothing to write. Restarting the camera…")
+            s.poke_maintenance(MAINT_LEAVE)
+            nothing = True
             return
         if s.flash_status() != 0:
             die("flash protection bits set; nothing written")
@@ -401,6 +413,8 @@ def write_flash(port, make_candidate, backup_dir, label):
         s.poke_maintenance(MAINT_LEAVE)
     finally:
         s.close()
+        if nothing:
+            wait_for(full_port, PID, 8) or print("The camera didn't restart on its own: replug it or power-cycle the robot.")
     dev = wait_for(full_port, PID, 8)
     if not dev:
         print("The camera didn't restart on its own: unplug it and plug it back in (same port) "
@@ -480,6 +494,28 @@ def cmd_rename(a):
     write_flash(a.port, lambda base: with_identity(base, a.name, a.serial), a.backup_dir, "identity")
 
 
+def cmd_diff(a):
+    x, y = open(a.a, "rb").read(), open(a.b, "rb").read()
+    n = min(len(x), len(y))
+    diffs = [i for i in range(n) if x[i] != y[i]]
+    ranges = []
+    for i in diffs:
+        if ranges and i <= ranges[-1][1] + 16:
+            ranges[-1][1] = i
+        else:
+            ranges.append([i, i])
+    for lo, hi in ranges:
+        print("0x%05x-0x%05x %4d bytes  %s | %s" % (lo, hi, hi - lo + 1, x[lo:hi + 1][:16].hex(), y[lo:hi + 1][:16].hex()))
+    print("%d byte(s) differ in %d range(s) over the first %d bytes (%s: %d bytes, %s: %d bytes)"
+          % (len(diffs), len(ranges), n, a.a, len(x), a.b, len(y)))
+
+
+def default_backup_dir():
+    """~/thriftiest-backups of the user who ran sudo, not root's."""
+    user = os.environ.get("SUDO_USER")
+    return os.path.join(os.path.expanduser("~" + user) if user else os.path.expanduser("~"), "thriftiest-backups")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -488,6 +524,9 @@ def main():
                    help="also read each camera's stored name/serial (drops it from PhotonVision for a moment)")
     c = sub.add_parser("check-image")
     c.add_argument("image")
+    c = sub.add_parser("diff")
+    c.add_argument("a")
+    c.add_argument("b")
     c = sub.add_parser("dump")
     c.add_argument("--port", required=True)
     c.add_argument("out")
@@ -495,19 +534,19 @@ def main():
         c = sub.add_parser(name)
         c.add_argument("--port", required=True, help="USB port as health-check.sh shows it, e.g. 2.1")
         c.add_argument("--yes", action="store_true")
-        c.add_argument("--backup-dir", default=os.path.expanduser("~/thriftiest-backups"))
+        c.add_argument("--backup-dir", default=default_backup_dir())
         if name == "flash":
             c.add_argument("image")
         else:
             c.add_argument("--name")
             c.add_argument("--serial")
     a = p.parse_args()
-    if a.cmd != "check-image":
+    if a.cmd not in ("check-image", "diff"):
         if usb is None:
             die("pyusb isn't installed: sudo apt install python3-usb")
         if os.geteuid() != 0:
             die("needs sudo (raw USB access)")
-    {"list": cmd_list, "check-image": cmd_check_image, "dump": cmd_dump,
+    {"list": cmd_list, "check-image": cmd_check_image, "diff": cmd_diff, "dump": cmd_dump,
      "flash": cmd_flash, "rename": cmd_rename}[a.cmd](a)
 
 

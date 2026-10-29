@@ -8,7 +8,75 @@ Check that page for new releases: Thrifty Bot is now shipping updates, so a fix 
 The **ThriftyCam** (USB 3, OG02B1B, `05c8:0a00`) is a different camera with no published firmware;
 see [CAMERA-OPTIONS.md](CAMERA-OPTIONS.md).
 
-## Releases
+## Where we are (2026-10-29)
+
+Both robot cameras (orin-left on port 2.1, orin-right on 2.3) run the **published 5.13**, flashed from
+the Jetson without unplugging them. Both now have a `gain` control (16–128, default 32), stream
+1280x800 MJPEG at 120 fps, and pass `health-check.sh`.
+
+Not checked yet: PhotonVision's Camera Gain slider on the new firmware, exposure retuning with gain,
+and `tests/usb-hub-reset/run.sh` (it can leave a Thriftiest Cam stuck until the robot is power-cycled).
+
+## Update a camera (quick start)
+
+From the laptop, wired to the Jetson, robot **disabled**. The Jetson has no internet, so
+`scripts/host/thriftiest-flash.sh` downloads the firmware and pyusb on the laptop, copies them and
+`scripts/jetson/thriftiest-fw.py` to `~/thriftiest-fw` on the Jetson, and runs the tool there:
+
+```bash
+export JETSON=10.85.15.15            # the robot (192.168.55.1 over the USB-C cable)
+scripts/host/thriftiest-flash.sh list              # each camera's port, firmware and gain control
+scripts/host/thriftiest-flash.sh flash 2.1 5.13    # a published version, a URL, or a .bin file
+```
+
+`flash` checks the image, asks before writing, flashes, and lists the cameras again. Every flash
+saves the camera's whole flash first to `~/thriftiest-backups` on the Jetson, and the script copies
+those backups to `~/thriftiest-backups` on the laptop. A camera that already has the image is left
+alone ("Already up to date").
+
+What to expect: the camera leaves PhotonVision for about 45 s (uvcvideo lets go of it), switches into
+ROM maintenance mode (it re-enumerates as `1bcf:0b12`), only the 4 KiB sectors that differ are
+rewritten, and it **restarts by itself**: no replug on either of our cameras. PhotonVision reopens
+it at its saved mode the moment it's back. Flash one camera, check it, then the next.
+
+On the Jetson directly (needs `sudo apt install python3-usb`, which needs internet):
+
+```bash
+sudo scripts/jetson/thriftiest-fw.py list [--identity]
+scripts/jetson/thriftiest-fw.py check-image FILE.bin
+scripts/jetson/thriftiest-fw.py diff A.bin B.bin           # which bytes differ (images or dumps)
+sudo scripts/jetson/thriftiest-fw.py dump --port 2.1 OUT.bin  # read 256 KiB of flash, writes nothing
+sudo scripts/jetson/thriftiest-fw.py flash --port 2.1 FILE.bin --yes
+sudo scripts/jetson/thriftiest-fw.py rename --port 2.1 --name TopLeft --serial TL1 --yes
+```
+
+**Going back:** flash the backup: `scripts/host/thriftiest-flash.sh flash 2.1 ~/thriftiest-backups/thriftiest-1-2.1-<date>-fw5.13.bin`.
+A backup is the camera's whole 512 KiB flash, so it puts back exactly what was there.
+
+**If it goes wrong:** the tool restores the sectors it touched when a write fails, and says whether
+it managed. A camera left in maintenance mode (`list` shows `IN MAINTENANCE MODE`) comes back with
+a replug or a power cycle; then run `flash` again. Keep it powered while it's writing.
+
+## Testing other firmware
+
+For a new release, or a modified image such as the "usbrecov" patch below:
+
+1. **Know what it changes.** `thriftiest-fw.py diff` it against the published 5.13 (or a camera's
+   dump). A small, explained diff is a lot less risky than an unknown image.
+2. **A spare camera first,** not a robot camera, unless the diff is understood.
+3. `flash`, then check: `list` (firmware and gain), `health-check.sh`, PhotonVision streams
+   1280x800 at 120 fps on an enabled robot, and whatever the firmware claims to fix
+   (`tests/usb-hub-reset/run.sh` for the stuck-camera problem).
+4. Add a row to the test log below, including anything that behaved differently from this doc.
+
+## Test log
+
+| Date | Camera (port) | Before | Flashed | Result |
+|---|---|---|---|---|
+| 2026-10-29 | orin-right (2.3) | factory 5.13, no gain | published 5.13 | 4 sectors, 43 s, restarted by itself; gain 16–128; health check READY |
+| 2026-10-29 | orin-left (2.1) | factory 5.13, no gain | published 5.13 | same as 2.3 |
+
+## Releases and images
 
 | Version | Date | Status | Notes | Download |
 |---|---|---|---|---|
@@ -16,9 +84,22 @@ see [CAMERA-OPTIONS.md](CAMERA-OPTIONS.md).
 
 Nothing in 5.13's notes mentions USB reconnection, so don't expect it to fix stuck cameras.
 
-**What 5.13 changes for us:** our current firmware reports no `gain` control (`v4l2-ctl -l`), so
-PhotonVision's Camera Gain slider was hidden (`photonvision-54`). With 5.13 it should come back by
-itself. Test it before relying on it: our tuning so far assumes fixed gain.
+**Factory firmware also says 5.13.** Our cameras shipped reporting `bcdDevice 0x0513` but without a
+gain control, so the version number alone doesn't tell the two apart; a `gain` control does
+(`health-check.sh` and `thriftiest-flash.sh list` check it). Both cameras' factory flash was the same.
+Against the published image it differs in 11 bytes:
+
+| Offset | Factory | Published | What it is |
+|---|---|---|---|
+| 0x05985, 0x0781d, 0x07844 | `15` | `17` | The Gain bit in the UVC Processing Unit's `bmControls` (0x157f vs 0x177f); 0x05985 is in the descriptor the camera reports |
+| 0x12308 (8 bytes), 0x126b0 (3 bytes) | | | Code or a table, presumably the gain handling |
+| 0x01f7f (3 bytes) | `0000ff` | `100080` | Just before the identity block: perhaps a checksum or build stamp |
+
+The factory dump is kept with the backups (`port2.3-orin-right-fw5.13-factory-20261029.bin`).
+
+**"ThriftiestCam-Firmware-v5.13-PATCH-usbrecov.bin"** (from a coach, sha256 `9a6eedb6…`): the published
+5.13 with 4 bytes changed (two JNZ → NOP at 0x15037/0x1503D), meant to help recover from USB resets.
+Unverified and not from Thrifty Bot: a spare camera only, after the published 5.13.
 
 ## How the camera is updated (found 2026-10-29)
 
@@ -31,52 +112,28 @@ From Thrifty Config 2027.0.0-beta.10's own code (it's an Electron app; the camer
 - Flashing is plain **UVC extension-unit control requests** (SET_CUR/GET_CUR on the vendor XU
   `63610682-5070-49ab-b8cc-b3855e8d221d`): latch an address, read/write 1 KiB blocks, erase 4 KiB sectors.
   To write, the camera is reset into ROM maintenance mode (register 0x20D8 = 0x5A; it re-enumerates
-  as 1bcf:0b12) and back (0x20D8 = 0xA5, which Thrifty Bot marks unverified: it may need a replug).
-- Thrifty Config already does this on **Linux and macOS through libusb**, detaching `uvcvideo` from the
-  camera while it works. Windows is the odd one out (needs a helper). So the Jetson can do it.
+  as 1bcf:0b12) and back (0x20D8 = 0xA5). Thrifty Bot marks the way back unverified; on our two
+  cameras it worked every time, with no replug.
+- Thrifty Config does this on **Linux and macOS through libusb**, detaching `uvcvideo` from the
+  camera while it works. Windows is the odd one out (needs a helper). Thrifty Config itself is
+  Windows/macOS only, so on the Jetson we use our own port of it.
 - fwupd has a `sunplus-camera` plugin, but it uses a different (DFU stream) path that Thrifty Config
   says this camera doesn't use, so we don't use fwupd.
 
+`thriftiest-fw.py` keeps Thrifty Config's safety checks: the controller and flash profiles must match,
+two full backup reads must agree, every erase and 1 KiB block is read back, the whole flash is
+compared at the end, the touched sectors are put back on failure, and the camera is re-read after it
+restarts.
+
 **The camera's USB name and serial number are stored in flash too** (the "TONY" block at 0x2000),
-and Thrifty Config can rewrite them. Firmware updates keep them. That means we could give each camera a
-**unique serial** and stop relying on USB ports to tell them apart (README: "Cameras are named after
-their USB port"). Not done yet: PhotonVision's matching would need checking first.
+and firmware updates keep them. `rename` can give each camera a **unique serial**, so calibrations
+could follow the camera instead of the USB port (README: "Cameras are named after their USB port").
+Not done yet: PhotonVision's matching would need checking first.
 
-## Updating from the Jetson
-
-`scripts/jetson/thriftiest-fw.py` is a Python port of that protocol and its safety checks (controller
-and flash profile checks, two matching backup reads, every erase and block read back, a full compare,
-restore of the touched sectors on failure, re-verify after restart). **Not yet run on a real camera:
-try it on a spare first.** Needs `sudo apt install python3-usb`.
-
-```bash
-# On the Jetson. Firmware version of every Thriftiest Cam (no camera is disturbed):
-sudo scripts/jetson/thriftiest-fw.py list
-# Check a downloaded firmware file:
-scripts/jetson/thriftiest-fw.py check-image ThriftiestCam-Firmware-v5.13.bin
-# Update one camera (port as health-check.sh shows it). Saves a full flash backup to ~/thriftiest-backups:
-sudo scripts/jetson/thriftiest-fw.py flash --port 2.1 ThriftiestCam-Firmware-v5.13.bin --yes
-# Give a camera its own name/serial:
-sudo scripts/jetson/thriftiest-fw.py rename --port 2.1 --name TopLeft --serial TL1 --yes
-```
-
-The camera drops out of PhotonVision during the update (~1 minute) and comes back after. Don't run it
-while the robot is enabled. If the camera doesn't restart by itself, unplug/replug it or power-cycle the
-robot (the tool waits 2 minutes and then verifies it). Keep it powered while it's writing.
-
-Update one camera first and run it on the robot for a while before doing the rest (it's experimental).
-Afterwards recheck its exposure, since gain behaviour changed.
-
-Thrifty Config (2027.0.0-beta.8 or newer, laptop) still works too: camera's **Configuration** tab →
-**Firmware** → **Select Firmware File** → **Update Firmware**.
-
-## Checking all cameras
-
-`scripts/jetson/health-check.sh` prints each Thriftiest Cam's firmware, and warns below 5.13. By hand:
-`cat /sys/bus/usb/devices/<port>/bcdDevice` (`0513` = 5.13), or `thriftiest-fw.py list`.
+Thrifty Config (2027.0.0-beta.8 or newer, laptop, camera plugged into the laptop) still works too:
+camera's **Configuration** tab → **Firmware** → **Select Firmware File** → **Update Firmware**.
 
 ## In the PhotonVision UI?
 
-Doable next: the Match Ready page can show each camera's firmware (bcdDevice, no camera access needed),
-and an "Update firmware" button could run `thriftiest-fw.py flash` on the Jetson with an uploaded `.bin`.
-Wait until the script has been proven on a real camera from the command line.
+Doable next: the Match Ready page can show each camera's firmware and whether it has gain (no camera
+access needed), and an "Update firmware" button could run `thriftiest-fw.py flash` with an uploaded `.bin`.
