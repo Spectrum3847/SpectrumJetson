@@ -210,6 +210,18 @@ for c in json.loads(sys.argv[1] or "[]"):
     if c["port"] == sys.argv[2] and c.get("variant"):
         print("%s\t%s" % ("yes" if c["recovers"] else "no", c["label"]))' "$FW_VARIANTS" "$1" 2>/dev/null
 }
+# Frames actually arriving, per USB port (1-2.4 -> fps), from PhotonVision's USB bandwidth API. A
+# camera can sit in the right video mode and send nothing: the Swyft on 2026-10-30, stuck for an
+# hour while this check still said "streaming 1280x800 MJPG, as set". Two looks, as
+# tests/usb-port-glitch does: the first only primes the frame-rate numbers.
+CAM_FPS=$(timeout 8 python3 -c 'import json, time, urllib.request
+get = lambda: json.load(urllib.request.urlopen("http://localhost:5800/api/usb/bandwidth", timeout=3))
+get(); time.sleep(1.5)
+for c in get().get("cameras", []):
+    # streaming: PhotonVision has it open (false for a deactivated camera); fps blank if unmeasured
+    fps = c.get("fps")
+    print("%s\t%s\t%s" % (c["port"], "yes" if c.get("streaming") else "no", "" if fps is None else "%.2f" % fps))' 2>/dev/null || true)
+cam_fps() { awk -F'\t' -v p="$1" '$1 == p { print $2 "\t" $3; exit }' <<<"$CAM_FPS"; }
 cams=0
 for intf in /sys/bus/usb/drivers/uvcvideo/*:1.0; do
   [[ -e $intf ]] || continue
@@ -238,7 +250,16 @@ for intf in /sys/bus/usb/drivers/uvcvideo/*:1.0; do
     if [[ -z $actual ]]; then warn "$name: couldn't read its video format (v4l2-ctl; is the user in the video group?)"
     elif [[ -n $want && ${want% *} != "$actual" ]]; then
       fail "$name is streaming ${actual} ${pixfmt}, but PhotonVision set ${want% *}: the detector gets an upscaled image (restart PhotonVision)"
-    else pass "$name streaming ${actual} ${pixfmt}${want:+, as set}"; fi
+    else
+      IFS=$'\t' read -r open fps <<<"$(cam_fps "$port")"
+      if [[ $open != yes ]]; then
+        pass "$name set to ${actual} ${pixfmt}${want:+, as set} (PhotonVision isn't streaming it: deactivated?)"
+      elif [[ -z $fps ]]; then
+        warn "$name set to ${actual} ${pixfmt}${want:+, as set}, but its frame rate is unknown (PhotonVision's USB bandwidth API didn't say)"
+      elif awk -v f="$fps" 'BEGIN { exit !(f < 1) }'; then
+        fail "$name is set to ${actual} ${pixfmt} but sends no frames (${fps} fps): power-cycle the robot, or replug it"
+      else pass "$name streaming ${actual} ${pixfmt}${want:+, as set}, ${fps%.*} fps"; fi
+    fi
   fi
   # Thriftiest Cam (1bcf:28c5) firmware: which variant (above), else from its USB bcdDevice (0x0513 =
   # 5.13) and whether it has a gain control (the factory 5.13 hasn't). docs/THRIFTIEST-CAM-FIRMWARE.md.
