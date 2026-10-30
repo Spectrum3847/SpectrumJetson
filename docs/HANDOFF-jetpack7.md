@@ -20,7 +20,9 @@ Off-season, for the 2027 season (starts January, first event March). The old SSD
 Saved on the laptop (Windows side) in `~/jetson-backup-20261030/jetson-settings-and-backups.tgz`
 (117 MB): `/data/settings` (PhotonVision's `photon.sqlite`, calibrations with images, field
 calibration, `spectrum/field-map.json`, the Thriftiest firmware files), `~/swyft-backups`,
-`~/thriftiest-backups`, `~/pv-backups`. Not saved: the scratch partition (8.4 GB: journals,
+`~/thriftiest-backups`, `~/pv-backups`. The calibrations themselves are also in this repository,
+[calibrations/](../calibrations/README.md) (SJ-TC01 1280x800; SJ-TC02 1280x800 and 320x240): import
+them on PhotonVision's Cameras page after the move. Not saved: the scratch partition (8.4 GB: journals,
 PhotonVision logs, Rewind recordings): pull with `jetson-pull.sh` / `rewind-pull.sh` if wanted.
 
 ## Flash (laptop booted into its Ubuntu 22.04)
