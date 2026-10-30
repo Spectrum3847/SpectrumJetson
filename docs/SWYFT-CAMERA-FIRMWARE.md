@@ -39,8 +39,9 @@ serial, Update). There it streams straight after, no replug. On the robot the se
 through the boot loader too (it lives in the flash), so a rename is a flash: `swyft-fw.py flash
 --serial`, then a robot power cycle.
 
-**After a flash on the robot, power-cycle the robot** (main breaker: a Jetson reboot doesn't cut USB
-power), or unplug the Swyft and plug it back in where the cable isn't glued. Out of the boot
+**After a flash on the robot, power-cycle the robot** (main breaker), or unplug the Swyft and plug it
+back in where the cable isn't glued. A Jetson reboot isn't enough: tested 2026-10-30, after a dump
+and a full `systemctl reboot` the Swyft came back at 0 fps (USB power stays on through a reboot). Out of the boot
 loader it enumerates and answers its controls but sends no frames until it loses power, and the
 Jetson's USB hub can't switch a port's power (ClearPortFeature(PORT_POWER) only drops the link).
 `swyft-fw.py` says so. The same after a `dump`: any trip through the boot loader does it. Tried
