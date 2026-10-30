@@ -949,6 +949,57 @@ as TXMAN1 Q13's "disabled by hub (EMI?)"; the camera forgotten by the kernel; a 
   sensor. The dip warning was set at 12 V, so every reading was logged as a dip, every 5 s. It's
   4.75 V now (5 V -5%), and SpectrumVision's `minJetsonInputV` default with it.
 
+### Cameras known by their serial, and how different their calibrations are (2026-10-29, `photonvision-86`)
+
+- **The problem.** Every Thriftiest Cam reports serial `01.00.00`, so PhotonVision identifies a USB
+  camera by its port (`PVCameraInfo.uniquePath()` keeps only `/dev/v4l/by-path` names). A swapped
+  cable silently swaps calibrations, and a camera swapped at an event needs recalibrating.
+- **The serial.** The camera keeps its USB product name and serial in flash (the "TONY" identity block;
+  [THRIFTIEST-CAM-FIRMWARE.md](THRIFTIEST-CAM-FIRMWARE.md)). `scripts/host/thriftiest-flash.sh rename
+  PORT SERIAL` stores a serial and nothing else: the firmware and the product name ("Thrifty",
+  which PhotonVision checks for a mismatched camera) are unchanged. udev then names the camera
+  `/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-TC01-video-index0`.
+- **`photonvision-86`.**
+  - **A camera with a serial of its own is known by its `by-id` name**, so cscore opens it in any port.
+    Only serials starting `SJ-` count: a factory serial can be shared by every camera of a model, and
+    a camera known by one would change identity when a second one is plugged in.
+  - **Saved cameras move to their serial at startup**: a saved camera still known by its port, whose
+    camera now has a serial, is re-pointed to it and saved, settings and calibrations included. Not if
+    another saved camera already has that serial (so a swap can't cross calibrations); a camera that
+    isn't plugged in moves at a later start.
+  - **The watchdog only resets its own camera's port.** It remembers the port a camera was last in;
+    once cameras can move, another camera can be there. Found on the robot: during a swap, one
+    camera's watchdog switched the other's port power off. Now a camera known by its serial resets a
+    port only if the device there has that serial (or the port is empty).
+  - `health-check.sh` and `usb-bandwidth.py` find a camera by its serial's `by-id` link, so they name
+    it in whatever port it's in.
+- **Tested on the robot.** Serials `SJ-TC01` (orin-left) and `SJ-TC02` (orin-right); PhotonVision
+  moved both cameras' settings and calibrations at startup. The cameras were then swapped between
+  ports 2.1 and 2.3, and then moved to 2.3 and 2.4 (a port neither had used): each came up with its
+  own name and calibration, health check READY. USB recovery (`photonvision-84`) is unchanged:
+  `tests/usb-recovery-bench` 3.3 / 2.3 / 1.0 / 2.2-2.4 s. Tests: `PVCameraInfoSerialTest` 3/3.
+  (`VisionSourceManagerTest` needs the targeting JNI, which the laptop build doesn't have, with or
+  without this patch.)
+- **How different are two cameras' calibrations?** Both robot cameras were calibrated at 1280x800 with
+  the same board (11x8, 30 mm), and fit well: 0.78 px (orin-left, 124 images) and 0.90 px (orin-right,
+  102 images) RMS reprojection error.
+
+  | | orin-left | orin-right | Difference |
+  | --- | --- | --- | --- |
+  | fx, fy | 734.6, 734.7 | 738.3, 738.5 | 0.5% |
+  | cx | 594.3 | 600.1 | 5.8 px |
+  | cy | 417.8 | 369.8 | **48 px** |
+
+  - **One camera's calibration on the other is off by 3.8° on average** (4.5° at worst): the same pixel's
+    ray, compared across the view. That's 13 cm at 2 m, 27 cm at 4 m, 40 cm at 6 m: too much to share.
+  - **The lens model is shared; the image centre isn't.** Orin-left's focal length and distortion with
+    orin-right's own image centre is off by only 0.19° on average (1.2° at the far edges). The 48 px is
+    each sensor's position behind its lens.
+  - So a "stock Thriftiest" calibration would need each camera's own image centre, which still takes a
+    calibration. Two cameras aren't enough to know the lens model holds across units: calibrate a spare
+    or two and compare before relying on it. Until then, a spare should be calibrated before an event,
+    with a serial stored, so swapping it in keeps its calibration.
+
 ### Field calibration page (2026-09-24, `photonvision-30`)
 
 A **Field Calibration** page in the web UI (`/#/fieldcal`) for the whole field calibration, done

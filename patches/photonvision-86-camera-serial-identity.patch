@@ -1,0 +1,214 @@
+diff --git a/photon-core/src/main/java/org/photonvision/vision/camera/PVCameraInfo.java b/photon-core/src/main/java/org/photonvision/vision/camera/PVCameraInfo.java
+index 96244b07..9a64dbd9 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/camera/PVCameraInfo.java
++++ b/photon-core/src/main/java/org/photonvision/vision/camera/PVCameraInfo.java
+@@ -111,6 +111,11 @@ public sealed interface PVCameraInfo {
+ 
+         @Override
+         public String uniquePath() {
++            // SpectrumJetson (photonvision-86): a camera with a serial of its own is known by its
++            // /dev/v4l/by-id path, so its settings and calibration follow it to any USB port.
++            // Every other camera by its port, as before: identical cameras share one serial.
++            var own = Arrays.stream(super.otherPaths).filter(PVCameraInfo::hasOwnSerial).sorted().findFirst();
++            if (own.isPresent()) return own.get();
+             return Arrays.stream(super.otherPaths)
+                     .sorted() // Must sort to ensure a consistent unique path as we can get more than one
+                     // by-path and their order changes at random?
+@@ -289,6 +294,17 @@ public sealed interface PVCameraInfo {
+         }
+     }
+ 
++    /**
++     * SpectrumJetson (photonvision-86): this /dev/v4l/by-id path names a camera by a serial of its
++     * own. Only serials we stored ("SJ-...", scripts/host/thriftiest-flash.sh rename) count: a
++     * factory serial can be shared by every camera of a model (each Thriftiest Cam's is
++     * "01.00.00"), and a camera known by one would change identity when a second one is plugged in.
++     * udev names it usb-VENDOR_PRODUCT_SERIAL-video-index0.
++     */
++    static boolean hasOwnSerial(String path) {
++        return path.contains("/by-id/") && path.contains("_SJ-") && path.endsWith("-video-index0");
++    }
++
+     public static PVCameraInfo fromUsbCameraInfo(UsbCameraInfo info) {
+         return new PVUsbCameraInfo(info);
+     }
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+index eda2a76c..a8db3197 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+@@ -120,7 +120,8 @@ public class USBFrameProvider extends CpuImageProcessor {
+             // USB resets; one gone from USB gives up (TXMAN1: nothing was tried for either).
+             boolean devicePresent =
+                     port != null
+-                            && java.nio.file.Files.exists(java.nio.file.Path.of("/sys/bus/usb/devices", port));
++                            && java.nio.file.Files.exists(java.nio.file.Path.of("/sys/bus/usb/devices", port))
++                            && portIsOurs(port); // photonvision-86
+             if (stuckWatchdog.notConnected(devicePresent) == StuckCameraWatchdog.Action.USB_RESET) {
+                 recoverUsb(
+                         String.format(
+@@ -302,6 +303,27 @@ public class USBFrameProvider extends CpuImageProcessor {
+         return usbPortCache;
+     }
+ 
++    /**
++     * SpectrumJetson (photonvision-86): the camera in this USB port is ours, as far as we can tell. A
++     * camera known by a serial of its own (its path is /dev/v4l/by-id/..._SJ-xxx-video-index0) can
++     * move to another port, and another camera can take the port we last saw it in: then the device
++     * there has a different serial. Found on the robot 2026-10-29: swapping two cameras' ports,
++     * one camera's watchdog switched the other's port power off. A camera known by its port, or a
++     * port with nothing in it, counts as ours.
++     */
++    private boolean portIsOurs(String port) {
++        String path = camera.getPath();
++        if (!path.contains("/by-id/") || !path.endsWith("-video-index0")) return true;
++        String name = java.nio.file.Path.of(path).getFileName().toString();
++        String serial = name.substring(name.lastIndexOf('_') + 1, name.length() - "-video-index0".length());
++        try {
++            var there = java.nio.file.Path.of("/sys/bus/usb/devices", port, "serial");
++            return !java.nio.file.Files.exists(there) || java.nio.file.Files.readString(there).strip().equals(serial);
++        } catch (Exception e) {
++            return true;
++        }
++    }
++
+     /** Test hook: /tmp/spectrum-camera-stuck-test lists camera names to treat as stuck. */
+     private boolean stuckTestActive() {
+         long now = System.nanoTime();
+@@ -375,6 +397,11 @@ public class USBFrameProvider extends CpuImageProcessor {
+             logger.error("Can't reset the camera (" + why + "): its USB port isn't known");
+             return;
+         }
++        if (!portIsOurs(port)) {
++            // photonvision-86: our camera has moved; another one is in the port we last saw it in.
++            logger.warn("Not resetting USB port " + port + " (" + why + "): another camera is in it now");
++            return;
++        }
+         boolean gentle = devicePresent && stuckWatchdog.usbResetsSinceFrame() <= 1;
+         if (!gentle || !usbReset(why, true)) {
+             portPowerCycle(port, gentle ? "the USB reset failed" : why);
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionSourceManager.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionSourceManager.java
+index f3836f0f..2f0f3394 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionSourceManager.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionSourceManager.java
+@@ -96,6 +96,7 @@ public class VisionSourceManager {
+      */
+     public synchronized void registerLoadedConfigs(Collection<CameraConfiguration> configs) {
+         logger.info("Registering loaded camera configs");
++        moveToOwnSerials(configs); // photonvision-86
+ 
+         final HashMap<String, CameraConfiguration> deserializedConfigs = new HashMap<>();
+ 
+@@ -141,6 +142,52 @@ public class VisionSourceManager {
+                         + " disabled VisionModules");
+     }
+ 
++    /**
++     * SpectrumJetson (photonvision-86): a saved camera known by its USB port whose camera now has a
++     * serial of its own (PVCameraInfo.hasOwnSerial) is re-pointed to that serial and saved, so it
++     * keeps its settings and calibration, now and wherever it's plugged in later. Only if no other
++     * saved camera already claims that serial: swapping two cameras' ports can't cross their
++     * calibrations. A camera that isn't plugged in now is moved at a later start.
++     */
++    private void moveToOwnSerials(Collection<CameraConfiguration> configs) {
++        List<PVCameraInfo> connected;
++        try {
++            connected = getConnectedCameras();
++        } catch (Exception e) {
++            logger.error("Couldn't list cameras to check for serials", e);
++            return;
++        }
++        for (var config : configs) {
++            var saved = config.matchedCameraInfo;
++            if (saved == null || saved.type() != CameraType.UsbCamera) continue;
++            String port = saved.uniquePath();
++            if (!port.contains("/by-path/")) continue;
++            for (var camera : connected) {
++                String own = camera.uniquePath();
++                if (!PVCameraInfo.hasOwnSerial(own) || !Arrays.asList(camera.otherPaths()).contains(port)) continue;
++                if (configs.stream().anyMatch(o -> o.matchedCameraInfo != null && o.matchedCameraInfo.uniquePath().equals(own))) {
++                    logger.warn(
++                            "Not moving "
++                                    + config.nickname
++                                    + " to "
++                                    + own
++                                    + ": another saved camera already has that serial");
++                    break;
++                }
++                logger.info(
++                        config.nickname
++                                + "'s camera has a serial of its own: it's now known as "
++                                + own
++                                + " instead of its USB port ("
++                                + port
++                                + "), and its settings and calibration go with it");
++                config.matchedCameraInfo = camera;
++                ConfigManager.getInstance().saveModule(config, config.uniqueName);
++                break;
++            }
++        }
++    }
++
+     /**
+      * Reactivate a previously created vision source
+      *
+diff --git a/photon-core/src/test/java/org/photonvision/vision/camera/PVCameraInfoSerialTest.java b/photon-core/src/test/java/org/photonvision/vision/camera/PVCameraInfoSerialTest.java
+new file mode 100644
+index 00000000..2b7055fc
+--- /dev/null
++++ b/photon-core/src/test/java/org/photonvision/vision/camera/PVCameraInfoSerialTest.java
+@@ -0,0 +1,55 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.vision.camera;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import org.junit.jupiter.api.Test;
++
++/** SpectrumJetson (photonvision-86): a camera with its own serial is known by it. */
++public class PVCameraInfoSerialTest {
++    private static final String PORT = "/dev/v4l/by-path/platform-3610000.usb-usb-0:2.3:1.0-video-index0";
++
++    private static PVCameraInfo camera(String... otherPaths) {
++        return new PVCameraInfo.PVUsbCameraInfo(2, "/dev/video2", "Thrifty: ", otherPaths, 7119, 10437);
++    }
++
++    @Test
++    public void ownSerialWins() {
++        var own = "/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-TC02-video-index0";
++        assertEquals(own, camera(own, PORT).uniquePath());
++        assertEquals(own, camera(PORT, own).uniquePath());
++    }
++
++    @Test
++    public void factorySerialKeepsThePort() {
++        // Every Thriftiest Cam's factory serial is 01.00.00: the port tells them apart.
++        assertEquals(PORT, camera("/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_01.00.00-video-index0", PORT).uniquePath());
++        assertEquals(PORT, camera(PORT).uniquePath());
++    }
++
++    @Test
++    public void onlyCaptureNodesAndOurSerials() {
++        assertTrue(PVCameraInfo.hasOwnSerial("/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-TC01-video-index0"));
++        assertFalse(PVCameraInfo.hasOwnSerial("/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-TC01-video-index1"));
++        assertFalse(PVCameraInfo.hasOwnSerial("/dev/v4l/by-id/usb-Arducam_Global_Shutter_SN12345-video-index0"));
++        assertFalse(PVCameraInfo.hasOwnSerial(PORT));
++    }
++}

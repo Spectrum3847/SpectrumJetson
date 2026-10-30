@@ -88,6 +88,7 @@ For a new release, or a modified image such as the "usbrecov" patch below:
 | 2026-10-29 | orin-left (2.1) | published 5.13 | usbrecov 5.13 | 1 sector, restarted by itself |
 | 2026-10-29 | both usbrecov | | (hub-reset test) | **PASS**: both streaming again 2.2 s and 2.5 s after the hub came back, detectors at 3.4 s |
 | 2026-10-29 | both usbrecov, PhotonVision with `photonvision-84` | | `tests/usb-recovery-bench` | every drop came back by itself: port disabled 2.9-3.5 s, gone from USB 2.1-2.7 s, port reset 1.0 s, hub reset 2.2-2.4 s |
+| 2026-10-29 | orin-right (2.3), then orin-left (2.1) | no serial | `rename` to `SJ-TC02`, `SJ-TC01` | 1 sector each, restarted by itself; firmware unchanged; `/dev/v4l/by-id/...Thrifty_SJ-TC0x` |
 
 ## Releases and images
 
@@ -143,9 +144,12 @@ compared at the end, the touched sectors are put back on failure, and the camera
 restarts.
 
 **The camera's USB name and serial number are stored in flash too** (the "TONY" block at 0x2000),
-and firmware updates keep them. `rename` can give each camera a **unique serial**, so calibrations
-could follow the camera instead of the USB port (README: "Cameras are named after their USB port").
-Not done yet: PhotonVision's matching would need checking first.
+and firmware updates keep them. Out of the box both slots are empty, so every camera reports the
+built-in "Thrifty" and serial "01.00.00". `scripts/host/thriftiest-flash.sh rename PORT SJ-TC01`
+stores a serial (one sector, ~45 s, PhotonVision stopped meanwhile): PhotonVision (`photonvision-86`)
+then knows the camera by it, so its settings and calibration follow it to any port. Robot cameras
+since 2026-10-29: orin-left `SJ-TC01`, orin-right `SJ-TC02`. See TECHNICAL.md, "Cameras known by
+their serial".
 
 Thrifty Config (2027.0.0-beta.8 or newer, laptop, camera plugged into the laptop) still works too:
 camera's **Configuration** tab → **Firmware** → **Select Firmware File** → **Update Firmware**.

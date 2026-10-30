@@ -25,6 +25,7 @@ The fixes, in order:
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -148,8 +149,16 @@ def photonvision_names() -> dict[str, str]:
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         for (cfg,) in con.execute("select config_json from cameras"):
             c = json.loads(cfg)
-            info = json.dumps(c.get("matchedCameraInfo", {}))
-            m = re.search(r"usb-0:([\d.]+):1\.0-video", info)
+            info = c.get("matchedCameraInfo") or {}
+            ident = info.get("PVUsbCameraInfo", info).get("uniquePath") or ""
+            if "/by-id/" in ident:
+                # photonvision-86: known by its own serial, in whatever port it's in now
+                if os.path.exists(ident):
+                    video = os.path.basename(os.path.realpath(ident))
+                    dev = os.path.realpath(f"/sys/class/video4linux/{video}/device")
+                    names[os.path.basename(dev).split(":")[0].split("-", 1)[-1]] = c.get("nickname", "")
+                continue
+            m = re.search(r"usb-0:([\d.]+):1\.0-video", json.dumps(info))
             if m:
                 names[m.group(1)] = c.get("nickname", "")
     except Exception:

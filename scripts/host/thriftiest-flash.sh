@@ -9,6 +9,9 @@
 #        thriftiest-flash.sh dump PORT                # read a camera's flash into ~/thriftiest-backups
 #        thriftiest-flash.sh flash PORT FIRMWARE      # FIRMWARE: a .bin file, its URL, or a
 #                                                     # published version number such as 5.13
+#        thriftiest-flash.sh rename PORT SERIAL       # store a serial number in the camera, e.g.
+#                                                     # SJ-TC01 (photonvision-86 matches cameras by
+#                                                     # an SJ- serial, so calibrations follow them)
 # PORT is the USB port health-check.sh shows, e.g. 2.1. Robot disabled: PhotonVision is stopped
 # for about a minute (every camera), then started again. Flash one camera, check it, then the next.
 #
@@ -31,10 +34,10 @@ SCP=(scp -q -o ConnectTimeout=5)
 REMOTE=("${SSH[@]}" "$JETSON_USER@$JETSON")
 RUN='sudo -n env PYTHONPATH=$HOME/thriftiest-fw/lib PYTHONDONTWRITEBYTECODE=1 python3 -u $HOME/thriftiest-fw/thriftiest-fw.py'
 
-usage() { sed -n '8,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '8,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 cmd=${1:-}; port=${2:-}; fw=${3:-}
-case $cmd in list) ;; dump) [[ -n $port ]] || usage ;; flash) [[ -n $port && -n $fw ]] || usage ;; *) usage ;; esac
+case $cmd in list) ;; dump) [[ -n $port ]] || usage ;; flash|rename) [[ -n $port && -n $fw ]] || usage ;; *) usage ;; esac
 mkdir -p "$CACHE"
 
 # Firmware: a version number or URL is downloaded once into ~/thriftiest-backups/downloads.
@@ -82,6 +85,18 @@ case $cmd in
 list)
   "${REMOTE[@]}" "$RUN list"
   gain_report ;;
+rename)
+  serial=$fw
+  [[ $serial =~ ^[A-Za-z0-9._-]{1,31}$ ]] || die "serial: 1-31 letters, digits, '.', '_' or '-'"
+  if [[ ${YES:-} != 1 ]]; then
+    read -r -p "Store serial $serial in the camera on port $port? Robot disabled? [y/N] " ok
+    [[ $ok == [yY]* ]] || die "not renamed"
+  fi
+  stop_pv
+  "${REMOTE[@]}" "$RUN rename --port $port --serial $serial --yes" </dev/null
+  echo "==> After"
+  sleep 3
+  "${REMOTE[@]}" "$RUN list --identity; ls /dev/v4l/by-id/" ;;
 dump)
   out=dump-$port-$(date +%Y%m%d-%H%M%S).bin
   stop_pv
