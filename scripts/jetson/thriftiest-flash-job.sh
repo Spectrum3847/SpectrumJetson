@@ -62,7 +62,7 @@ status running "Starting PhotonVision"
 systemctl start photonvision
 finished=1
 if [[ $rc -eq 0 ]]; then
-  status done "$(grep -E '^(Done|Already up to date)' "$LOG" | tail -1)"
+  status "done" "$(grep -E '^(Done|Already up to date)' "$LOG" | tail -1)"
 else
   status failed "$(grep -E '^ERROR' "$LOG" | tail -1 | sed 's/^ERROR: //')"
 fi
