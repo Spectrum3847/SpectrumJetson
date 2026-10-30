@@ -30,6 +30,15 @@ if [[ ! -x $L4T_DIR/tools/kernel_flash/l4t_initrd_flash.sh ]]; then
   echo "No BSP at $L4T_DIR. Run scripts/host/01-prepare-bsp.sh first." >&2
   exit 1
 fi
+# The partition layouts named below are r36's. NVIDIA's r39 quick start gives the Orin Nano a shorter
+# command (--erase-all BOARD internal), so check they're still there before erasing anything.
+for f in tools/kernel_flash/flash_l4t_t234_nvme.xml bootloader/generic/cfg/flash_t234_qspi.xml; do
+  if [[ ! -f $L4T_DIR/$f ]]; then
+    echo "STOP: $f isn't in this BSP (L4T $L4T_VERSION). Check the Jetson Linux quick start for this" >&2
+    echo "      release's Orin Nano NVMe flash command and update the l4t_initrd_flash.sh call below." >&2
+    exit 1
+  fi
+done
 
 if ! lsusb -d "$RCM_USB_ID" >/dev/null; then
   echo "No Jetson in Force Recovery Mode (USB $RCM_USB_ID) found." >&2
