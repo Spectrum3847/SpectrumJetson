@@ -36,7 +36,15 @@ to reach the camera. `scripts/jetson/swyft-fw.py` does the same from the Jetson.
 **After a flash, unplug the Swyft and plug it back in** (or power-cycle the robot). Out of the boot
 loader it enumerates and answers its controls but sends no frames until it loses power, and the
 Jetson's USB hub can't switch a port's power (ClearPortFeature(PORT_POWER) only drops the link).
-`swyft-fw.py` says so; probably the same after a `dump` (not tested: the camera was already stuck).
+`swyft-fw.py` says so. The same after a `dump`: any trip through the boot loader does it. Tried
+2026-10-30 without a replug, counting frames after each: a USB device reset, a hub port reset,
+de-authorizing and re-authorizing the device, unbinding and rebinding uvcvideo, and replaying Swyft's
+tool's boot-loader session request for request (its `DevQualify`, the `ff 00 00 00 00 00 00 00`
+commands, the register reads) from a camera that was streaming: none brings the video back (the
+camera answers `Failed to set UVC probe control: -71`). On Windows the spare streamed straight after
+Swyft's tool flashed it, so the laptop's own USB port presumably cuts power when the camera changes
+identity (0bda:3035 to 5842 and back); the Jetson's hub can't. Without a replug it would take a hub
+that really switches port power, or flashing from a laptop.
 
 **Never send the Swyft a command it doesn't support.** On 2026-10-30 three of CameraDump's commands
 this chip doesn't have (`00 c5`, `02 c1`, `00 09`) left its command handler refusing everything
