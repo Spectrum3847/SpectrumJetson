@@ -340,6 +340,8 @@ JETSON=10.85.15.15 scripts/host/thriftiest-flash.sh rename 2.1 SJ-TC01   # port,
 
 Serials must start with `SJ-` (PhotonVision only trusts serials we stored) and be unique: label the camera with it. Settings > **Thriftiest Cam firmware** (`photonvision-87`) shows each camera's serial and firmware, warns about a camera that won't recover from a USB drop, and flashes the usbrecov firmware from the browser ([docs/THRIFTIEST-CAM-FIRMWARE.md](docs/THRIFTIEST-CAM-FIRMWARE.md)). At its next start PhotonVision moves that camera's saved settings and calibration from the port to the serial, and from then on finds it in any port (tested 2026-10-29: two cameras swapped ports, then moved to a third port; each kept its calibration). Cameras without one are still matched by port, as in the table below. The robot code uses the names, e.g. `new PhotonCamera("TopLeft")`, either way.
 
+**Swyft USB Camera** (Realtek `0bda:3035`, port 2.4, serial `SJ-SW01` since 2026-10-30): every one ships with the same serial (`200901010001`), and its factory firmware won't go below 5 ms exposure. The robot's now runs Swyft's low-exposure firmware (0.2 ms) with a serial of its own, flashed from the Jetson by `scripts/jetson/swyft-fw.py` ([docs/SWYFT-CAMERA-FIRMWARE.md](docs/SWYFT-CAMERA-FIRMWARE.md)).
+
 | Name | Physical port (looking at the ports) | USB hub port |
 | --- | --- | --- |
 | TopLeft | top row, left | 2.1 |
