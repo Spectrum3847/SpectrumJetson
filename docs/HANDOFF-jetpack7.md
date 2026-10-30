@@ -54,7 +54,7 @@ growing, which `02-flash-nvme.sh` now checks. It booted straight from the NVMe, 
 ## After the flash (expect work; everything below was written for JetPack 6)
 
 In order, smallest unknowns first:
-1. OS basics: `02-jetpack.sh` (JDK, CUDA paths), power mode MAXN SUPER, locked clocks, fan,
+1. OS basics: `02-jetpack.sh` (JetPack, JDK 25, CUDA and Java paths), power mode MAXN SUPER, locked clocks, fan,
    `10-data-partition.sh`, read-only root, boot time, a reboot that doesn't hang.
 2. Cameras and USB: our patched `uvcvideo` (payload cap, hardware timestamps) on kernel 6.8; the USB
    bandwidth caps; PhotonVision's USB recovery (port power toggle) on the new xHCI driver.
