@@ -114,16 +114,27 @@ fi
 # partition to fill the SSD with nvresizefs.sh, over the space left for /data. With a fixed size,
 # skip just that call in the image; the rest of the automatic first boot (swap etc.) still runs.
 LATE_INIT=$L4T_DIR/rootfs/etc/systemd/nv-late-init.sh
-if [[ $ROOTFS_SIZE != full ]] && ! sudo grep -q "spectrum-no-resizefs" "$LATE_INIT"; then
-  sudo sed -i 's|^\(\s*\)if \[ -e "${nvresizefs_script}" \]; then|\1# spectrum-no-resizefs: 02-flash-nvme.sh keeps the system partition at ROOTFS_SIZE\n\1if [ -e "${nvresizefs_script}" ] \&\& [ ! -e /etc/nv/spectrum-no-resizefs ]; then|' "$LATE_INIT"
-  sudo touch "$L4T_DIR/rootfs/etc/nv/spectrum-no-resizefs"
-fi
-# A different L4T can word that line differently, and then sed changes nothing: the first boot
-# would grow the system partition over the space 10-data-partition.sh needs. Stop instead.
-if [[ $ROOTFS_SIZE != full ]] && ! sudo grep -qF '[ ! -e /etc/nv/spectrum-no-resizefs ]' "$LATE_INIT"; then
-  echo "STOP: couldn't find nvresizefs's call in $LATE_INIT (a new L4T?). Edit it by hand so the" >&2
-  echo "      call is skipped while /etc/nv/spectrum-no-resizefs exists, or flash with ROOTFS_SIZE=full." >&2
-  exit 1
+# L4T r39 (JetPack 7) has no nv-late-init.sh: its first boot is cloud-init, and NVIDIA's own
+# config there already turns growpart and resize_rootfs off. Check that rather than edit it.
+CLOUD_CFG=$L4T_DIR/rootfs/etc/cloud/cloud.cfg.d/99-disable-cloud-init.cfg
+if [[ $ROOTFS_SIZE != full ]] && ! sudo test -e "$LATE_INIT"; then
+  if ! { sudo grep -qF "mode: 'off'" "$CLOUD_CFG" && sudo grep -qF "resize_rootfs: false" "$CLOUD_CFG"; } 2>/dev/null; then
+    echo "STOP: no $LATE_INIT, and $CLOUD_CFG doesn't turn growpart and resize_rootfs off" >&2
+    echo "      (a new L4T?). Find what grows the system partition at first boot, or flash with ROOTFS_SIZE=full." >&2
+    exit 1
+  fi
+else
+  if [[ $ROOTFS_SIZE != full ]] && ! sudo grep -q "spectrum-no-resizefs" "$LATE_INIT"; then
+    sudo sed -i 's|^\(\s*\)if \[ -e "${nvresizefs_script}" \]; then|\1# spectrum-no-resizefs: 02-flash-nvme.sh keeps the system partition at ROOTFS_SIZE\n\1if [ -e "${nvresizefs_script}" ] \&\& [ ! -e /etc/nv/spectrum-no-resizefs ]; then|' "$LATE_INIT"
+    sudo touch "$L4T_DIR/rootfs/etc/nv/spectrum-no-resizefs"
+  fi
+  # A different L4T can word that line differently, and then sed changes nothing: the first boot
+  # would grow the system partition over the space 10-data-partition.sh needs. Stop instead.
+  if [[ $ROOTFS_SIZE != full ]] && ! sudo grep -qF '[ ! -e /etc/nv/spectrum-no-resizefs ]' "$LATE_INIT"; then
+    echo "STOP: couldn't find nvresizefs's call in $LATE_INIT (a new L4T?). Edit it by hand so the" >&2
+    echo "      call is skipped while /etc/nv/spectrum-no-resizefs exists, or flash with ROOTFS_SIZE=full." >&2
+    exit 1
+  fi
 fi
 if [[ $ROOTFS_SIZE == full ]]; then sudo rm -f "$L4T_DIR/rootfs/etc/nv/spectrum-no-resizefs"; fi
 

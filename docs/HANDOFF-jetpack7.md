@@ -44,6 +44,13 @@ re-enumerates during the flash), and an SSD in an enclosure can't take the QSPI 
    The `nvresizefs` edit for our 64 GiB system partition also stops if r39 changed that script.
 4. First boot: select the NVMe in the UEFI menu if asked.
 
+Done 2026-10-30 on the HP EX920 256 GB. The first try failed with the flash initrd unable to use the
+SSD (`EMEM address decode error` from pcie4, then the NVMe admin queue timed out and `/dev/nvme0n1`
+never appeared). That try had already written r39's QSPI firmware. Unplugging the power for ~10 s,
+recovery mode again and a re-run flashed cleanly. If it fails like that: power cycle, don't debug.
+r39 has no `nv-late-init.sh`; its cloud-init config already keeps the 64 GiB system partition from
+growing, which `02-flash-nvme.sh` now checks. It booted straight from the NVMe, no UEFI menu.
+
 ## After the flash (expect work; everything below was written for JetPack 6)
 
 In order, smallest unknowns first:
