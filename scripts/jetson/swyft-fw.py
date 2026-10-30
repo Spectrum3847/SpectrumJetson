@@ -386,9 +386,9 @@ def to_boot_loader(port):
     return full_port, b
 
 
-REPLUG = ("Now unplug the camera and plug it back in (same port), or power-cycle the robot: after the boot\n"
-          "loader its video stays off (it enumerates and answers, but sends no frames) until it loses power,\n"
-          "and the Jetson's USB hub can't switch a port's power (2026-10-30).")
+REPLUG = ("Now power-cycle the robot (main breaker; a Jetson reboot isn't enough), or unplug the camera and\n"
+          "plug it back in: after the boot loader its video stays off (it enumerates and answers, but sends\n"
+          "no frames) until it loses power, and the Jetson's USB hub can't switch a port's power (2026-10-30).")
 
 
 def back_to_firmware(full_port, b):

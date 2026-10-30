@@ -33,7 +33,14 @@ to reach the camera. `scripts/jetson/swyft-fw.py` does the same from the Jetson.
   set it on the dashboard), checking the calibration still holds on the new firmware, and robot code
   (it only watches orin-left and orin-right, so nothing on the robot alerts on this camera).
 
-**After a flash, unplug the Swyft and plug it back in** (or power-cycle the robot). Out of the boot
+**Best: give a Swyft its firmware and serial on the bench, before it's glued in**, from a laptop with
+Swyft's own tool (the zip's `SWYFTUSBCameraSerial.exe`: MemType `SPI_128K`, Load the `.rfw`, set the
+serial, Update). There it streams straight after, no replug. On the robot the serial can only change
+through the boot loader too (it lives in the flash), so a rename is a flash: `swyft-fw.py flash
+--serial`, then a robot power cycle.
+
+**After a flash on the robot, power-cycle the robot** (main breaker: a Jetson reboot doesn't cut USB
+power), or unplug the Swyft and plug it back in where the cable isn't glued. Out of the boot
 loader it enumerates and answers its controls but sends no frames until it loses power, and the
 Jetson's USB hub can't switch a port's power (ClearPortFeature(PORT_POWER) only drops the link).
 `swyft-fw.py` says so. The same after a `dump`: any trip through the boot loader does it. Tried
