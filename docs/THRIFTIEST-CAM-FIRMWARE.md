@@ -23,7 +23,17 @@ usbrecov on a driving robot and through a real EMI or cable-shake drop, and `ren
 
 ## Update a camera (quick start)
 
-From the laptop, wired to the Jetson, robot **disabled**. The Jetson has no internet, so
+**From PhotonVision** (`photonvision-87`): Settings > **Thriftiest Cam firmware**. It lists each
+camera's firmware (factory, published, usbrecov, usbrecov + bwreport) and warns about any camera that
+won't recover from a USB drop; Match Ready and `health-check.sh` warn too. Upload a `.bin` once (it's
+kept on the Jetson, in `photonvision_config/thriftiest-firmware`, and checked to be a Thriftiest Cam
+image), pick it for a camera and press **Flash**. Robot disabled: PhotonVision refuses while it's
+enabled. A job outside PhotonVision (`scripts/jetson/thriftiest-flash-job.sh`, a transient systemd
+unit) stops PhotonVision, flashes with the same backup and checks as below, and starts PhotonVision
+again: about 50 s, and the card shows how it went. Needs pyusb on the Jetson (`09-robot-tuning.sh`
+installs `python3-usb`; or run the laptop script below once, which leaves a copy).
+
+**From the laptop**, wired to the Jetson, robot **disabled**. The Jetson has no internet, so
 `scripts/host/thriftiest-flash.sh` downloads the firmware and pyusb on the laptop, copies them and
 `scripts/jetson/thriftiest-fw.py` to `~/thriftiest-fw` on the Jetson, and runs the tool there:
 
@@ -89,6 +99,8 @@ For a new release, or a modified image such as the "usbrecov" patch below:
 | 2026-10-29 | both usbrecov | | (hub-reset test) | **PASS**: both streaming again 2.2 s and 2.5 s after the hub came back, detectors at 3.4 s |
 | 2026-10-29 | both usbrecov, PhotonVision with `photonvision-84` | | `tests/usb-recovery-bench` | every drop came back by itself: port disabled 2.9-3.5 s, gone from USB 2.1-2.7 s, port reset 1.0 s, hub reset 2.2-2.4 s |
 | 2026-10-29 | orin-right (2.3), then orin-left (2.1) | no serial | `rename` to `SJ-TC02`, `SJ-TC01` | 1 sector each, restarted by itself; firmware unchanged; `/dev/v4l/by-id/...Thrifty_SJ-TC0x` |
+| 2026-10-30 | orin-right (2.3) | usbrecov | usbrecov + bwreport | 1 sector, restarted by itself, serial kept. Bandwidth request at 1280x800 120 fps still 3060 to the capped driver. `tests/usb-recovery-bench`: 3.3 / 2.3 / 1.0 / 2.4 s, as usbrecov |
+| 2026-10-30 | orin-right (2.3) | usbrecov + bwreport | usbrecov, **from PhotonVision's Settings card** | ~50 s click to done: PhotonVision stopped, 1 sector, verified, PhotonVision started; serial kept, backup saved |
 
 ## Releases and images
 
@@ -118,6 +130,25 @@ branches replaced by `NOP`s, so the code they skipped always runs). Meant to let
 from a USB reset, and in our hub-reset tests it did (test log). Not from Thrifty Bot, and we don't know
 what else those branches guard: on orin-right only, until it has run on the robot for a while.
 Going back: `scripts/host/thriftiest-flash.sh flash 2.3 5.13`.
+
+**"ThriftiestCam-Firmware-v5.13-PATCH-recovery+bwreport.bin"** (sha256 `87aa31a7…`, 111,729 bytes):
+usbrecov plus 3 bytes, `27 09 9a` → `24 05 00` at 0x1A1D7, which change the camera's default USB
+bandwidth request, so it doesn't claim the largest setting (3060 bytes a microframe, enough to crowd
+out other cameras on the stock driver). Our capped camera driver (`11-uvcvideo-payload-cap.sh`) sets
+the bandwidth itself, so on our Jetsons it makes no difference we can see: at 1280x800 MJPEG 120 fps
+the camera's request still reads 3060 to the driver. It should help where the stock driver runs; not
+tested there. It recovers from USB drops exactly like usbrecov (test log).
+
+**Which firmware a camera runs** (`thriftiest-fw.py variant`): every variant reports 5.13, so these
+are told apart by a few flash bytes, read through the video driver while the camera streams (two
+1 KiB reads; nothing is detached and no frame is lost):
+
+| Variant | 0x05985 | 0x15037 | 0x1503D | 0x1A1D7 | Recovers from a USB drop |
+| --- | --- | --- | --- | --- | --- |
+| factory | `15` | `70 1e` | `70 18` | | no |
+| published | `17` | `70 1e` | `70 18` | | no |
+| usbrecov | | `00 00` | `00 00` | `27 09 9a` | yes |
+| usbrecov + bwreport | | `00 00` | `00 00` | `24 05 00` | yes |
 
 ## How the camera is updated (found 2026-10-29)
 
@@ -154,7 +185,7 @@ their serial".
 Thrifty Config (2027.0.0-beta.8 or newer, laptop, camera plugged into the laptop) still works too:
 camera's **Configuration** tab → **Firmware** → **Select Firmware File** → **Update Firmware**.
 
-## In the PhotonVision UI?
+## In the PhotonVision UI
 
-Doable next: the Match Ready page can show each camera's firmware and whether it has gain (no camera
-access needed), and an "Update firmware" button could run `thriftiest-fw.py flash` with an uploaded `.bin`.
+Since `photonvision-87`: Settings > Thriftiest Cam firmware (see the quick start), and Match Ready
+shows each camera's firmware through `health-check.sh`.

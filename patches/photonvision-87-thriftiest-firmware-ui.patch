@@ -1,0 +1,600 @@
+diff --git a/photon-client/src/components/settings/ThriftiestFirmwareCard.vue b/photon-client/src/components/settings/ThriftiestFirmwareCard.vue
+new file mode 100755
+index 00000000..2bb7435c
+--- /dev/null
++++ b/photon-client/src/components/settings/ThriftiestFirmwareCard.vue
+@@ -0,0 +1,272 @@
++<script setup lang="ts">
++// SpectrumJetson (photonvision-87): which firmware each Thriftiest Cam runs, warns when it can't
++// recover from a USB drop by itself, and flashes a stored firmware file onto one. Flashing stops
++// PhotonVision for about a minute (every camera) and starts it again; the card picks up again when
++// this page reconnects.
++import { computed, onMounted, onUnmounted, ref, watch } from "vue";
++import axios from "axios";
++import { useStateStore } from "@/stores/StateStore";
++import { useTheme } from "vuetify";
++
++interface Camera {
++  port: string;
++  serial: string;
++  version: string;
++  variant: string | null;
++  label: string;
++  recovers: boolean;
++  camera: string;
++}
++interface Image {
++  file: string;
++  bytes: number;
++  variant: string | null;
++  label: string | null;
++  recovers: boolean;
++  error: string | null;
++}
++interface Job {
++  state: "running" | "done" | "failed";
++  message: string;
++  port: string;
++  image: string;
++  started: number;
++  updated: number;
++  log: string[];
++}
++interface Status {
++  cameras: Camera[];
++  images: Image[];
++  job: Job | null;
++  robotEnabled: boolean;
++  error?: string;
++}
++
++const theme = useTheme();
++const status = ref<Status>({ cameras: [], images: [], job: null, robotEnabled: false });
++const chosen = ref<Record<string, string>>({});
++const upload = ref<File[] | File | null>(null);
++const busy = ref(false);
++const confirm = ref<{ cam: Camera; image: Image } | null>(null);
++
++const say = (message: string, color = "success") =>
++  useStateStore().showSnackbarMessage({ message, color, timeout: 8000 });
++
++const load = async () => {
++  try {
++    status.value = (await axios.get<Status>("/thriftiest/firmware")).data;
++    // Default choice: the newest file that recovers from USB drops.
++    const best = status.value.images
++      .filter((i) => i.recovers)
++      .map((i) => i.file)
++      .sort()
++      .pop();
++    for (const c of status.value.cameras) if (!chosen.value[c.port] && best) chosen.value[c.port] = best;
++  } catch {
++    // PhotonVision is restarting (a flash): the poll below tries again.
++  }
++};
++let timer: ReturnType<typeof setInterval> | undefined;
++onMounted(() => {
++  load();
++  timer = setInterval(load, 3000);
++});
++onUnmounted(() => clearInterval(timer));
++watch(
++  () => useStateStore().backendConnected,
++  (connected) => connected && load()
++);
++
++const running = computed(
++  () => status.value.job?.state === "running" && Date.now() / 1000 - status.value.job.updated < 120
++);
++const needsRecovery = computed(() => status.value.cameras.filter((c) => !c.recovers));
++const imageByFile = (f: string) => status.value.images.find((i) => i.file === f);
++
++const sendUpload = async () => {
++  const f = Array.isArray(upload.value) ? upload.value[0] : upload.value;
++  if (!f) return;
++  busy.value = true;
++  try {
++    const form = new FormData();
++    form.append("data", f);
++    const check = (await axios.post<Image>("/thriftiest/firmware/upload", form)).data;
++    say(`Stored ${check.file}: ${check.label ?? "unknown variant"}`);
++    upload.value = null;
++    await load();
++  } catch (e: any) {
++    say(e?.response?.data || "Couldn't store the firmware file", "error");
++  } finally {
++    busy.value = false;
++  }
++};
++const remove = async (i: Image) => {
++  try {
++    status.value = (await axios.post<Status>("/thriftiest/firmware/delete", { image: i.file })).data;
++  } catch (e: any) {
++    say(e?.response?.data || "Couldn't delete", "error");
++  }
++};
++const flash = async (cam: Camera, image: Image) => {
++  confirm.value = null;
++  busy.value = true;
++  try {
++    await axios.post("/thriftiest/firmware/flash", { port: cam.port, image: image.file });
++    say(
++      `Flashing ${image.label ?? image.file} onto ${cam.camera || "the camera"} (port ${cam.port}): PhotonVision restarts in about a minute.`,
++      "info"
++    );
++    await load();
++  } catch (e: any) {
++    say(e?.response?.data || "Couldn't start the flash", "error");
++  } finally {
++    busy.value = false;
++  }
++};
++</script>
++
++<template>
++  <v-card class="mb-3 rounded-12" color="surface" data-testid="thriftiest-firmware">
++    <v-card-title class="pb-10px">Thriftiest Cam firmware</v-card-title>
++    <v-card-text class="pt-0">
++      <p class="pb-2 text-body-2">
++        Which firmware each Thriftiest Cam runs. Only the "usbrecov" firmware comes back by itself from a USB drop (a
++        static shock, a loose cable); on any other a dropped camera stays down until it's replugged. Upload a firmware
++        file once, then flash a camera: PhotonVision stops for about a minute (every camera) and starts again. Robot
++        disabled. A backup of the camera's flash is saved first.
++      </p>
++      <v-alert v-if="needsRecovery.length" type="warning" variant="tonal" density="compact" class="mb-3">
++        {{ needsRecovery.map((c) => c.camera || `port ${c.port}`).join(", ") }}: no USB recovery. Flash the usbrecov
++        firmware.
++      </v-alert>
++      <v-alert v-if="status.error" type="error" variant="tonal" density="compact" class="mb-3">{{
++        status.error
++      }}</v-alert>
++      <v-alert
++        v-if="status.job"
++        :type="status.job.state === 'failed' ? 'error' : status.job.state === 'done' ? 'success' : 'info'"
++        variant="tonal"
++        density="compact"
++        class="mb-3"
++        data-testid="thriftiest-job"
++      >
++        <b>{{ status.job.image }} → port {{ status.job.port }}:</b> {{ status.job.message }}
++        <pre v-if="status.job.state === 'failed' && status.job.log.length" class="text-caption mt-1">{{
++          status.job.log.join("\n")
++        }}</pre>
++      </v-alert>
++
++      <v-table v-if="status.cameras.length" density="compact" class="mb-3">
++        <thead>
++          <tr>
++            <th>Camera</th>
++            <th>Port</th>
++            <th>Serial</th>
++            <th>Firmware</th>
++            <th>Flash</th>
++          </tr>
++        </thead>
++        <tbody>
++          <tr v-for="c in status.cameras" :key="c.port" :data-testid="`thriftiest-cam-${c.port}`">
++            <td>{{ c.camera || "–" }}</td>
++            <td>{{ c.port }}</td>
++            <td>{{ c.serial }}</td>
++            <td>
++              {{ c.label }}
++              <v-chip :color="c.recovers ? 'success' : 'warning'" size="x-small" class="ml-1">
++                {{ c.recovers ? "recovers from USB drops" : "no USB recovery" }}
++              </v-chip>
++            </td>
++            <td class="text-no-wrap">
++              <div class="d-flex align-center ga-2">
++                <v-select
++                  v-model="chosen[c.port]"
++                  :items="
++                    status.images.filter((i) => !i.error).map((i) => ({ title: i.label ?? i.file, value: i.file }))
++                  "
++                  density="compact"
++                  variant="underlined"
++                  hide-details
++                  style="min-width: 220px"
++                />
++                <v-btn
++                  color="buttonActive"
++                  variant="tonal"
++                  size="small"
++                  :disabled="busy || running || status.robotEnabled || !chosen[c.port]"
++                  :data-testid="`thriftiest-flash-${c.port}`"
++                  @click="confirm = { cam: c, image: imageByFile(chosen[c.port])! }"
++                >
++                  Flash
++                </v-btn>
++              </div>
++            </td>
++          </tr>
++        </tbody>
++      </v-table>
++      <p v-else class="text-caption pb-3">No Thriftiest Cams connected.</p>
++      <p v-if="status.robotEnabled" class="text-caption pb-2">Disable the robot to flash.</p>
++
++      <div class="text-subtitle-2 pb-1">Firmware files on the Jetson</div>
++      <v-table v-if="status.images.length" density="compact" class="mb-2">
++        <tbody>
++          <tr v-for="i in status.images" :key="i.file">
++            <td>{{ i.file }}</td>
++            <td>{{ i.error ? `not a Thriftiest Cam image: ${i.error}` : (i.label ?? "unknown variant") }}</td>
++            <td class="text-right">
++              <v-btn
++                size="small"
++                variant="text"
++                color="error"
++                icon="mdi-delete"
++                :disabled="running"
++                @click="remove(i)"
++              />
++            </td>
++          </tr>
++        </tbody>
++      </v-table>
++      <p v-else class="text-caption pb-2">
++        None yet: upload one (e.g. ThriftiestCam-Firmware-v5.13-PATCH-usbrecov.bin).
++      </p>
++      <div class="d-flex align-center ga-2">
++        <v-file-input
++          v-model="upload"
++          accept=".bin"
++          label="Firmware file (.bin)"
++          density="compact"
++          variant="underlined"
++          hide-details
++          prepend-icon="mdi-chip"
++        />
++        <v-btn color="buttonActive" variant="tonal" :disabled="busy || !upload" @click="sendUpload">Upload</v-btn>
++      </div>
++    </v-card-text>
++
++    <v-dialog :model-value="!!confirm" width="520" @update:model-value="(v) => !v && (confirm = null)">
++      <v-card v-if="confirm" color="surface">
++        <v-card-title>Flash {{ confirm.cam.camera || `port ${confirm.cam.port}` }}?</v-card-title>
++        <v-card-text>
++          <b>{{ confirm.image.label ?? confirm.image.file }}</b> onto the Thriftiest Cam on USB port
++          {{ confirm.cam.port }} (serial {{ confirm.cam.serial }}, now {{ confirm.cam.label }}). PhotonVision stops for
++          about a minute, so every camera is off, then starts again. Only the parts of the flash that differ are
++          rewritten, a backup is saved first, and the camera keeps its serial. Keep the robot powered until it's done.
++        </v-card-text>
++        <v-card-actions>
++          <v-spacer />
++          <v-btn :variant="theme.global.current.value.dark ? 'outlined' : 'elevated'" @click="confirm = null"
++            >Cancel</v-btn
++          >
++          <v-btn
++            color="warning"
++            :variant="theme.global.current.value.dark ? 'outlined' : 'elevated'"
++            data-testid="thriftiest-flash-confirm"
++            @click="flash(confirm.cam, confirm.image)"
++          >
++            Flash and restart
++          </v-btn>
++        </v-card-actions>
++      </v-card>
++    </v-dialog>
++  </v-card>
++</template>
+diff --git a/photon-client/src/views/GeneralSettingsView.vue b/photon-client/src/views/GeneralSettingsView.vue
+index 050b2e74..edcd93d2 100644
+--- a/photon-client/src/views/GeneralSettingsView.vue
++++ b/photon-client/src/views/GeneralSettingsView.vue
+@@ -8,6 +8,7 @@ import DeviceCard from "@/components/settings/DeviceCard.vue";
+ import RewindCard from "@/components/settings/RewindCard.vue";
+ import RobotStateCard from "@/components/settings/RobotStateCard.vue";
+ import SnapshotsCard from "@/components/settings/SnapshotsCard.vue";
++import ThriftiestFirmwareCard from "@/components/settings/ThriftiestFirmwareCard.vue";
+ </script>
+ 
+ <template>
+@@ -15,6 +16,7 @@ import SnapshotsCard from "@/components/settings/SnapshotsCard.vue";
+     <DeviceCard />
+     <GlobalSettingsCard />
+     <SnapshotsCard />
++    <ThriftiestFirmwareCard />
+     <RobotStateCard />
+     <RewindCard />
+     <ObjectDetectionCard v-if="useSettingsStore().general.supportedBackends.length > 0" />
+diff --git a/photon-core/src/main/java/org/photonvision/common/hardware/ThriftiestFirmware.java b/photon-core/src/main/java/org/photonvision/common/hardware/ThriftiestFirmware.java
+new file mode 100644
+index 00000000..9818e99f
+--- /dev/null
++++ b/photon-core/src/main/java/org/photonvision/common/hardware/ThriftiestFirmware.java
+@@ -0,0 +1,226 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.common.hardware;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import java.io.IOException;
++import java.io.InputStream;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.StandardCopyOption;
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.TimeUnit;
++import org.photonvision.common.configuration.ConfigManager;
++import org.photonvision.common.dataflow.networktables.NetworkTablesManager;
++import org.photonvision.common.logging.LogGroup;
++import org.photonvision.common.logging.Logger;
++import org.photonvision.vision.processes.VisionSourceManager;
++
++/**
++ * SpectrumJetson (photonvision-87): Thriftiest Cam firmware from Settings > Thriftiest Cam firmware.
++ *
++ * <ul>
++ *   <li>Which firmware each camera runs: {@code thriftiest-fw.py variant}, which reads a few flash
++ *       bytes through the video driver while the camera streams (every variant reports 5.13).
++ *   <li>Firmware files are uploaded once and kept on the settings partition ({@link #store()}),
++ *       checked with {@code thriftiest-fw.py check-image}. None ship with PhotonVision.
++ *   <li>A flash runs {@code thriftiest-flash-job.sh} as a transient systemd unit: it stops
++ *       PhotonVision (whose camera watchdog would reset the camera mid-write), flashes with a backup
++ *       and every check, and starts PhotonVision again. Its progress is in {@link #JOB_STATUS}.
++ * </ul>
++ *
++ * The scripts are the repo's own, found through /opt/photonvision/health-check.sh, the link
++ * 06-install-fork-jar.sh makes to the repo's scripts/jetson.
++ */
++public final class ThriftiestFirmware {
++    private static final Logger logger = new Logger(ThriftiestFirmware.class, LogGroup.General);
++    private static final ObjectMapper json = new ObjectMapper();
++    private static final Path JOB_STATUS = Path.of("/run/spectrum/thriftiest-flash.json");
++    private static final long MAX_IMAGE_BYTES = 512 * 1024;
++
++    private record CheckedImage(long size, long mtime, JsonNode check) {}
++
++    private static final Map<String, CheckedImage> checked = new HashMap<>();
++
++    private ThriftiestFirmware() {}
++
++    private static Path scripts() throws IOException {
++        return Path.of("/opt/photonvision/health-check.sh").toRealPath().getParent();
++    }
++
++    private static Path store() {
++        return ConfigManager.getInstance().getLogsDir().getParent().resolve("thriftiest-firmware");
++    }
++
++    /** Runs thriftiest-fw.py with these arguments and parses its JSON output. */
++    private static JsonNode tool(String... args) throws IOException {
++        var cmd = new ArrayList<String>(List.of("python3", scripts().resolve("thriftiest-fw.py").toString()));
++        cmd.addAll(List.of(args));
++        var p = new ProcessBuilder(cmd).redirectError(ProcessBuilder.Redirect.DISCARD).start();
++        String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
++        try {
++            if (!p.waitFor(15, TimeUnit.SECONDS)) {
++                p.destroyForcibly();
++                throw new IOException("thriftiest-fw.py " + args[0] + " timed out");
++            }
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++            throw new IOException("interrupted");
++        }
++        if (out.isBlank()) throw new IOException("thriftiest-fw.py " + args[0] + " gave no answer");
++        return json.readTree(out);
++    }
++
++    /** USB port ("2.1") -> PhotonVision camera nickname, for the cameras PhotonVision runs. */
++    private static Map<String, String> nicknames() {
++        var out = new HashMap<String, String>();
++        for (var m : VisionSourceManager.getInstance().vmm.getModules()) {
++            try {
++                var video = Path.of(m.getCameraConfiguration().getDevicePath()).toRealPath().getFileName();
++                var usb = Path.of("/sys/class/video4linux", video.toString(), "device").toRealPath().getParent();
++                String port = usb.getFileName().toString(); // 1-2.3
++                out.put(port.substring(port.indexOf('-') + 1), m.getCameraConfiguration().nickname);
++            } catch (Exception e) {
++                // not on USB right now
++            }
++        }
++        return out;
++    }
++
++    private static boolean robotEnabled() {
++        var ntm = NetworkTablesManager.getInstance();
++        if (!ntm.getNTInst().isConnected()) return false;
++        var ds = ntm.getDriverStation();
++        return ds != null && ds.hasControlWord() && ds.current().m_enabled();
++    }
++
++    private static JsonNode job() {
++        try {
++            return Files.exists(JOB_STATUS) ? json.readTree(JOB_STATUS.toFile()) : null;
++        } catch (IOException e) {
++            return null;
++        }
++    }
++
++    private static boolean jobRunning() {
++        var j = job();
++        return j != null
++                && "running".equals(j.path("state").asText())
++                && System.currentTimeMillis() / 1000 - j.path("updated").asLong() < 120;
++    }
++
++    /** Cameras with their firmware, the stored firmware files, the flash job, and the robot's state. */
++    public static synchronized Map<String, Object> status() {
++        var out = new LinkedHashMap<String, Object>();
++        var names = nicknames();
++        try {
++            var cams = tool("variant", "--json");
++            for (var c : cams) {
++                ((com.fasterxml.jackson.databind.node.ObjectNode) c).put("camera", names.getOrDefault(c.path("port").asText(), ""));
++            }
++            out.put("cameras", cams);
++        } catch (IOException e) {
++            out.put("cameras", List.of());
++            out.put("error", "Couldn't read the cameras' firmware: " + e.getMessage());
++        }
++        var images = new ArrayList<JsonNode>();
++        try (var files = Files.list(store())) {
++            for (var f : files.filter(f -> f.toString().endsWith(".bin")).sorted().toList()) {
++                long size = Files.size(f), mtime = Files.getLastModifiedTime(f).toMillis();
++                var c = checked.get(f.getFileName().toString());
++                if (c == null || c.size() != size || c.mtime() != mtime) {
++                    c = new CheckedImage(size, mtime, tool("check-image", "--json", f.toString()));
++                    checked.put(f.getFileName().toString(), c);
++                }
++                images.add(c.check());
++            }
++        } catch (IOException e) {
++            // no store yet
++        }
++        out.put("images", images);
++        out.put("job", job());
++        out.put("robotEnabled", robotEnabled());
++        return out;
++    }
++
++    /** Stores an uploaded firmware file, after checking it's a Thriftiest Cam image. */
++    public static synchronized JsonNode upload(String name, InputStream content) throws IOException {
++        name = Path.of(name).getFileName().toString();
++        if (!name.matches("[A-Za-z0-9._+-]{1,100}\\.bin")) {
++            throw new IOException("Firmware files are .bin, named with letters, digits and . _ + - only");
++        }
++        Files.createDirectories(store());
++        var tmp = store().resolve(name + ".upload");
++        try {
++            byte[] bytes = content.readNBytes((int) MAX_IMAGE_BYTES + 1);
++            if (bytes.length > MAX_IMAGE_BYTES) throw new IOException("Too big for the camera's 512 KiB flash");
++            Files.write(tmp, bytes);
++            var check = tool("check-image", "--json", tmp.toString());
++            if (!check.path("error").isNull() && !check.path("error").asText().isEmpty()) {
++                throw new IOException(check.path("error").asText());
++            }
++            Files.move(tmp, store().resolve(name), StandardCopyOption.REPLACE_EXISTING);
++            ((com.fasterxml.jackson.databind.node.ObjectNode) check).put("file", name); // not the temporary name
++            logger.info("Stored Thriftiest Cam firmware " + name + " (" + check.path("label").asText() + ")");
++            return check;
++        } finally {
++            Files.deleteIfExists(tmp);
++        }
++    }
++
++    public static synchronized void delete(String name) throws IOException {
++        var f = store().resolve(Path.of(name).getFileName().toString());
++        if (!f.toString().endsWith(".bin") || !Files.deleteIfExists(f)) throw new IOException("No firmware file " + name);
++        checked.remove(f.getFileName().toString());
++    }
++
++    /**
++     * Starts flashing a stored firmware file onto the camera in a USB port. PhotonVision is stopped
++     * for about a minute (every camera) and started again by the job.
++     */
++    public static synchronized void flash(String port, String image) throws IOException {
++        if (robotEnabled()) throw new IOException("The robot is enabled: disable it first");
++        if (jobRunning()) throw new IOException("A camera is already being flashed");
++        boolean known = false;
++        for (var c : tool("variant", "--json")) known |= c.path("port").asText().equals(port);
++        if (!known) throw new IOException("No Thriftiest Cam on USB port " + port);
++        var file = store().resolve(Path.of(image).getFileName().toString());
++        if (!Files.exists(file)) throw new IOException("No firmware file " + image);
++        Files.createDirectories(JOB_STATUS.getParent());
++        Files.writeString(
++                JOB_STATUS,
++                json.writeValueAsString(
++                        Map.of(
++                                "state", "running", "message", "Starting", "port", port, "image", file.getFileName().toString(),
++                                "started", System.currentTimeMillis() / 1000, "updated", System.currentTimeMillis() / 1000,
++                                "log", List.of())));
++        logger.warn("Flashing " + file.getFileName() + " onto the Thriftiest Cam on USB port " + port + ": PhotonVision stops for about a minute");
++        new ProcessBuilder(
++                        "systemd-run", "--unit=spectrum-thriftiest-flash", "--collect", "/bin/bash",
++                        scripts().resolve("thriftiest-flash-job.sh").toString(), port, file.toString())
++                .redirectErrorStream(true)
++                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
++                .start();
++    }
++}
+diff --git a/photon-server/src/main/java/org/photonvision/server/RequestHandler.java b/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
+index 69ad1db6..27127ce9 100644
+--- a/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
++++ b/photon-server/src/main/java/org/photonvision/server/RequestHandler.java
+@@ -748,6 +748,50 @@ public class RequestHandler {
+         return out;
+     }
+ 
++    // SpectrumJetson (photonvision-87): Settings > Thriftiest Cam firmware.
++    private record ThriftiestFlashRequest(String port, String image) {}
++
++    public static void onThriftiestFirmwareRequest(Context ctx) {
++        snapshotJson(ctx, org.photonvision.common.hardware.ThriftiestFirmware.status());
++    }
++
++    public static void onThriftiestFirmwareUploadRequest(Context ctx) {
++        var file = ctx.uploadedFile("data");
++        if (file == null) {
++            ctx.status(400);
++            ctx.result("No file was sent (form field 'data')");
++            return;
++        }
++        try {
++            snapshotJson(ctx, org.photonvision.common.hardware.ThriftiestFirmware.upload(file.filename(), file.content()));
++        } catch (IOException e) {
++            ctx.status(400);
++            ctx.result("Not stored: " + e.getMessage());
++        }
++    }
++
++    public static void onThriftiestFirmwareDeleteRequest(Context ctx) {
++        try {
++            var req = kObjectMapper.readValue(ctx.body(), ThriftiestFlashRequest.class);
++            org.photonvision.common.hardware.ThriftiestFirmware.delete(req.image());
++            snapshotJson(ctx, org.photonvision.common.hardware.ThriftiestFirmware.status());
++        } catch (IOException e) {
++            ctx.status(400);
++            ctx.result("Couldn't delete: " + e.getMessage());
++        }
++    }
++
++    public static void onThriftiestFirmwareFlashRequest(Context ctx) {
++        try {
++            var req = kObjectMapper.readValue(ctx.body(), ThriftiestFlashRequest.class);
++            org.photonvision.common.hardware.ThriftiestFirmware.flash(req.port(), req.image());
++            ctx.status(202);
++        } catch (IOException e) {
++            ctx.status(400);
++            ctx.result("Not flashed: " + e.getMessage());
++        }
++    }
++
+     // SpectrumJetson (photonvision-53): named settings snapshots (Settings > Settings snapshots).
+     private record SnapshotRequest(String name, String id) {}
+ 
+diff --git a/photon-server/src/main/java/org/photonvision/server/Server.java b/photon-server/src/main/java/org/photonvision/server/Server.java
+index 8b537223..cbdacc05 100644
+--- a/photon-server/src/main/java/org/photonvision/server/Server.java
++++ b/photon-server/src/main/java/org/photonvision/server/Server.java
+@@ -136,6 +136,10 @@ public class Server {
+         app.get("/api/robotState", RequestHandler::onRobotStateRequest); // SpectrumJetson (50)
+         app.get("/api/healthCheck", RequestHandler::onHealthCheckRequest); // SpectrumJetson (52)
+         app.get("/api/tagContrast", RequestHandler::onTagContrastRequest); // SpectrumJetson (54)
++        app.get("/api/thriftiest/firmware", RequestHandler::onThriftiestFirmwareRequest); // SpectrumJetson (87)
++        app.post("/api/thriftiest/firmware/upload", RequestHandler::onThriftiestFirmwareUploadRequest);
++        app.post("/api/thriftiest/firmware/delete", RequestHandler::onThriftiestFirmwareDeleteRequest);
++        app.post("/api/thriftiest/firmware/flash", RequestHandler::onThriftiestFirmwareFlashRequest);
+         app.get("/api/snapshots", RequestHandler::onSnapshotListRequest); // SpectrumJetson (53)
+         app.post("/api/snapshots", RequestHandler::onSnapshotCreateRequest);
+         app.post("/api/snapshots/restore", RequestHandler::onSnapshotRestoreRequest);

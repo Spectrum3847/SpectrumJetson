@@ -4,6 +4,7 @@
   sudo python3 thriftiest-fw.py list [--identity]          # every Thriftiest Cam: port, firmware (, name)
   sudo python3 thriftiest-fw.py check-image FILE.bin       # what a firmware file is (no camera needed)
   python3 thriftiest-fw.py diff A.bin B.bin               # bytes that differ between two images/dumps
+  python3 thriftiest-fw.py variant [--json]                # which firmware each camera runs, while it streams
   sudo python3 thriftiest-fw.py dump --port 2.1 OUT.bin    # read the camera's flash (256 KiB)
   sudo python3 thriftiest-fw.py flash --port 2.1 FILE.bin --yes
   sudo python3 thriftiest-fw.py rename --port 2.1 --name TopLeft --serial TL1 --yes
@@ -23,7 +24,10 @@ restarted by itself. Needs pyusb: sudo apt install python3-usb, or from a laptop
 internet) scripts/host/thriftiest-flash.sh, which brings pyusb along.
 """
 import argparse
+import ctypes
 import datetime
+import glob
+import json
 import os
 import sys
 import time
@@ -52,6 +56,30 @@ MAINT_ENTER, MAINT_LEAVE = 0x5A, 0xA5   # leave value is unverified upstream: ma
 # Identity ("TONY" block at 0x2000): USB product name and serial number.
 TONY, PRODUCT_RECORD, SERIAL_RECORD, PRODUCT_SLOT, SERIAL_SLOT, SLOT = 0x2000, 0x2046, 0x204C, 0x2100, 0x2140, 64
 RUNTIME_DATA = (0x1F000, 0x20000)        # sector the camera rewrites itself
+
+
+# Firmware variants we know, told apart by a few bytes (every one reports bcdDevice 0x0513). Checked
+# in order, first match wins. "recovers": comes back from a USB drop or hub reset by itself
+# (docs/THRIFTIEST-CAM-FIRMWARE.md, test log); the others stay wedged until replugged.
+FIRMWARE = [
+    {"name": "recovery+bwreport", "label": "5.13 usbrecov + bwreport (unofficial)", "recovers": True,
+     "bytes": {0x15037: "0000", 0x1503D: "0000", 0x1A1D7: "240500"}},
+    {"name": "usbrecov", "label": "5.13 usbrecov (unofficial)", "recovers": True,
+     "bytes": {0x15037: "0000", 0x1503D: "0000", 0x1A1D7: "27099a"}},
+    {"name": "published", "label": "5.13 published (Thrifty Bot)", "recovers": False,
+     "bytes": {0x05985: "17", 0x15037: "701e", 0x1503D: "7018"}},
+    {"name": "factory", "label": "5.13 factory (no gain)", "recovers": False,
+     "bytes": {0x05985: "15", 0x15037: "701e", 0x1503D: "7018"}},
+]
+FIRMWARE_BLOCKS = sorted({a - a % 1024 for f in FIRMWARE for a in f["bytes"]})
+
+
+def firmware_variant(read):
+    """The FIRMWARE entry matching the flash, read(addr, n) giving its bytes; None if unknown."""
+    for f in FIRMWARE:
+        if all(read(a, len(h) // 2).hex() == h for a, h in f["bytes"].items()):
+            return f
+    return None
 
 
 def die(msg):
@@ -460,7 +488,14 @@ def cmd_list(a):
 def cmd_check_image(a):
     img = open(a.image, "rb").read()
     err = validate_image(img)
-    print("%s: %d bytes, firmware %s" % (a.image, len(img), image_version(img) or "?"))
+    v = firmware_variant(lambda addr, n: img[addr:addr + n])
+    if a.json:
+        print(json.dumps({"file": os.path.basename(a.image), "bytes": len(img), "version": image_version(img),
+                          "variant": v["name"] if v else None, "label": v["label"] if v else None,
+                          "recovers": bool(v and v["recovers"]), "error": err}))
+        sys.exit(1 if err else 0)
+    print("%s: %d bytes, firmware %s, %s" % (a.image, len(img), image_version(img) or "?",
+                                            v["label"] if v else "unknown variant"))
     if err:
         die(err)
 
@@ -510,6 +545,92 @@ def cmd_diff(a):
           % (len(diffs), len(ranges), n, a.a, len(x), a.b, len(y)))
 
 
+# ---- firmware variant, read through uvcvideo -------------------------------------------------
+# The vendor extension unit's flash-read controls also work through the video driver
+# (UVCIOC_CTRL_QUERY on /dev/videoN), with the camera streaming: nothing is detached, so
+# PhotonVision keeps running. Found 2026-10-29: two 1 KiB reads, no frame lost.
+
+UVCIOC_CTRL_QUERY = 0xC0107521  # _IOWR('u', 0x21, struct uvc_xu_control_query), 64-bit
+
+
+class _XuQuery(ctypes.Structure):
+    _fields_ = [("unit", ctypes.c_uint8), ("selector", ctypes.c_uint8), ("query", ctypes.c_uint8),
+                ("size", ctypes.c_uint16), ("data", ctypes.c_void_p)]
+
+
+def _xu_unit_from_sysfs(usbdev):
+    raw = open(os.path.join(usbdev, "descriptors"), "rb").read()
+    o = 0
+    while o + 2 < len(raw) and raw[o] >= 2:
+        n = raw[o]
+        if raw[o + 1] == 0x24 and raw[o + 2] == 0x06 and n >= 24 and guid(raw[o + 4:o + 20]) in XU_GUIDS:
+            return raw[o + 3]
+        o += n
+    return None
+
+
+def _uvc_query(fd, unit, sel, req, buf):
+    import fcntl  # Linux only; check-image and diff run on a laptop too
+
+    arr = (ctypes.c_uint8 * len(buf)).from_buffer(buf)
+    fcntl.ioctl(fd, UVCIOC_CTRL_QUERY, _XuQuery(unit, sel, req, len(buf), ctypes.addressof(arr)))
+
+
+def camera_variant(video, usbdev):
+    """The FIRMWARE entry for the camera behind /dev/videoN, read while it streams; None if unknown."""
+    unit = _xu_unit_from_sysfs(usbdev)
+    if unit is None:
+        raise IOError("no SunplusIT extension unit")
+    fd = os.open(video, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        cursor = bytearray(4)
+        _uvc_query(fd, unit, SEL["FLASH_ADDR"], GET_CUR, cursor)
+        blocks = {}
+        try:
+            for b in FIRMWARE_BLOCKS:
+                _uvc_query(fd, unit, SEL["FLASH_ADDR"], SET_CUR, bytearray(b.to_bytes(4, "little")))
+                data = bytearray(BLOCK)
+                _uvc_query(fd, unit, SEL["FLASH_DATA"], GET_CUR, data)
+                blocks[b] = bytes(data)
+        finally:
+            _uvc_query(fd, unit, SEL["FLASH_ADDR"], SET_CUR, cursor)
+    finally:
+        os.close(fd)
+    return firmware_variant(lambda addr, n: blocks[addr - addr % BLOCK][addr % BLOCK:addr % BLOCK + n])
+
+
+def cmd_variant(a):
+    out = []
+    for link in sorted(glob.glob("/dev/v4l/by-path/*-video-index0")):
+        video = os.path.realpath(link)
+        usbdev = os.path.realpath("/sys/class/video4linux/%s/device/.." % os.path.basename(video))
+        try:
+            vid, pid = (open(os.path.join(usbdev, f)).read().strip() for f in ("idVendor", "idProduct"))
+        except OSError:
+            continue
+        if (int(vid, 16), int(pid, 16)) != (VID, PID):
+            continue
+        port = os.path.basename(usbdev)
+        cam = {"port": port.split("-", 1)[1], "video": video,
+               "serial": open(os.path.join(usbdev, "serial")).read().strip(),
+               "version": bcd(int(open(os.path.join(usbdev, "bcdDevice")).read(), 16))}
+        try:
+            v = camera_variant(video, usbdev)
+            cam.update(variant=v["name"] if v else None, label=v["label"] if v else "unknown firmware",
+                       recovers=bool(v and v["recovers"]))
+        except OSError as e:
+            cam.update(variant=None, label="couldn't read (%s)" % e, recovers=False, error=str(e))
+        out.append(cam)
+    if a.json:
+        print(json.dumps(out))
+        return
+    if not out:
+        print("No Thriftiest Cams (1bcf:28c5) found.")
+    for c in out:
+        print("%-6s %-10s firmware %s, %s%s" % (c["port"], c["serial"], c["version"], c["label"],
+                                               "" if c["recovers"] else "  (no USB recovery)"))
+
+
 def default_backup_dir():
     """~/thriftiest-backups of the user who ran sudo, not root's."""
     user = os.environ.get("SUDO_USER")
@@ -524,6 +645,9 @@ def main():
                    help="also read each camera's stored name/serial (drops it from PhotonVision for a moment)")
     c = sub.add_parser("check-image")
     c.add_argument("image")
+    c.add_argument("--json", action="store_true")
+    c = sub.add_parser("variant")
+    c.add_argument("--json", action="store_true")
     c = sub.add_parser("diff")
     c.add_argument("a")
     c.add_argument("b")
@@ -541,7 +665,7 @@ def main():
             c.add_argument("--name")
             c.add_argument("--serial")
     a = p.parse_args()
-    if a.cmd not in ("check-image", "diff"):
+    if a.cmd not in ("check-image", "diff", "variant"):
         if usb is None:
             die("pyusb isn't installed: sudo apt install python3-usb")
         if os.geteuid() != 0:
@@ -554,7 +678,7 @@ def main():
         if os.system("systemctl is-active --quiet photonvision") == 0:
             die("PhotonVision is running, and its camera watchdog would reset the camera mid-operation:"
                 " sudo systemctl stop photonvision first (start it again after)")
-    {"list": cmd_list, "check-image": cmd_check_image, "diff": cmd_diff, "dump": cmd_dump,
+    {"list": cmd_list, "check-image": cmd_check_image, "diff": cmd_diff, "variant": cmd_variant, "dump": cmd_dump,
      "flash": cmd_flash, "rename": cmd_rename}[a.cmd](a)
 
 

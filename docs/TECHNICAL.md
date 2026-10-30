@@ -949,6 +949,29 @@ as TXMAN1 Q13's "disabled by hub (EMI?)"; the camera forgotten by the kernel; a 
   sensor. The dip warning was set at 12 V, so every reading was logged as a dip, every 5 s. It's
   4.75 V now (5 V -5%), and SpectrumVision's `minJetsonInputV` default with it.
 
+### Thriftiest Cam firmware from PhotonVision (2026-10-30, `photonvision-87`)
+
+- **Which firmware each camera runs, without stopping it.** Every variant reports 5.13, so
+  `thriftiest-fw.py variant` reads a few flash bytes ([THRIFTIEST-CAM-FIRMWARE.md](THRIFTIEST-CAM-FIRMWARE.md)
+  has the table) through the video driver: the vendor extension unit's flash controls work through
+  `UVCIOC_CTRL_QUERY` on `/dev/videoN` while the camera streams. Two 1 KiB reads, 0.5 s, no frame lost,
+  no pyusb or root needed.
+- **Warnings.** `health-check.sh` (and so Match Ready) passes each Thriftiest Cam on a usbrecov
+  firmware and warns about any other: a USB drop leaves it down until replugged.
+- **Settings > Thriftiest Cam firmware** (`ThriftiestFirmwareCard.vue`, `ThriftiestFirmware.java`,
+  `/api/thriftiest/firmware`): each camera's name, port, serial and firmware; firmware files uploaded
+  once and kept in `photonvision_config/thriftiest-firmware` (checked with `check-image`, anything else
+  refused); a Flash button per camera, refused while the robot is enabled.
+- **The flash runs outside PhotonVision.** PhotonVision's camera watchdog resets a camera that stops
+  streaming, which broke a flash mid-read, so PhotonVision has to be stopped. It starts
+  `scripts/jetson/thriftiest-flash-job.sh` as a transient systemd unit (`systemd-run`), which stops
+  PhotonVision, flashes with the usual backup and checks, starts PhotonVision again whatever happens,
+  and writes its progress to `/run/spectrum/thriftiest-flash.json` for the card. The scripts are
+  found through `/opt/photonvision/health-check.sh`, the link to the repo's `scripts/jetson`.
+  `09-robot-tuning.sh` now installs `python3-usb`.
+- **Tested on the robot:** orin-right flashed from the card, usbrecov + bwreport → usbrecov: about
+  50 s, serial kept, backup saved, both cameras streaming after.
+
 ### Cameras known by their serial, and how different their calibrations are (2026-10-29, `photonvision-86`)
 
 - **The problem.** Every Thriftiest Cam reports serial `01.00.00`, so PhotonVision identifies a USB

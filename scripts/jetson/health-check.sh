@@ -6,6 +6,7 @@
 set -uo pipefail
 
 EXPECT=${1:-2}
+HERE=$(dirname "$(readlink -f "$0")")   # the repo's scripts/jetson (PhotonVision runs it via a link)
 fails=0 warns=0
 pass() { printf "  PASS  %s\n" "$*"; }
 warn() { printf "  WARN  %s\n" "$*"; warns=$((warns + 1)); }
@@ -199,6 +200,16 @@ while IFS=$'\t' read -r name port ident; do
     fail "$name isn't on USB (${ident##*/} isn't there): replug it, or power-cycle the robot if it's a stuck Thriftiest Cam"
   fi
 done <<<"$CAMS"
+# Which firmware each Thriftiest Cam runs (thriftiest-fw.py variant: read through the video driver,
+# while the cameras stream). Every variant reports 5.13; only the usbrecov ones come back from a
+# USB drop by themselves.
+FW_VARIANTS=$(python3 "$HERE/thriftiest-fw.py" variant --json 2>/dev/null)
+fw_variant() {  # PORT -> "yes|no<TAB>label", or nothing if unknown
+  python3 -c 'import json, sys
+for c in json.loads(sys.argv[1] or "[]"):
+    if c["port"] == sys.argv[2] and c.get("variant"):
+        print("%s\t%s" % ("yes" if c["recovers"] else "no", c["label"]))' "$FW_VARIANTS" "$1" 2>/dev/null
+}
 cams=0
 for intf in /sys/bus/usb/drivers/uvcvideo/*:1.0; do
   [[ -e $intf ]] || continue
@@ -229,14 +240,18 @@ for intf in /sys/bus/usb/drivers/uvcvideo/*:1.0; do
       fail "$name is streaming ${actual} ${pixfmt}, but PhotonVision set ${want% *}: the detector gets an upscaled image (restart PhotonVision)"
     else pass "$name streaming ${actual} ${pixfmt}${want:+, as set}"; fi
   fi
-  # Thriftiest Cam (1bcf:28c5) firmware is its USB bcdDevice: 0x0513 = 5.13. The factory build
-  # also reports 5.13 but hides gain, so a gain control is what tells the published 5.13 apart.
-  # Update with thriftiest-fw.py (docs/THRIFTIEST-CAM-FIRMWARE.md).
+  # Thriftiest Cam (1bcf:28c5) firmware: which variant (above), else from its USB bcdDevice (0x0513 =
+  # 5.13) and whether it has a gain control (the factory 5.13 hasn't). docs/THRIFTIEST-CAM-FIRMWARE.md.
   if [[ $(cat "$dev/idVendor" 2>/dev/null):$(cat "$dev/idProduct" 2>/dev/null) == 1bcf:28c5 ]]; then
     rev=$(cat "$dev/bcdDevice" 2>/dev/null)
     fw=$((16#${rev:0:2})).${rev:2:2}
     gain=$( [[ -n $vdev ]] && v4l2-ctl -d "$vdev" -l 2>/dev/null | grep -qE '^ *gain ' && echo yes)
-    if [[ $((16#${rev:-0})) -lt $((16#0513)) ]]; then
+    variant=$(fw_variant "$hubport")
+    if [[ $variant == yes$'\t'* ]]; then
+      pass "${name:-$hubport}: Thriftiest Cam firmware ${variant#*$'\t'}: recovers from a USB drop"
+    elif [[ $variant == no$'\t'* ]]; then
+      warn "${name:-$hubport}: Thriftiest Cam firmware ${variant#*$'\t'}: a USB drop leaves it down until replugged; flash usbrecov (PhotonVision Settings > Thriftiest Cam firmware)"
+    elif [[ $((16#${rev:-0})) -lt $((16#0513)) ]]; then
       warn "${name:-$hubport}: Thriftiest Cam firmware $fw, 5.13 is out (scripts/host/thriftiest-flash.sh flash $hubport ...)"
     elif [[ -z $gain ]]; then
       warn "${name:-$hubport}: Thriftiest Cam firmware $fw factory build, no gain control (scripts/host/thriftiest-flash.sh flash $hubport ...)"
