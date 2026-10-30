@@ -3,7 +3,8 @@
 # Verifies NVMe root, L4T version, and that MAXN SUPER exists, then enables it.
 set -uo pipefail
 
-EXPECTED_L4T="R36 (release), REVISION: 5.2"
+# JetPack 7.2.1 (L4T r39.2.1); "R36 (release), REVISION: 5.2" for a JetPack 6 flash.
+EXPECTED_L4T=${EXPECTED_L4T:-"R39 (release), REVISION: 2.1"}
 MAXN_SUPER_ID=2
 fail=0
 
@@ -33,6 +34,6 @@ sudo jetson_clocks
 sudo nvpmodel -q
 
 echo
-echo "All checks passed. Next: sudo apt update && sudo apt install -y nvidia-jetpack"
+echo "All checks passed. Next: scripts/jetson/02-jetpack.sh (installs nvidia-jetpack)"
 echo "(the BSP flash does not include CUDA/cuDNN/TensorRT), then check 'nvcc --version'"
 echo "with /usr/local/cuda/bin on PATH."
