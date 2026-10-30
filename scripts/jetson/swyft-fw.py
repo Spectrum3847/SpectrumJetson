@@ -104,11 +104,15 @@ STR_SERIAL = 0x03
 def read_table(img):
     """[(type, payload)] from the record table, or None if the image has none."""
     o = TABLE
-    if img[o:o + 3] != TABLE_MAGIC:
+    if len(img) < o + 6 or img[o:o + 3] != TABLE_MAGIC:
         return None
     total, count = img[o + 3] | img[o + 4] << 8, img[o + 5]
+    if o + total > min(len(img), TABLE_END):
+        return None
     entries, p = [], o + 6
     for _ in range(count):
+        if p >= o + total:
+            return None
         n = img[p]
         if n < 2 or p + n > o + total:
             return None
@@ -139,8 +143,9 @@ def serial_of(img):
     if i < 0:
         return None
     j = i + 9
-    n = img[j]
-    return img[j + 2:j + n].decode("ascii", "replace") if img[j + 1] == 0x03 else None
+    if j + 2 > len(img) or img[j] < 2 or j + img[j] > len(img) or img[j + 1] != 0x03:
+        return None
+    return img[j + 2:j + img[j]].decode("ascii", "replace")
 
 
 def with_serial(img, serial):
@@ -410,14 +415,34 @@ def backup(b, backup_dir, full_port, label):
     os.makedirs(backup_dir, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     path = os.path.join(backup_dir, "swyft-%s-%s-%s.bin" % (full_port, stamp, label))
-    with open(path, "wb") as f:
+    n = 1
+    while True:
+        try:
+            f = open(path, "xb")   # never overwrite an earlier backup
+            break
+        except FileExistsError:
+            n += 1
+            path = os.path.join(backup_dir, "swyft-%s-%s-%s-%d.bin" % (full_port, stamp, label, n))
+    with f:
         f.write(first)
+        f.flush()
+        os.fsync(f.fileno())   # on the disk before anything is erased: the robot loses power any time
+    try:
+        d = os.open(backup_dir, os.O_RDONLY)   # the new file's directory entry; Linux only
+        try:
+            os.fsync(d)
+        finally:
+            os.close(d)
+    except OSError:
+        pass
     print("Backup: " + path)
     return first, path
 
 
 def write_image(b, image):
-    """Erase, write and verify; the 55 AA tag goes last, so an interrupted write never boots."""
+    """Erase, write and verify; the image's own tag (55 AA in a good image) goes last, so an
+    interrupted write never boots."""
+    tag = bytes(image[TAG_ADDR:TAG_ADDR + 2])
     held = bytearray(image)
     held[TAG_ADDR:TAG_ADDR + 2] = b"\xff\xff"
     b.set_flash_status(FLASH_UNPROTECT)
@@ -433,9 +458,17 @@ def write_image(b, image):
     print()
     if b.read(0, FLASH_SIZE) != bytes(held):
         raise IOError("the flash doesn't read back as written")
-    b.write(TAG_ADDR, TAG)
-    if b.read(TAG_ADDR, 2) != TAG:
-        raise IOError("the 55 AA tag didn't read back")
+    if tag != b"\xff\xff":
+        b.write(TAG_ADDR, tag)
+        if b.read(TAG_ADDR, 2) != tag:
+            raise IOError("the boot tag didn't read back")
+
+
+def protect(b):
+    """SPI controller back as Swyft's tool leaves it, and the flash write-protected."""
+    b.spi_restore(SPI_AFTER)
+    if b.flash_status() != FLASH_PROTECT:
+        b.set_flash_status(FLASH_PROTECT)
 
 
 # ---- commands -------------------------------------------------------------------------------
@@ -492,20 +525,26 @@ def cmd_dump(a):
     try:
         b.spi_setup()
         try:
-            data, _ = backup(b, a.backup_dir, full_port, "dump")
+            data, bpath = backup(b, a.backup_dir, full_port, "dump")
         finally:
             b.spi_restore(b.saved)
     except BaseException:
         b.boot_firmware()
         b.close()
         raise
-    open(a.out, "wb").write(data)
-    print("Wrote %d bytes to %s (serial %s, %s)" % (len(data), a.out, serial_of(data) or "?",
-                                                  (describe(data) or {"label": "unknown image"})["label"]))
     print("Restarting the camera…")
     dev = back_to_firmware(full_port, b)
     if dev:
         print("Back on its firmware (revision %04x)." % dev.bcdDevice)
+    # Written after the camera is back on its firmware, so a bad output path can't leave it in the
+    # boot loader; the same bytes are already in the backup.
+    try:
+        with open(a.out, "wb") as f:
+            f.write(data)
+    except OSError as e:
+        die("couldn't write %s (%s); the dump is in %s" % (a.out, e, bpath))
+    print("Wrote %d bytes to %s (serial %s, %s)" % (len(data), a.out, serial_of(data) or "?",
+                                                  (describe(data) or {"label": "unknown image"})["label"]))
 
 
 def cmd_flash(a):
@@ -522,28 +561,35 @@ def cmd_flash(a):
         die("this rewrites the camera's firmware (%s): add --yes"
             % (describe(img) or {"label": "unknown image"})["label"])
     full_port, b = to_boot_loader(a.port)
+    erased = False   # once the chip is erased, the camera stays in the boot loader on failure
     try:
         b.spi_setup()
         baseline, bpath = backup(b, a.backup_dir, full_port, (describe(img) or {"name": "image"})["name"])
         if baseline == img:
             print("Already up to date: nothing to write.")
-            b.spi_restore(b.saved)
+            protect(b)   # a retry after a run that wrote but didn't protect
         else:
             try:
+                erased = True
                 write_image(b, img)
             except (IOError, usb.core.USBError) as e:
                 print("\nWrite failed (%s); putting the original back…" % e)
                 try:
                     write_image(b, baseline)
+                    protect(b)
                     restored = True
                 except (IOError, usb.core.USBError):
                     restored = False
-                die("write failed; original %s. Keep the camera plugged in. Backup: %s"
-                    % ("restored" if restored else "NOT restored", bpath))
+                if restored:
+                    back_to_firmware(full_port, b)
+                    die("write failed; the original firmware is back (verified). Backup: " + bpath)
+                die("write failed and the original is NOT back: the camera is in its boot loader. Keep it"
+                    " plugged in and re-run flash (with the backup to restore it): " + bpath)
             print("Written and verified.")
-            b.spi_restore(SPI_AFTER)
-            b.set_flash_status(FLASH_PROTECT)
+            protect(b)
     except BaseException:
+        if not erased:
+            b.boot_firmware()   # nothing written: back to its own firmware
         b.close()
         raise
     print("Restarting the camera…")

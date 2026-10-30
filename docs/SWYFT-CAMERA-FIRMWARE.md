@@ -86,7 +86,8 @@ PhotonVision stopped, robot disabled:
 sudo systemctl stop photonvision
 sudo python3 swyft-fw.py dump --port 2.4 swyft.bin          # backup, ~3 s
 sudo python3 swyft-fw.py flash --port 2.4 LowExposureSWYFTUSBOV9281.rfw --serial SJ-SW01 --yes
-sudo systemctl start photonvision
+# power-cycle the robot (main breaker; a Jetson reboot isn't enough): the camera's video stays off
+# after the boot loader until it loses power. PhotonVision starts with the robot.
 ```
 
 pyusb: `09-robot-tuning.sh` installs `python3-usb`; without internet, use the copy

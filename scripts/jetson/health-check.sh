@@ -218,8 +218,10 @@ CAM_FPS=$(timeout 8 python3 -c 'import json, time, urllib.request
 get = lambda: json.load(urllib.request.urlopen("http://localhost:5800/api/usb/bandwidth", timeout=3))
 get(); time.sleep(1.5)
 for c in get().get("cameras", []):
-    print("%s\t%.0f" % (c["port"], c.get("fps") or 0))' 2>/dev/null || true)
-cam_fps() { awk -F'\t' -v p="$1" '$1 == p { print $2; exit }' <<<"$CAM_FPS"; }
+    # streaming: PhotonVision has it open (false for a deactivated camera); fps blank if unmeasured
+    fps = c.get("fps")
+    print("%s\t%s\t%s" % (c["port"], "yes" if c.get("streaming") else "no", "" if fps is None else "%.2f" % fps))' 2>/dev/null || true)
+cam_fps() { awk -F'\t' -v p="$1" '$1 == p { print $2 "\t" $3; exit }' <<<"$CAM_FPS"; }
 cams=0
 for intf in /sys/bus/usb/drivers/uvcvideo/*:1.0; do
   [[ -e $intf ]] || continue
@@ -249,12 +251,14 @@ for intf in /sys/bus/usb/drivers/uvcvideo/*:1.0; do
     elif [[ -n $want && ${want% *} != "$actual" ]]; then
       fail "$name is streaming ${actual} ${pixfmt}, but PhotonVision set ${want% *}: the detector gets an upscaled image (restart PhotonVision)"
     else
-      fps=$(cam_fps "$port")
-      if [[ -z $fps ]]; then
-        warn "$name set to ${actual} ${pixfmt}${want:+, as set}, but its frame rate is unknown (PhotonVision's USB bandwidth API didn't answer)"
-      elif ((fps < 1)); then
-        fail "$name is set to ${actual} ${pixfmt} but sends no frames (0 fps): replug it, or power-cycle the robot"
-      else pass "$name streaming ${actual} ${pixfmt}${want:+, as set}, ${fps} fps"; fi
+      IFS=$'\t' read -r open fps <<<"$(cam_fps "$port")"
+      if [[ $open != yes ]]; then
+        pass "$name set to ${actual} ${pixfmt}${want:+, as set} (PhotonVision isn't streaming it: deactivated?)"
+      elif [[ -z $fps ]]; then
+        warn "$name set to ${actual} ${pixfmt}${want:+, as set}, but its frame rate is unknown (PhotonVision's USB bandwidth API didn't say)"
+      elif awk -v f="$fps" 'BEGIN { exit !(f < 1) }'; then
+        fail "$name is set to ${actual} ${pixfmt} but sends no frames (${fps} fps): power-cycle the robot, or replug it"
+      else pass "$name streaming ${actual} ${pixfmt}${want:+, as set}, ${fps%.*} fps"; fi
     fi
   fi
   # Thriftiest Cam (1bcf:28c5) firmware: which variant (above), else from its USB bcdDevice (0x0513 =
