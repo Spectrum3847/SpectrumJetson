@@ -19,13 +19,16 @@
 #              the image edge and walk it out for range; detections per camera
 #   usb        OPT-IN (not in the default list): USB recovery timing (tests/usb-recovery-bench),
 #              which cuts camera links. Only with the usbrecov firmware on every camera.
+#   stills     OPT-IN: Rewind recordings of a tag held STILL, per camera at ~1, 2.5, 4 m and at the
+#              current exposure and half of it, for the field-replay accuracy (static-jitter) judge.
 #
 # Usage: tests/bench-session/run.sh [STEP...] [usb]
 #   tests/bench-session/run.sh                 everything but usb
 #   tests/bench-session/run.sh graphs 3d       just those
 #   tests/bench-session/run.sh all usb         everything, USB recovery too
 # Env: BENCH_SECS (measurement window, default 30), BENCH_ROUNDS (A/B rounds, default 2),
-#      RT_SECS (seconds per spectrum-rt run, default 45), EDGE_VALUES (default "0 25 50")
+#      RT_SECS (seconds per spectrum-rt run, default 45), EDGE_VALUES (default "0 25 50"),
+#      BENCH_STILL_SECS (seconds per still recording, default 45)
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -34,6 +37,7 @@ SECS=${BENCH_SECS:-30}
 ROUNDS=${BENCH_ROUNDS:-2}
 RT_SECS=${RT_SECS:-45}
 EDGE_VALUES=${EDGE_VALUES:-"0 25 50"}
+STILL_SECS=${BENCH_STILL_SECS:-45}
 GRAPHS_FILE=/tmp/spectrum-detector-graphs
 DROPIN=/etc/systemd/system/photonvision.service.d/detector.conf
 # Before the 2026-10-31 rename 08-select-detector.sh wrote 971.conf (SPECTRUM_971_* names).
@@ -183,9 +187,9 @@ STEPS=()
 for a in "$@"; do
   case $a in
     all) STEPS+=("${DEFAULT_STEPS[@]}") ;;
-    inventory | baseline | graphs | far | 3d | rt | edge | usb) STEPS+=("$a") ;;
+    inventory | baseline | graphs | far | 3d | rt | edge | usb | stills) STEPS+=("$a") ;;
     -h | --help) sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
-    *) echo "unknown step $a (inventory baseline graphs far 3d rt edge usb all)" >&2; exit 2 ;;
+    *) echo "unknown step $a (inventory baseline graphs far 3d rt edge usb stills all)" >&2; exit 2 ;;
   esac
 done
 ((${#STEPS[@]})) || STEPS=("${DEFAULT_STEPS[@]}")
@@ -266,6 +270,8 @@ if [[ -e $GRAPHS_FILE ]]; then GRAPHS_ORIG=$(cat "$GRAPHS_FILE"); else GRAPHS_OR
 DROPIN_BACKUP=$OUT/$(basename "$DROPIN").orig
 [[ -f $DROPIN ]] && cp "$DROPIN" "$DROPIN_BACKUP"
 PNP_CHANGED=()   # "uniqueName<TAB>original value"
+EXPO_CHANGED=()  # "uniqueName<TAB>original cameraExposureRaw"
+REWIND_ON=0
 DROPIN_CHANGED=0
 LOAD_PIDS=()
 restore() {
@@ -281,6 +287,11 @@ restore() {
   for e in "${PNP_CHANGED[@]}"; do
     u=${e%%$'\t'*}; v=${e#*$'\t'}
     timeout 15 python3 "$PVPY" set "$u" solvePNPEnabled "$v" && echo "  3D (solvePNPEnabled) $v: $u"
+  done
+  ((REWIND_ON)) && rewind_set false > /dev/null && echo "  Rewind manual recording stopped"
+  for e in "${EXPO_CHANGED[@]}"; do
+    u=${e%%$'\t'*}; v=${e#*$'\t'}
+    timeout 15 python3 "$PVPY" set "$u" cameraExposureRaw "$v" && echo "  exposure (cameraExposureRaw) $v: $u"
   done
   if ((DROPIN_CHANGED)); then
     # Put back under the new name (08 replaced an old 971.conf), with SPECTRUM_971_* renamed.
@@ -486,6 +497,77 @@ step_usb() {
   awk '{print $3, $4, $5}' "$OUT/usb-recovery.txt" | while read -r l; do note "$l s"; done
 }
 
+# Still captures (RESULTS.md in tests/field-replay/accuracy, "Needs new recordings"): Rewind's
+# manual recording (POST /api/rewind {"manual": ...}; the REST call takes no label, so the session
+# name, "NNNN_<label>_<time>", is read from GET /api/rewind while it records). Rewind records every
+# camera at once; the condition is about the camera the tag faces. JPEG quality: PhotonVision has no
+# setting for it (the cameras' MJPEG quality is fixed in their firmware), so that axis is skipped.
+rewind_set() { curl -s -m 10 -H 'Content-Type: application/json' -d "{\"manual\": $1}" localhost:5800/api/rewind; }
+rewind_session() { curl -s -m 10 localhost:5800/api/rewind | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["session"] if d.get("recording") else "")'; }
+# detector stats over a window: per detector, tags/frame and decision margin avg/min
+still_stats() {
+  sudo -n journalctl -u photonvision --since "@$1" --until "@$2" -o cat --no-pager 2>/dev/null | python3 -c '
+import collections, re, sys
+d = collections.defaultdict(lambda: [0.0, 0, 0.0, 0.0, 1e9])  # tags/frame sum, windows, margin*calls, calls, min
+for l in sys.stdin:
+    m = re.match(r"(?:971|detector) stats (h\d+) \S+: ([\d.]+) calls/s.*?tags/frame ([\d.]+)(?:, margin avg ([\d.]+) min ([\d.]+))?", l)
+    if not m: continue
+    x = d[m.group(1)]; x[0] += float(m.group(3)); x[1] += 1
+    if m.group(4):
+        w = float(m.group(2)) * float(m.group(3)); x[2] += w * float(m.group(4)); x[3] += w; x[4] = min(x[4], float(m.group(5)))
+print("; ".join("%s %.2f tags/frame%s" % (h, x[0] / x[1], ", margin avg %.1f min %.1f" % (x[2] / x[3], x[4]) if x[3] else "")
+                for h, x in sorted(d.items())) or "no detector stats lines")'
+}
+
+step_stills() {
+  local cams u name port st orig auto half dist e sess t0 t1 stats i
+  cams=$(pv_cams) || return 1
+  [[ $(rewind_session) == "" ]] || { note "Rewind is already recording; not starting another"; return 1; }
+  note "JPEG quality: skipped (PhotonVision has no JPEG quality setting; the MJPEG quality is the camera firmware's)"
+  ask "STILLS: per camera, a tag at ~1, 2.5 and 4 m, two exposures each, ${STILL_SECS} s recordings. Tag on a stand (not in a hand). Nothing may move while it records." || return
+  while IFS=$'\t' read -r u name port st; do
+    [[ -n $u ]] || continue
+    orig=$(timeout 15 python3 "$PVPY" get "$u" cameraExposureRaw)
+    auto=$(timeout 15 python3 "$PVPY" get "$u" cameraAutoExposure)
+    half=""
+    if [[ $auto == false ]] && [[ $orig =~ ^[0-9.]+$ ]]; then
+      half=$(python3 -c "print(max(1, round(float('$orig') / 2, 1)))")
+    else
+      note "$name @$port: exposure $orig (auto $auto); only the current exposure"
+    fi
+    for dist in 1 2.5 4; do
+      for e in "$orig" $half; do
+        ask "STILL $name @$port: tag at ~$dist m, centred in this camera's image, don't touch anything (exposure $e; s skips just this one)."
+        i=$?
+        ((i == 1)) && return 1
+        ((i == 2)) && { note "$name @$port $dist m exposure $e: skipped"; continue; }
+        if [[ $e != "$orig" ]]; then
+          EXPO_CHANGED+=("$u"$'\t'"$orig")
+          tmo 15 python3 "$PVPY" set "$u" cameraExposureRaw "$e" || { note "exposure change failed"; return 1; }
+          sleep 3
+        fi
+        t0=$(date +%s)
+        REWIND_ON=1
+        rewind_set true > /dev/null || { note "Rewind start failed"; return 1; }
+        sleep 3
+        sess=$(rewind_session)
+        echo "  recording ${STILL_SECS}s: ${sess:-?}"
+        sleep $((STILL_SECS - 3 > 1 ? STILL_SECS - 3 : 1))
+        rewind_set false > /dev/null; REWIND_ON=0
+        t1=$(date +%s)
+        if [[ $e != "$orig" ]]; then
+          tmo 15 python3 "$PVPY" set "$u" cameraExposureRaw "$orig"; unset 'EXPO_CHANGED[-1]'
+        fi
+        stats=$(still_stats "$t0" "$t1")
+        note "still ${sess:-(no session name)}: $name @$port, ~$dist m, exposure $e: $stats"
+        sleep 2
+      done
+    done
+  done <<< "$cams"
+  note "copy the recordings to the laptop for the accuracy judge (tests/field-replay/accuracy):"
+  note "  rsync -a jetson:/opt/photonvision/rewind/sessions/ logs/rewind/sessions/"
+}
+
 # ---------------------------------------------------------------------------------------------
 # results.md: the TSVs averaged over rounds (max columns: worst), plus the notes
 render() {
@@ -539,7 +621,8 @@ echo "Bench session: ${STEPS[*]} -> $OUT  (window ${SECS}s, ${ROUNDS} rounds; Ct
 
 declare -A LIMIT=([inventory]=180 [baseline]=900 [graphs]=$((ROUNDS * 2 * (SECS + 90) + 600))
                   [3d]=$((ROUNDS * 2 * (SECS + 120) + 600)) [rt]=$((4 * ROUNDS * (RT_SECS + 15) + 900))
-                  [edge]=2400 [usb]=2400)
+                  [edge]=2400 [usb]=2400
+                  [stills]=$((5 * 3 * 2 * (STILL_SECS + 90) + 600)))
 for s in "${STEPS[@]}"; do
   step_begin "$s" "${LIMIT[$s]}"
   "step_$s"
@@ -550,3 +633,4 @@ for s in "${STEPS[@]}"; do
   else echo "  $s done"; fi
 done
 STEP=end
+for s in "${STEPS[@]}"; do [[ $s == stills ]] && echo "Still recordings: copy them off with  rsync -a jetson:/opt/photonvision/rewind/sessions/ logs/rewind/sessions/  (session names in results.md)"; done

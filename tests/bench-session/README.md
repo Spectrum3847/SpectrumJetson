@@ -19,6 +19,7 @@ Clocks: the bench has no robot, so the session holds `spectrum-clocks mode full`
 ~/SpectrumJetson/tests/bench-session/run.sh            # everything except USB (~45-60 min)
 ~/SpectrumJetson/tests/bench-session/run.sh graphs 3d  # only these steps
 ~/SpectrumJetson/tests/bench-session/run.sh all usb    # everything, USB recovery too
+~/SpectrumJetson/tests/bench-session/run.sh stills     # still recordings for the accuracy judge (opt-in)
 ```
 
 At each `>>>` prompt, do what it says and press Enter. Type `s` + Enter to skip that step.
@@ -33,6 +34,7 @@ Ctrl-C at any time stops and puts everything back.
 | 3d | tags in view, keep still | 3D (solvePNPEnabled) on vs off: CPU, latency | each camera's active pipeline setting, via PhotonVision's websocket |
 | rt | tags in view, keep still | spectrum-rt off vs on with LOAD=0 and LOAD=4 (tests/rt-ab) | spectrum-rt mode |
 | edge | slide a tag off each image edge, then walk it out for range (40 s per value) | detections per camera with the edge filter at 0, 25, 50 px | detector options drop-in (one PhotonVision restart per value, one more at the end) |
+| stills (opt-in) | per camera: a tag on a stand at ~1, 2.5, 4 m, centred; touch nothing while it records (`s` skips one condition) | a Rewind recording per camera x distance x exposure (current, then half; only current if auto exposure), with the detector's tags/frame and decision margin over it | that camera's `cameraExposureRaw` (put back after each recording); Rewind manual recording |
 | usb (opt-in) | watch | seconds until each camera streams again after disable/remove/reset and a hub reset | cuts camera USB links; refuses unless every camera's firmware reports `"recovers": true` |
 
 Every step has a hard time limit; when it runs out the step is marked TIMEOUT and the session moves on.
@@ -51,4 +53,9 @@ Notes:
 - The edge step is skipped if the installed detector has no `SPECTRUM_DETECTOR_EDGE_BORDER_PX`, or if
   `~/build/gpu-detector` differs from what's installed (08-select-detector.sh would swap it).
 - CPU profiling uses perf, never async-profiler (its SIGPROF stops cscore camera threads).
-- Tunables: `BENCH_SECS` (window, 30), `BENCH_ROUNDS` (A/B rounds, 2), `RT_SECS` (45), `EDGE_VALUES` ("0 25 50").
+- stills: for the static-jitter judge in `tests/field-replay/accuracy` (RESULTS.md, "Needs new
+  recordings"). The Rewind API takes no label, so results.md lists each condition's session name
+  (`NNNN_<label>_<time>`). JPEG quality is skipped: PhotonVision has no setting for it. Copy the
+  recordings off: `rsync -a jetson:/opt/photonvision/rewind/sessions/ logs/rewind/sessions/`.
+  Each takes `BENCH_STILL_SECS` (45) s; ~30 min for 5 cameras.
+- Tunables: `BENCH_SECS` (window, 30), `BENCH_ROUNDS` (A/B rounds, 2), `RT_SECS` (45), `EDGE_VALUES` ("0 25 50"), `BENCH_STILL_SECS` (45).
