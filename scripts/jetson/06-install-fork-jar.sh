@@ -8,15 +8,36 @@ set -euo pipefail
 [[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 
 JAR=${1:?usage: $0 <photonvision-linuxarm64.jar>}
-JAVA17=/usr/lib/jvm/java-17-openjdk-arm64/bin/java
+# The Java the jar was compiled for: 2026 jars target 17 (class file 61), 2027 ones 25 (69).
+# JAVA_FEATURE=17|25 overrides.
+cls=$(unzip -p "$JAR" org/photonvision/Main.class 2>/dev/null | od -An -tu1 -j7 -N1 | tr -d ' ')
+JAVA_FEATURE=${JAVA_FEATURE:-$([[ ${cls:-0} -ge 69 ]] && echo 25 || echo 17)}
+JAVA17=/usr/lib/jvm/java-$JAVA_FEATURE-openjdk-arm64/bin/java   # (named for 17, its first use)
 NET_FLAG=""
 [[ ${PV_MANAGE_NETWORK:-1} == 0 ]] && NET_FLAG=" -n"
 DEST=/opt/photonvision/photonvision.jar
 
-[[ -x $JAVA17 ]] || { echo "Missing $JAVA17 (sudo apt install openjdk-17-jdk)" >&2; exit 1; }
+[[ -x $JAVA17 ]] || { echo "Missing $JAVA17 (sudo apt install openjdk-$JAVA_FEATURE-jdk-headless)" >&2; exit 1; }
+# Every entry must read back with a good CRC. Python, not unzip -t: upstream's 2027 CI jars repeat a
+# few LICENSE/NOTICE entries, which Ubuntu 24.04's unzip rejects as a zip bomb (Java reads them fine),
+# so a repeated name is skipped, everything else must read.
+jar_ok() {
+  python3 - "$1" <<'PY'
+import collections, sys, zipfile
+try:
+    z = zipfile.ZipFile(sys.argv[1])
+    n = collections.Counter(i.filename for i in z.infolist())
+    assert n["org/photonvision/Main.class"] == 1
+    for i in z.infolist():
+        if n[i.filename] == 1:
+            z.read(i)
+except Exception as e:
+    sys.exit(f"{e}")
+PY
+}
 # Refuse truncated/corrupt jars: a bad jar here leaves the service crash-looping.
 # (No pipes here: with pipefail, `unzip -l | grep -q` fails when grep exits early.)
-if ! unzip -tq "$JAR" >/dev/null 2>&1 || ! unzip -l "$JAR" org/photonvision/Main.class >/dev/null 2>&1; then
+if ! jar_ok "$JAR"; then
   echo "Refusing to install $JAR: not a valid PhotonVision jar ($(stat -c %s "$JAR") bytes)." >&2
   exit 1
 fi
@@ -29,7 +50,7 @@ if [[ -f $DEST && ! -f /opt/photonvision/photonvision.jar.orig ]]; then
   sudo cp "$DEST" /opt/photonvision/photonvision.jar.orig
 fi
 # Also keep the last *valid* jar as .prev for a one-step rollback.
-if [[ -f $DEST ]] && unzip -tq "$DEST" >/dev/null 2>&1; then
+if [[ -f $DEST ]] && jar_ok "$DEST" 2>/dev/null; then
   sudo cp "$DEST" /opt/photonvision/photonvision.jar.prev
 fi
 # Copied beside it and renamed over it, with syncs: a power cut mid-install (a pit update, then the
