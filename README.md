@@ -307,7 +307,14 @@ The numbers come from our camera driver, which counts each camera's bytes and la
 
 `scripts/jetson/usb-bandwidth.py` shows the same from the command line: what each camera reserves, which ports failed and why, and the cap command to fix it. The health check runs it too.
 
-**Timestamps mark mid-exposure** (`photonvision-13`): the Jetson subtracts half the exposure from every frame's timestamp, so the robot shouldn't. The camera's own delay (readout and JPEG, before its first packet) is still to be measured on the robot with the spin-in-front-of-a-tag test, and set as `SPECTRUM_CAMERA_DELAY_US`. Frames are timestamped by the camera's own clock (see **Steadier timestamps** below).
+**Timestamps mark mid-exposure** (`photonvision-13`): the Jetson subtracts half the exposure from every frame's timestamp, so the robot shouldn't. The camera's own delay (readout and JPEG, before its first packet) is still to be measured, with the LED test below or on the robot with the spin-in-front-of-a-tag test, and set as `SPECTRUM_CAMERA_DELAY_US`. Frames are timestamped by the camera's own clock (see **Steadier timestamps** below).
+
+**Measuring the camera delay on the bench** (`tests/camera-delay/run.sh`): an LED on a Jetson GPIO pin is switched on at random moments while the camera watches it. Because the shutter is global, the first frame that sees the LED is only partly lit, and how much of it is lit says where the switch-on fell inside the exposure. That places the exposure end on the Jetson's own clock, and the gap to the frame's timestamp is the delay. It prints `SPECTRUM_CAMERA_DELAY_US=<value>` with its spread. Set it with `sudo systemctl edit photonvision` (`[Service]`, `Environment=SPECTRUM_CAMERA_DELAY_US=<value>`) and restart. Measure each camera model, and check that the value doesn't change with fps, the number of cameras, or the USB port.
+
+- **Parts:** an LED and a 330 ohm resistor in series between a free GPIO pin and ground (pin 6 on the 40-pin header). An IR LED works for the OV9281 cameras. Point it at the lens from a few centimetres, dim enough that the image doesn't saturate (the test stops if it does).
+- **Pin:** run `gpioinfo` and pick a line with no consumer, not one the fan's pwm-fan driver or anything else uses. The pin is your choice. Chip and line are arguments.
+- **Run:** `tests/camera-delay/run.sh /dev/video0 gpiochip0 <line> 100 2` (100 usable trials, 2 ms exposure). It stops PhotonVision and starts it again. With a short exposure only about exposure over frame period of the switch-ons are partly lit (24% for 2 ms at 120 fps), so it runs more than 100 switch-ons. Repeat at 5 ms and 8.3 ms, per camera model.
+- **Check the analysis without hardware:** `python3 tests/camera-delay/delay.py --self-test`.
 
 What other teams' vision systems do (Austin's AOS as run by 1868, 4646 and 254, 971's bos and cos, 6328's Northstar, EagleEye, Code Orange's MLTag, 4533's Whacknet), what an ideal system would have, the full profiling story, and future work: [docs/VISION-RESEARCH.md](docs/VISION-RESEARCH.md).
 
