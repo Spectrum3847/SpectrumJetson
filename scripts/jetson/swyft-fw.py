@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Swyft USB Camera firmware tool, run ON THE JETSON (sudo).
 
-  sudo python3 swyft-fw.py list                          # every Swyft: port, serial, chip status
+  sudo python3 swyft-fw.py list [--json]                 # every Swyft: port, serial, chip status
   python3 swyft-fw.py check-image FILE.rfw              # what a firmware file is (no camera needed)
   python3 swyft-fw.py diff A.bin B.bin                  # bytes that differ between two images/dumps
   sudo python3 swyft-fw.py dump --port 2.4 OUT.bin      # read the camera's whole flash (128 KiB)
@@ -474,19 +474,27 @@ def protect(b):
 # ---- commands -------------------------------------------------------------------------------
 
 def cmd_list(a):
-    cams = cameras()
-    if not cams:
-        print("No Swyft cameras (0bda:3035) found.")
+    cams, out = cameras(), []
     for d in sorted(cams, key=port_of):
         port = port_of(d).split("-", 1)[1]
         if d.idProduct == PID_BOOT:
-            print("%-8s IN THE BOOT LOADER (re-run flash, or replug it)" % port)
+            out.append({"port": port, "bootLoader": True, "serial": None, "revision": None})
             continue
         try:
             serial = usb.util.get_string(d, d.iSerialNumber)
         except (usb.core.USBError, ValueError):
-            serial = "?"
-        print("%-8s serial %-14s firmware revision %04x" % (port, serial, d.bcdDevice))
+            serial = None
+        out.append({"port": port, "bootLoader": False, "serial": serial, "revision": "%04x" % d.bcdDevice})
+    if a.json:
+        print(json.dumps(out))
+        return
+    if not out:
+        print("No Swyft cameras (0bda:3035) found.")
+    for c in out:
+        if c["bootLoader"]:
+            print("%-8s IN THE BOOT LOADER (re-run flash, or replug it)" % c["port"])
+        else:
+            print("%-8s serial %-14s firmware revision %s" % (c["port"], c["serial"] or "?", c["revision"]))
 
 
 def cmd_check_image(a):
@@ -607,7 +615,8 @@ def default_backup_dir():
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("list")
+    c = sub.add_parser("list")
+    c.add_argument("--json", action="store_true")
     c = sub.add_parser("check-image")
     c.add_argument("image")
     c.add_argument("--json", action="store_true")
