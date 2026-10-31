@@ -2149,6 +2149,65 @@ For comparison, one camera alone took 1.45 ms and 7% GPU at the start.
   The saving is the line fit, quad fit, decode and refine of each dropped tag, which only shows
   with tags at the edge.
 
+#### One wait for the GPU per frame: chained stages (`detector-13`, 2026-10-31)
+
+- **Per-frame map** (`graph_bench`, nsys `--cuda-graph-trace=node`, full clocks, PhotonVision
+  stopped; ceiling-4cam TopLeft = busy, no tags; TXMAN1 Q17 orin-left with its calibration):
+  - After `detector-11`, `Detect()` waited for the GPU 3 times (point count, stage-2 counts, fit
+    quads). Each wait cost **~100-120 µs** between the GPU's last op and the thread running again
+    (blocking sync through nvgpu). Within a frame the GPU sat idle ~460 µs (ceiling) between
+    the stages while the thread woke up and launched the next graph.
+  - GPU per frame (nsys-inflated): ceiling ~1.2 ms, TXMAN ~1.7 ms. Radix sort onesweep kernels
+    are 21-25% (19 passes a frame: 5 for the boundary sort, 8 for the angle sort over the full
+    64-bit key, 6 for the peak sort), `BlobDiffCompact` ~14%, labeling ~10%, the graphs' fill
+    kernels (26 a frame) ~5%.
+  - CPU after the last wait: 150 µs (ceiling) to 320 µs (TXMAN) of wall time. The decode workers
+    use ~850 µs of CPU per TXMAN frame, mostly `RefineEdges` and `UnDistort` (perf: 19% + 13% of
+    the process, `quad_decode_index` 5%).
+- **What:** stages 2 and 3 are launched right behind stage 1 with buckets guessed from the
+  recent counts. The guess is the largest count lately (decaying ~3% a frame) plus 1/8, rounded up
+  to a bucket. `Detect()` then waits once. Any bucket at least as large as the real count gives
+  exactly the same output (`detector-11`'s padding), so afterwards the host only checks that each
+  count fit. When one didn't (~4% of frames on the busy recordings, mostly as a scene gets busier),
+  stages 2 and 3 run again with the right buckets, as before. A new 1-thread kernel
+  (`GuardStage3`) makes stage 3 process nothing when its input doesn't fit its buckets (without
+  it, a too-small guess read padding indices: illegal memory access). Guessed graphs are
+  requested and recorded like any other stage graph (`StageGraphsWanted`). Until one is
+  recorded, that frame runs as before.
+- **Switch:** `SPECTRUM_DETECTOR_CHAIN=0` (environment, at start) or `0` in
+  `/tmp/spectrum-detector-chain` (live, re-read every 2 s) goes back to 3 waits. Default on: the
+  output is the same.
+- **Same results:** `graph_bench --out` (`%a`), this build against the build before, on every
+  regression camera and 4 TXMAN1 cameras (Q17 0002, Q24 0006, left/right, with calibration),
+  600 frames each: identical, 4,321 detections. `detector-replay --off` (which doesn't use the
+  graphs) is identical too.
+- **Measured** (`graph_bench`, 150 frames x 2 timed loops, chain off/on interleaved x 6, full
+  clocks, PhotonVision stopped; medians of the runs' medians, µs; "process" = all threads,
+  including the decode workers):
+
+  | Recording | thread CPU off → on | Detect wall off → on | process CPU off → on |
+  | --- | --- | --- | --- |
+  | ceiling-4cam TopLeft | 322 → **162** | 1514 → **1352** | 475 → 316 |
+  | fieldcal-synth TopLeft | 301 → **154** | 974 → **813** | 427 → 279 |
+  | synthetic-near-far CamA | 317 → **156** | 1050 → **884** | 443 → 286 |
+  | TXMAN1 Q17 orin-left (calib) | 362 → **201** | 2143 → **1977** | 1201 → 1047 |
+
+  About half of the calling thread's CPU and ~160 µs of each `Detect()`. GPU time +1% (the
+  guessed buckets are a little larger). Not yet measured live in PhotonVision.
+- **Tried, not kept:** skipping the worker pool on frames with no quads (same output, no
+  measurable gain) and decoding up to 4 quads on the calling thread (more calling-thread CPU,
+  no wall gain).
+- **What's left, by size:** (1) the decode workers' `RefineEdges`/`UnDistort`, ~0.6-0.7 ms of CPU
+  per busy calibrated frame. On the GPU, corners would differ in the last bits (needs
+  `judge.py`). (2) The sorts: the angle and peak sorts could be segmented by blob (points
+  arrive grouped by blob, and the angle key is total, so the output stays the same), fewer
+  passes. (3) The one remaining wait still costs ~110 µs of wake-up; spinning would buy that back
+  for ~0.3 ms of CPU a frame, so it isn't worth it. (4) Pre-existing: on the graph path, the
+  "Impossible increase in markers" check reads the pinned point count before any wait, so it
+  sees the previous frame's count.
+- **Tools:** `graph_bench` now takes `--calib fx,fy,cx,cy,k1..k6` (the CPU tail as a calibrated
+  camera runs it) and `--threads N`, and prints the whole process's CPU too.
+
 #### Where the remaining CPU goes (4 cameras, 1.2 cores)
 
 - **`tests/cpu-profile.sh`:** the 4 camera threads (15–25% of a core each) split their samples

@@ -3,13 +3,16 @@
 // first-stage graph recorded once), and writes every detection exactly, for A/B tests of the
 // detector's CUDA launch path (detector-11, SPECTRUM_DETECTOR_GRAPHS).
 //
-//   graph_bench CAMERA_DIR [--frames N] [--loops N] [--mwbd N] [--out DETECTIONS.txt]
+//   graph_bench CAMERA_DIR [--frames N] [--loops N] [--mwbd N] [--edge N] [--threads N]
+//               [--calib fx,fy,cx,cy,k1,k2,p1,p2,k3,k4,k5,k6] [--out DETECTIONS.txt]
 //
 // Decodes the first N frames (default 300) once, then runs them through Detect() --loops times
 // (default 3; the first loop is warm-up and isn't timed). Per Detect(): the calling thread's CPU
-// time (CLOCK_THREAD_CPUTIME_ID) and wall time. Prints medians and p95. DETECTIONS.txt: one line
-// per detection of the last loop: frame id hamming margin(%a) corners(%a), so two builds can be
-// compared bit for bit with cmp.
+// time (CLOCK_THREAD_CPUTIME_ID), the whole process's (the decode worker threads too) and wall
+// time. Prints medians and p95. DETECTIONS.txt: one line per detection of the last loop: frame id hamming margin(%a) corners(%a), so two builds can be
+// compared bit for bit with cmp. --calib: a lens calibration, as PhotonVision passes once the camera
+// is calibrated (RefineEdges undistorts every edge sample); without one, none (fx=fy=1, k=0).
+// --threads: the decode worker threads (default 6, as live).
 #include <time.h>
 
 #include <algorithm>
@@ -34,6 +37,11 @@ double ThreadCpuUs() {
   clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
   return t.tv_sec * 1e6 + t.tv_nsec / 1e3;
 }
+double ProcessCpuUs() {
+  timespec t;
+  clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t);
+  return t.tv_sec * 1e6 + t.tv_nsec / 1e3;
+}
 double Pct(std::vector<double> v, double p) {
   if (v.empty()) return 0;
   std::sort(v.begin(), v.end());
@@ -43,17 +51,33 @@ double Pct(std::vector<double> v, double p) {
 
 int main(int argc, char **argv) {
   if (argc < 2) {
-    std::cerr << "graph_bench CAMERA_DIR [--frames N] [--loops N] [--mwbd N] [--edge N] [--out FILE]\n";
+    std::cerr << "graph_bench CAMERA_DIR [--frames N] [--loops N] [--mwbd N] [--edge N] [--threads N]"
+                 " [--calib fx,fy,cx,cy,k1,k2,p1,p2,k3,k4,k5,k6] [--out FILE]\n";
     return 2;
   }
-  int max_frames = 300, loops = 3, mwbd = 20, edge = 0;
+  int max_frames = 300, loops = 3, mwbd = 20, edge = 0, threads = 6;
   std::string out_path;
+  std::vector<double> calib;
   for (int i = 2; i + 1 < argc; i += 2) {
     const std::string a = argv[i];
     if (a == "--frames") max_frames = std::atoi(argv[i + 1]);
     else if (a == "--loops") loops = std::max(2, std::atoi(argv[i + 1]));
     else if (a == "--mwbd") mwbd = std::atoi(argv[i + 1]);
     else if (a == "--edge") edge = std::atoi(argv[i + 1]);
+    else if (a == "--threads") threads = std::max(1, std::atoi(argv[i + 1]));
+    else if (a == "--calib") {
+      calib.clear();
+      for (char *p = argv[i + 1]; *p;) {
+        char *end;
+        calib.push_back(std::strtod(p, &end));
+        if (end == p) break;
+        p = *end == ',' ? end + 1 : end;
+      }
+      if (calib.size() != 4 && calib.size() != 12) {
+        std::cerr << "--calib needs fx,fy,cx,cy[,k1,k2,p1,p2,k3,k4,k5,k6]\n";
+        return 2;
+      }
+    }
     else if (a == "--out") out_path = argv[i + 1];
     else {
       std::cerr << "unknown option " << a << "\n";
@@ -86,18 +110,25 @@ int main(int argc, char **argv) {
   apriltag_family_t *family = tag36h11_create();
   apriltag_detector_t *td = apriltag_detector_create();
   apriltag_detector_add_family_bits(td, family, 1);
-  td->nthreads = 6;
+  td->nthreads = threads;
   td->wp = workerpool_create(td->nthreads);
   td->qtp.min_white_black_diff = mwbd;
   td->qtp.max_line_fit_mse = 10;
   td->debug = false;
+  frc::apriltag::CameraMatrix cm{1, 1, 1, 1};
   frc::apriltag::DistCoeffs dc{};
   dc.num_params = 5;
-  frc::apriltag::GpuDetector gpu(w, h, td, frc::apriltag::CameraMatrix{1, 1, 1, 1}, dc,
+  if (!calib.empty()) {
+    cm = {calib[0], calib[2], calib[1], calib[3]};  // fx, cx, fy, cy
+    if (calib.size() == 12) {
+      dc = {calib[4], calib[5], calib[6], calib[7], calib[8], calib[9], calib[10], calib[11], 8};
+    }
+  }
+  frc::apriltag::GpuDetector gpu(w, h, td, cm, dc,
                                  vision::ImageFormat::MONO8);
   gpu.SetEdgeBorder(edge);  // detector-12: full-resolution pixels, 0 = off
 
-  std::vector<double> cpu, wall;
+  std::vector<double> cpu, wall, proc;
   FILE *out = out_path.empty() ? nullptr : std::fopen(out_path.c_str(), "w");
   size_t dets = 0, failures = 0;
   for (int loop = 0; loop < loops; ++loop) {
@@ -111,17 +142,20 @@ int main(int argc, char **argv) {
         auto s = gpu.RecordStageGraphs();
         if (!s.ok()) std::cerr << "stage graphs: " << s.message() << "\n";
       }
+      const double p0 = ProcessCpuUs();
       const double c0 = ThreadCpuUs();
       const auto t0 = std::chrono::steady_clock::now();
       const auto status = gpu.Detect(frames[i].data(), dev_in);
       const auto t1 = std::chrono::steady_clock::now();
       const double c1 = ThreadCpuUs();
+      const double p1 = ProcessCpuUs();
       if (!status.ok()) {
         ++failures;
         continue;
       }
       if (loop == 0) continue;
       cpu.push_back(c1 - c0);
+      proc.push_back(p1 - p0);
       wall.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
       if (loop != loops - 1) continue;
       const zarray_t *d = gpu.Detections();
@@ -141,5 +175,7 @@ int main(int argc, char **argv) {
   std::printf("cpu_us p50 %.1f p95 %.1f mean %.1f | wall_us p50 %.1f p95 %.1f\n", Pct(cpu, .5), Pct(cpu, .95),
               [&] { double s = 0; for (double v : cpu) s += v; return cpu.empty() ? 0 : s / cpu.size(); }(),
               Pct(wall, .5), Pct(wall, .95));
+  std::printf("process_cpu_us p50 %.1f p95 %.1f (all threads: the decode workers too)\n", Pct(proc, .5),
+              Pct(proc, .95));
   return 0;
 }
