@@ -58,9 +58,23 @@ if [[ ${1:-} == --undo ]]; then
   exit 0
 fi
 
-# 1. Stock source for this kernel, from the stable kernel's GitHub mirror (git.kernel.org
-#    refuses scripted downloads). Same tags/commits as kernel.org.
+# 1. Stock source for this kernel. JetPack 6's (5.15.x-tegra) is the stable kernel: from its GitHub
+#    mirror (git.kernel.org refuses scripted downloads). JetPack 7's (6.8.12-1021-tegra) is
+#    Canonical's, with backports (the Elgato quirk moved, 2026-10-30): from NVIDIA's public sources
+#    for this L4T release (310 MB, kept in $W, only the driver extracted).
 mkdir -p "$W/stock"
+if [[ $KVER =~ ^[0-9.]+-[0-9]+-tegra$ ]]; then
+  if [[ ! -s $W/stock/uvc_video.c ]]; then
+    rel=$(sed -nE 's/^# R([0-9]+) \(release\), REVISION: ([0-9]+)\.([0-9]+).*/r\1_release_v\2.\3/p' /etc/nv_tegra_release)
+    [[ -s $W/public_sources.tbz2 ]] || curl -fL --retry 3 -o "$W/public_sources.tbz2.part" \
+      "https://developer.nvidia.com/downloads/embedded/l4t/$rel/sources/public_sources.tbz2" \
+      && mv "$W/public_sources.tbz2.part" "$W/public_sources.tbz2"
+    tar xjf "$W/public_sources.tbz2" -C "$W" Linux_for_Tegra/source/kernel_src.tbz2
+    tar xjf "$W/Linux_for_Tegra/source/kernel_src.tbz2" -C "$W" --wildcards 'kernel/kernel-*/drivers/media/usb/uvc/*'
+    cp "$W"/kernel/kernel-*/drivers/media/usb/uvc/* "$W/stock/"
+    rm -rf "$W/Linux_for_Tegra" "$W/kernel"
+  fi
+else
 for f in $FILES; do
   [[ -s $W/stock/$f ]] && continue
   python3 - "$BASE" "$f" "$W/stock/$f" <<'PY'
@@ -70,6 +84,7 @@ url = f"https://raw.githubusercontent.com/gregkh/linux/{tag}/drivers/media/usb/u
 open(out, "wb").write(urllib.request.urlopen(url, timeout=30).read())
 PY
 done
+fi
 
 # 2. The stock build must be byte-identical in source to the installed driver.
 make -s -C "/lib/modules/$KVER/build" M="$W/stock" CONFIG_USB_VIDEO_CLASS=m modules
