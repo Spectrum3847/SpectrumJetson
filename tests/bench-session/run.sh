@@ -38,7 +38,7 @@
 # Env: BENCH_SECS (measurement window, default 30), BENCH_ROUNDS (A/B rounds, default 2),
 #      RT_SECS (seconds per spectrum-rt run, default 45), EDGE_VALUES (default "0 25 50"),
 #      BENCH_STILL_SECS (seconds per still recording, default 45), LADDER_LEVELS (default "5 4 3 2";
-#      "5f" = level 5 with the float decode, detector-18, added when the installed detector has it)
+#      "5d" = level 5 with detector-17's double-precision decode instead of detector-18's float one)
 # Power in every measurement: tegrastats VDD_IN (whole board) and VDD_CPU_GPU_CV (CPU+GPU rail),
 # average and max over the window, W.
 set -uo pipefail
@@ -475,17 +475,14 @@ step_ladder() {
   levels=""
   for lvl in $LADDER_LEVELS; do
     case $lvl in
-      5) grep -qa PrepareGpuDecode /usr/lib/libspectrum-gpu-apriltag.so || { note "level 5 skipped: no in-graph decode (detector-17)"; continue; } ;;
+      5) grep -qa DecodeQuadsKernelF /usr/lib/libspectrum-gpu-apriltag.so || { note "level 5 skipped: no float decode (detector-18)"; continue; } ;;
       4) grep -qa TakeGraphCorners /usr/lib/libspectrum-gpu-apriltag.so || { note "level 4 skipped: no in-graph refine (detector-16)"; continue; } ;;
-      5f) grep -qa DecodeQuadsKernelF /usr/lib/libspectrum-gpu-apriltag.so || { note "level 5f skipped: no float decode (detector-18)"; continue; } ;;
+      5d) grep -qa PrepareGpuDecode /usr/lib/libspectrum-gpu-apriltag.so || { note "level 5d skipped: no in-graph decode (detector-17)"; continue; } ;;
       [0-3]) ;;
       *) note "unknown level $lvl in LADDER_LEVELS; skipped"; continue ;;
     esac
     levels+="$lvl "
   done
-  if grep -qa DecodeQuadsKernelF /usr/lib/libspectrum-gpu-apriltag.so && [[ " $levels" != *" 5f "* ]] && [[ -z ${LADDER_LEVELS_SET:-} ]]; then
-    levels="5f $levels"; note "the installed detector has the float decode (detector-18): level 5f (5 with --gpu-refine 4) added"
-  fi
   levels=$(xargs <<< "$levels")
   [[ -n $levels ]] || { note "skipped: no level to run"; return 0; }
   # 08-select-detector.sh reinstalls the library from ~/build: only if that's what's installed now
@@ -515,7 +512,7 @@ step_ladder() {
     ((r % 2 == 0)) && m=$(tr ' ' '\n' <<< "$levels" | tac | paste -sd ' ')  # alternate the order
     for v in $m; do
       DROPIN_CHANGED=1
-      if [[ $v == 5f ]]; then lvl=(--gpu-level 5 --gpu-refine 4); else lvl=(--gpu-level "$v"); fi
+      if [[ $v == 5d ]]; then lvl=(--gpu-level 5 --gpu-refine 3); else lvl=(--gpu-level "$v"); fi
       tmo 60 "$REPO/scripts/jetson/08-select-detector.sh" gpu "${args[@]}" "${lvl[@]}" --no-restart > /dev/null || return 1
       echo "  restarting PhotonVision at GPU level $v"
       since=$(date '+%Y-%m-%d %H:%M:%S')

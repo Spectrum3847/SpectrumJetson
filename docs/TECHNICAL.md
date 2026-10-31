@@ -2348,7 +2348,7 @@ Individual flags given as well (`--gpu-refine`, `--graphs`, `--chain`, `--far`) 
 
 | Level | Settings | GPU per camera vs L3 | Process CPU per frame | Detect wall | Change |
 | --- | --- | --- | --- | --- | --- |
-| 5 | `GPU_REFINE=3` (`detector-17`), graphs, chain, far on | ~+340 µs/frame (~+4% GPU) | 132 µs (~2% core) | 2133 µs | restart |
+| 5 | `GPU_REFINE=4` (`detector-18`, float decode), graphs, chain, far on | ~+160 µs/frame (~+2% GPU) | 134 µs (~2% core) | 1958 µs | restart |
 | 4 | `GPU_REFINE=2` (`detector-16`), graphs, chain, far on | ~+70 µs/frame (~+1%) | 426 µs (~5% core) | **1949 µs** | restart |
 | 3 | `GPU_REFINE` unset (CPU refine and decode), graphs, chain, far on: today's default | baseline | 1045 µs (~13% core) | 1975 µs | restart |
 | 2 | L3 + far search off | frees the far search, only while starved: 19.4 → 16.5% GPU, −0.4 W (5 cameras, live) | same | same (worst detect ~2 → ~1 ms while starved) | live |
@@ -2361,18 +2361,18 @@ Individual flags given as well (`--gpu-refine`, `--graphs`, `--chain`, `--far`) 
   `photonvision-55`'s live A/B. Uncalibrated cameras run the CPU path at levels 3-5 alike
   (+13..28 µs wall for the gated kernels at 4/5).
 - **Why this order:**
-  - 5 → 4 frees the biggest GPU item (the double-precision decode kernel, ~270 µs/frame) and
-    *lowers* latency (~−180 µs), for +0.3 ms of worker CPU that runs in parallel. So 4 beats 5
-    unless the CPU is what's short.
+  - 5 → 4 frees the decode kernel (~90 µs/frame in float) at the same latency, for +0.3 ms of
+    worker CPU that runs in parallel. So 5 beats 4 unless the GPU is what's short.
   - 4 → 3 frees the refine kernel (~70 µs) for +0.6 ms CPU and about the same wall time.
   - 3 → 2 frees the far search's GPU, but only while no camera has a good view (with one it is
     already off), and costs range (tags under ~20 px). Last of the useful steps.
   - 1 and 0 free no GPU work: graphs and chaining only cut CPU launch cost and GPU waits. **Never
     worth stepping down to for a busy GPU**; they're for debugging.
-- **`detector-18`** (`GPU_REFINE=4`, the decode in float, if the build has it): a lighter level 5,
-  `--gpu-level 5 --gpu-refine 4`; not bit-identical to the CPU. Where it sits relative to 4 depends
-  on its measured kernel time (bench `ladder` runs it as `5f`).
-- **Recommended default:** level 4 once the bench `ladder` step confirms it live (best wall time,
+- **Level 5 is `detector-18`** (2026-10-31): the float decode gives detector-17's CPU (134 vs 132 µs)
+  at detector-16's wall time (1958 vs 2133 µs) and frees ~180 µs of decode kernel (269 → 87 µs);
+  same tags and corners on TXMAN1, margins within 0.5%. Without it built, level 5 falls back to
+  `GPU_REFINE=3` (`detector-17`); `--gpu-level 5 --gpu-refine 3` (bench `ladder` level `5d`) forces it.
+- **Recommended default:** level 5 (or 4 if the GPU is short) once the bench `ladder` step confirms it live (best wall time,
   −60% CPU on calibrated cameras). Until then 3.
 - **Not on the ladder: JPEG decode.** `--jpeg nvjpg` decodes on the two NVJPG engines, which are not
   the GPU, so it doesn't compete with TensorRT. `--jpeg turbo` (or `echo turbo >

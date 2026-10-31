@@ -48,7 +48,7 @@ set -euo pipefail
 # 122 fps from graph_bench (TXMAN1 Q17, busy) and the live far-search A/B; docs/TECHNICAL.md.
 level_settings() {
   case $1 in
-    5) echo "3 1 1 on" ;;
+    5) echo "4 1 1 on" ;;
     4) echo "2 1 1 on" ;;
     3) echo "0 1 1 on" ;;
     2) echo "0 1 1 off" ;;
@@ -64,12 +64,11 @@ the GPU is the bottleneck (TensorRT object detection, ...). Per calibrated camer
 uncalibrated cameras run the CPU path at levels 3-5 alike. ~ = estimate.
 
  level  settings                         GPU per camera       CPU per camera        detect wall
- 5      refine 3: corners, RefineEdges,  ~+340 us/frame       132 us/frame          2133 us
-        decode in stage 3's graph        (~+4% GPU) vs L3     (~2% of a core)       (+160 vs L4)
-        (detector-17). Most GPU.
+ 5      refine 4: corners, RefineEdges,  ~+160 us/frame       134 us/frame          1958 us
+        float decode in stage 3's graph  (~+2% GPU) vs L3     (~2% of a core)       (= L4)
+        (detector-18). Most GPU. RECOMMENDED once bench-confirmed.
  4      refine 2: corners + RefineEdges  ~+70 us/frame        426 us/frame          1949 us
         in the graph (detector-16).      (~+1% GPU) vs L3     (~5% of a core)       (best)
-        RECOMMENDED once bench-confirmed.
  3      refine 0: CPU corners, refine,   baseline             1045 us/frame         1975 us
         decode; graphs + chain on.                            (~13% of a core)
         Today's default.
@@ -83,7 +82,8 @@ uncalibrated cameras run the CPU path at levels 3-5 alike. ~ = estimate.
 Levels 5/4 need a restart (read at start, recorded into the graphs); 0 in
 /tmp/spectrum-detector-gpu-refine turns them off live. Graphs/chain: env at start, 0 in
 /tmp/spectrum-detector-graphs or -chain turns them off live (re-read every 2 s). Far search: live.
---gpu-refine 4 (detector-18, float decode, if built) is a lighter level 5: --gpu-level 5 --gpu-refine 4.
+Without detector-18 built, level 5 falls back to refine 3 (detector-17, double-precision decode:
+2133 us wall, ~+340 us GPU); --gpu-level 5 --gpu-refine 3 forces that (bit-exact decode margins).
 Not on the ladder: JPEG decode runs on the NVJPG engines, not the GPU (--jpeg nvjpg); --jpeg turbo
 decodes on the CPU instead (~+0.16 cores per camera, measured 0.52 -> 0.85 cores for 2 cameras).
 EOF2
@@ -134,6 +134,10 @@ done
 # The level fills in whatever wasn't given explicitly.
 if [[ -n $level ]]; then
   read -r l_refine l_graphs l_chain l_far <<< "$(level_settings "$level")"
+  # level 5 is detector-18's float decode; a build without it gets detector-17's
+  if [[ -z $refine && $l_refine == 4 ]] && ! grep -qa DecodeQuadsKernelF "$HOME/build/gpu-detector/libspectrum-gpu-apriltag.so" /usr/lib/libspectrum-gpu-apriltag.so 2>/dev/null; then
+    l_refine=3; echo "level 5: no float decode (detector-18) built; using --gpu-refine 3 (detector-17)" >&2
+  fi
   refine=${refine:-$l_refine}; graphs=${graphs:-$l_graphs}; chain=${chain:-$l_chain}; far=${far:-$l_far}
 fi
 if [[ $graphs == 0 && -n $refine && $refine -ge 2 ]]; then
