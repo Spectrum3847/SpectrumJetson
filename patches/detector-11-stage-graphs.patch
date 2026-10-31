@@ -595,7 +595,7 @@ index beecf25..dc6e545 100644
 +  if (auto it = stage_graphs_.find(key); it != stage_graphs_.end()) return it->second;
 +  auto fail = [&](const std::string& what, cudaError_t e) -> cudaGraphExec_t {
 +    cudaGetLastError();
-+    LOG(WARNING) << "971 detector: recording the stage " << stage << " graph failed (" << what
++    LOG(WARNING) << "detector: recording the stage " << stage << " graph failed (" << what
 +                 << ": " << cudaGetErrorString(e) << "); running the steps one by one";
 +    stage_graphs_failed_ = true;
 +    return nullptr;
