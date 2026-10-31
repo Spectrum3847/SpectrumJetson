@@ -53,6 +53,13 @@
 #                               interrupt on its own core, camera/decode threads at real-time
 #                               priority. RT=on|off sets it; without RT= a re-run keeps the saved
 #                               choice. Also `sudo spectrum-rt on|off|status` at any time.
+#  16. Lower clocks idle      - spectrum-clocks (scripts/jetson/spectrum-clocks.sh): PhotonVision
+#                               lowers the CPU/GPU clocks after the robot has been disabled (or
+#                               absent) for 20 s (Settings > Robot state; never in the ~3 s
+#                               between auto and teleop) and locks them again on enable. Lower
+#                               too while PhotonVision isn't running (stopped, crashed: the
+#                               service drop-in; not installed: spectrum-clocks-guard after 30 s).
+#                               `sudo spectrum-clocks mode full` keeps them full; `status`.
 #
 # Usage: [FAN=quiet|full|off] [RT=on|off] 09-robot-tuning.sh [--undo]   (no FAN/RT: keep the saved choice)
 set -euo pipefail
@@ -71,6 +78,8 @@ WATCHDOG_CONF=/etc/systemd/system.conf.d/zz-spectrum-watchdog.conf
 PANIC_CONF=/etc/sysctl.d/90-spectrum-panic.conf
 PV_RESTART_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-restart.conf
 PV_OPENCV_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-opencv.conf
+PV_CLOCKS_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-clocks.conf
+CLOCKS_HELPER=/usr/local/bin/spectrum-clocks
 USB_TMPFILES=/etc/tmpfiles.d/90-spectrum-usb.conf
 TCP_CONF=/etc/sysctl.d/90-spectrum-tcp.conf
 WIFI_RETRY=/usr/local/bin/spectrum-wifi-retry
@@ -117,6 +126,10 @@ if [[ ${1:-} == --undo ]]; then
   sudo systemctl enable apt-daily.timer apt-daily-upgrade.timer
   sudo systemctl unmask "${SNAP_UNITS[@]}"
   sudo systemctl enable snapd.service snapd.socket snapd.seeded.service
+  [[ -x $CLOCKS_HELPER ]] && sudo "$CLOCKS_HELPER" full >/dev/null
+  sudo systemctl disable --now spectrum-clocks-guard.timer 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/spectrum-clocks-guard.{service,timer} /usr/local/bin/spectrum-clocks-guard
+  sudo rm -f "$CLOCKS_HELPER" "$PV_CLOCKS_CONF" /etc/spectrum-clocks-mode
   sudo systemctl disable jetson-clocks.service 2>/dev/null || true
   sudo rm -f "$CLOCKS_UNIT"
   [[ -x /usr/local/bin/spectrum-rt ]] && sudo /usr/local/bin/spectrum-rt off >/dev/null
@@ -176,18 +189,15 @@ sudo systemctl enable --now jetson-clocks.service
 # and two CPU cores at 730 MHz, with jetson-clocks.service still "active" and nothing in the log.
 # That tripled detect times (6.3 ms vs 1.7 locked) and halved fps. Until we know what resets
 # them, check every 15 s and lock again, logging when it happens (journalctl -t spectrum-clocks).
+# The check is `spectrum-clocks guard` (spectrum-clocks.sh): it also lowers the clocks while
+# PhotonVision isn't running, and leaves them alone while PhotonVision has lowered them (step 16).
+sudo install -m 755 "$(dirname "$0")/spectrum-clocks.sh" "$CLOCKS_HELPER"
+[[ -e /etc/spectrum-clocks-mode ]] || echo auto | sudo tee /etc/spectrum-clocks-mode >/dev/null
 sudo tee /usr/local/bin/spectrum-clocks-guard >/dev/null <<'GUARD'
 #!/usr/bin/env bash
-# SpectrumJetson (09-robot-tuning.sh): relock the clocks if something lowered them.
-G=$(ls -d /sys/devices/platform/bus@0/17000000.gpu/devfreq/* 2>/dev/null | head -1)
-low=""
-if [[ -n $G && $(cat "$G/min_freq") -lt $(cat "$G/max_freq") ]]; then low+=" GPU min $(( $(cat "$G/min_freq") / 1000000 )) MHz"; fi
-for c in /sys/devices/system/cpu/cpu[0-9]*/cpufreq; do
-  [[ $(cat $c/scaling_min_freq) -lt $(cat $c/scaling_max_freq) ]] && { low+=" CPU min $(( $(cat $c/scaling_min_freq) / 1000 )) MHz"; break; }
-done
-[[ -z $low ]] && exit 0
-logger -t spectrum-clocks "clocks were unlocked ($low ); locking again"
-exec /usr/bin/jetson_clocks
+# SpectrumJetson (09-robot-tuning.sh): relock the clocks if something lowered them; lower them
+# while PhotonVision isn't running. See /usr/local/bin/spectrum-clocks.
+exec /usr/local/bin/spectrum-clocks guard
 GUARD
 sudo chmod 755 /usr/local/bin/spectrum-clocks-guard
 sudo tee /etc/systemd/system/spectrum-clocks-guard.service >/dev/null <<'UNIT'
@@ -210,6 +220,22 @@ WantedBy=timers.target
 UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now spectrum-clocks-guard.timer
+
+echo "==> 16. Lower clocks while idle (spectrum-clocks)"
+# PhotonVision (photonvision-90) runs `spectrum-clocks throttle` after the robot (or no robot) has
+# been disabled for throttleClocksAfterDisabledSeconds (Settings > Robot state, default 20) and
+# `spectrum-clocks full` the moment it's enabled. The drop-in: full clocks before PhotonVision
+# starts (cameras start at speed), lower clocks once it stops or crashes (Restart=always brings it
+# back, and full with it). "-": a helper failure never stops PhotonVision starting.
+# `sudo spectrum-clocks mode full` keeps them full always (benchmarks, replays without PhotonVision).
+sudo mkdir -p "$(dirname "$PV_CLOCKS_CONF")"
+sudo tee "$PV_CLOCKS_CONF" >/dev/null <<CONF
+# SpectrumJetson: full clocks while PhotonVision runs; lower when it stops (spectrum-clocks).
+[Service]
+ExecStartPre=-$CLOCKS_HELPER full
+ExecStopPost=-$CLOCKS_HELPER throttle
+CONF
+sudo systemctl daemon-reload
 
 echo "==> 15. Low-jitter cameras (spectrum-rt, off unless RT=on)"
 sudo install -m 755 "$(dirname "$0")/spectrum-rt.sh" /usr/local/bin/spectrum-rt
@@ -453,5 +479,6 @@ echo "  TCP retries before giving up: $(sysctl -n net.ipv4.tcp_retries2) (~13 s 
 echo "  Wi-Fi retry: $(systemctl is-active spectrum-wifi-retry.timer) (every 2 min, radio on only)"
 echo "  cooling: $(sudo "$FAN_HELPER" status) (Settings > Robot state)"
 echo "  low-jitter cameras (spectrum-rt): $(cat /etc/spectrum-rt 2>/dev/null || echo off)"
+echo "  clocks while disabled (spectrum-clocks): $(cat /etc/spectrum-clocks-mode 2>/dev/null || echo auto)"
 echo "  photonvision: Restart=$(systemctl show photonvision -p Restart --value), $(systemctl show photonvision -p Environment --value | tr ' ' '\n' | grep -c OPENCV_THREAD_POOL) OpenCV pool settings"
 echo "Reboot to apply the boot changes: sudo reboot"
