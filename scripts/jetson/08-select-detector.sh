@@ -6,7 +6,8 @@
 #                              [--gpu-connections N] [--no-restart]
 #   4143   FRC-Team-4143/GpuDetectorJNI + our patches (05-build-gpudetector.sh)
 #   bos    Austin's current detector via frc971/bos (07-build-bos-detector.sh)
-#   --mwbd N         min_white_black_diff (bos build only; default 5)
+#   --mwbd N         min_white_black_diff (bos build only; default 20, the robot config: the detector
+#                    is 30-40% faster than at the library default 5, docs/TECHNICAL.md)
 #   --mse N          max_line_fit_mse (bos build only; default 10). Lower (e.g. 2.5, upstream
 #                    PhotonVision #2138) rejects tags cut off at the image edge; test range first.
 #   --jpeg nvjpg     decode camera JPEGs on the NVJPG hardware engine (bos build only; default
@@ -24,7 +25,7 @@ set -euo pipefail
 
 which=${1:?usage: $0 4143|bos [--mwbd N] [--jpeg nvjpg|turbo] [--mse N] [--gpu-connections N] [--no-restart]}
 shift
-mwbd=""
+mwbd=20  # the robot config (JetPack 7 setup ran at 5 by leaving it out: detect 2.4 vs 1.6 ms)
 jpeg=""
 mse=""
 connections=32
