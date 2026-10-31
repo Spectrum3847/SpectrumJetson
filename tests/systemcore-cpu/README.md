@@ -51,22 +51,23 @@ What this means:
 
 ## Expected cost on a SystemCore: an estimate, not measured
 
-The fork treats the SystemCore as a QCS6490: four Cortex-A78 cores at 2.4 to 2.7 GHz, plus four
-A55s. That's the same core as the Jetson's, at about twice the clock. A Raspberry Pi 5's A76 at
-2.4 GHz should land close to that. Scaled by clock (about 1.8x, because memory doesn't speed up
+The SystemCore is a Raspberry Pi Compute Module 5 (BCM2712): four Cortex-A76 cores at 2.4 GHz,
+4 GB. (An earlier note in the fork called it a QCS6490; that was wrong: that's the Rubik Pi.) The
+A76 is a little slower per clock than the Jetson's A78AE, at about twice this test's clock. Scaled by clock (about 1.8x, because memory doesn't speed up
 with the clock), gray decode plus 1-thread detection is about 29 ms at 1.19 GHz, so about **15 to
 20 ms of CPU a 1280x800 frame**. At 50 fps that's **about 0.8 to 1 core per camera**.
 
 My recommendation: 1 camera at 50 fps, or 2 at 30 fps. Use 1280x800 or smaller and pick a camera
 mode at or below 50 fps, so the camera itself doesn't send more frames than PhotonVision uses.
 
-The SystemCore profile turns on by itself on a non-Rubik QCS6490 or a Raspberry Pi
+The SystemCore profile turns on by itself on a Raspberry Pi (so on the SystemCore, and on any Pi coprocessor; a
+SystemCore-specific test is a TODO until its device-tree model is read on one)
 (`SPECTRUM_SYSTEMCORE_PROFILE=1` or `=0` overrides it). It caps detection at 2 threads, decimate
 at least 2, and 50 fps processed and decoded.
 
 ## Measure first on the SystemCore
 
-1. Run `run.sh --cores 3 --threads 1,2` there on a copied Rewind session. The A78 clusters are uneven, so check which core you get with `lscpu`. This replaces the estimate above.
+1. Run `run.sh --cores 3 --threads 1,2` there on a copied Rewind session. All four A76 cores are the same, but robot code shares them: pick one with `lscpu` / `top`. This replaces the estimate above.
 2. Run PhotonVision with one camera at 50 fps and robot code running. Look at `top`, and at robot loop overruns.
 3. Check that the log says `MJPEG decoded straight to gray (1280x800, CPU)`. If it says cscore's conversion, the frame layout check refused the frame.
 4. Check thermals and clocks under that load: `/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq`.
