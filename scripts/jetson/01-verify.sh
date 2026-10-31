@@ -29,10 +29,13 @@ fi
 echo
 echo "==> Enabling MAXN SUPER (mode $MAXN_SUPER_ID) and max clocks"
 # nvpmodel may ask to reboot when switching modes; answer as prompted.
-# r39 asks to reboot for MAXN SUPER (answered no: the clocks already go to MAXN SUPER's). Its boot
-# default is mode 1 (25 W), so nvpmodel.service then fails at every boot asking again: default to it.
-echo no | sudo nvpmodel -m "$MAXN_SUPER_ID" || true
-sudo sed -i "s/^< PM_CONFIG DEFAULT=[0-9]* >/< PM_CONFIG DEFAULT=$MAXN_SUPER_ID >/" /etc/nvpmodel.conf
+# r39 needs a reboot to switch to MAXN SUPER. Answered no, the clocks still reach its levels but
+# nvpmodel.service then fails at every boot asking again (2026-10-30), so answer yes: this reboots
+# the Jetson now when the mode changes (when it's already MAXN SUPER nvpmodel just returns).
+if [[ $(sudo nvpmodel -q | head -1) != *MAXN_SUPER* ]] || systemctl is-failed -q nvpmodel; then
+  echo "    rebooting to apply MAXN SUPER: run this script again after"
+  echo YES | sudo nvpmodel -m "$MAXN_SUPER_ID"
+fi
 sudo jetson_clocks
 sudo nvpmodel -q
 
