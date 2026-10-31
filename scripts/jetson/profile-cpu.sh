@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
 # Where does PhotonVision's CPU go? Records, all over the same window:
 #   - CPU per thread (full Java names, so each camera's VisionRunner and decoder are separate)
-#   - a Java + native CPU profile (async-profiler), as a flame graph and as top functions
+#   - a CPU profile with Linux perf: top functions overall and per thread (Java names from the JIT map)
 #   - tegrastats (CPU per core, GPU, power, temperatures)
+# perf samples through the CPU's counters and never signals PhotonVision. Not async-profiler: its
+# SIGPROF interrupted a cscore camera thread's select(), which cscore treats as fatal; the camera
+# stopped until the USB recovery rebuilt it (2026-10-31).
 # Usage (on the Jetson): scripts/jetson/profile-cpu.sh [seconds=30] [label]
-# Results: ~/profiles/<time>-<label>/ (summary.txt, flame.html, collapsed.txt, threads.csv, tegrastats.log)
+# Results: ~/profiles/<time>-<label>/ (summary.txt, perf.script, threads.csv, tegrastats.log).
+# perf.script opens in https://www.speedscope.app or the Firefox Profiler for a flame graph.
 # From the laptop: rsync -a jetson:profiles/ logs/profiles/
 set -euo pipefail
 SECS=${1:-30}
 LABEL=${2:-run}
-AP_VER=4.6
-AP_SHA=e9e26d2aae0d2935a0a676342c2e4612076ef15f04788c82f965d408a6659fbb
-AP=/opt/async-profiler-$AP_VER-linux-arm64/bin
-
-if [[ ! -x $AP/asprof ]]; then
-  echo "Installing async-profiler $AP_VER (one time)"
-  t=$(mktemp)
-  curl -fsSLo "$t" https://github.com/async-profiler/async-profiler/releases/download/v$AP_VER/async-profiler-$AP_VER-linux-arm64.tar.gz
-  echo "$AP_SHA  $t" | sha256sum -c --quiet
-  sudo tar -C /opt -xzf "$t"; rm -f "$t"
+KVER=$(uname -r | sed -E 's/^([0-9]+\.[0-9]+)\.[0-9]+-([0-9]+)-tegra$/\1.0-\2/')
+PERF=/usr/lib/linux-nvidia-tegra-tools-$KVER/perf
+if [[ ! -x $PERF ]]; then
+  echo "Installing perf for this kernel (one time)"
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "linux-nvidia-tegra-tools-$KVER" > /dev/null
 fi
 
 PID=$(systemctl show -p MainPID --value photonvision)
@@ -31,14 +30,15 @@ sudo jcmd "$PID" Thread.print > "$OUT/threads-start.txt" 2>/dev/null
 read -r _ STAT0 < <(awk '{print "x", $14+$15}' /proc/$PID/stat)
 T0=$(date +%s.%N)
 sudo tegrastats --interval 1000 > "$OUT/tegrastats.log" & TS=$!
-sudo "$AP/asprof" -d "$SECS" -e cpu -i 5ms -t -f /tmp/spectrum-profile.jfr "$PID" > /dev/null
+sudo timeout $((SECS + 30)) "$PERF" record -q -F 199 -p "$PID" -o /tmp/spectrum-perf.data -- sleep "$SECS" 2>/dev/null
 sudo kill $TS 2>/dev/null || true
 T1=$(date +%s.%N)
 read -r _ STAT1 < <(awk '{print "x", $14+$15}' /proc/$PID/stat)
 sudo jcmd "$PID" Thread.print > "$OUT/threads-end.txt" 2>/dev/null
-sudo mv /tmp/spectrum-profile.jfr "$OUT/profile.jfr"; sudo chown "$USER:" "$OUT/profile.jfr"
-"$AP/jfrconv" --cpu -t --simple -o collapsed "$OUT/profile.jfr" "$OUT/collapsed.txt" > /dev/null
-"$AP/jfrconv" --cpu --simple --title "PhotonVision $LABEL" "$OUT/profile.jfr" "$OUT/flame.html" > /dev/null
+# Names for JIT-compiled Java code (/tmp/perf-<pid>.map), read by perf script
+sudo jcmd "$PID" Compiler.perfmap > /dev/null 2>&1 || true
+sudo timeout 600 "$PERF" script -i /tmp/spectrum-perf.data -F tid,ip,sym,dso 2>/dev/null > "$OUT/perf.script"
+sudo rm -f /tmp/spectrum-perf.data
 
 python3 - "$OUT" "$T0" "$T1" "$STAT0" "$STAT1" "$(getconf CLK_TCK)" <<'EOF' | tee "$OUT/summary.txt"
 import re, sys, collections
@@ -68,7 +68,7 @@ for line in open(f"{out}/tegrastats.log"):
     m = re.search(r'CPU \[([^\]]*)\]', line)
     if m: g["cpu"].append(sum(int(x.split('%')[0]) for x in m.group(1).split(',') if '%' in x) / 6)
     for key, pat in (("gpu", r'GR3D_FREQ (\d+)%'), ("temp", r'tj@([\d.]+)C'), ("power", r'VDD_IN (\d+)mW'),
-                     ("nvjpg", r'NVJPG (\d+)%'), ("nvjpg1", r'NVJPG1 (\d+)%')):
+                     ("nvjpg", r'NVJPG0? (\d+)%'), ("nvjpg1", r'NVJPG1 (\d+)%')):
         m = re.search(pat, line)
         if m: g[key].append(float(m.group(1)))
 avg = lambda k: sum(g[k]) / len(g[k]) if g[k] else float('nan')
@@ -76,19 +76,24 @@ print(f"\nWhole Jetson: CPU {avg('cpu'):.0f}% avg of 6 cores, GPU {avg('gpu'):.0
       f"power {avg('power')/1000:.1f} W, max temp {max(g['temp'] or [0]):.0f} C"
       + (f", NVJPG {avg('nvjpg'):.0f}%/{avg('nvjpg1'):.0f}%" if g['nvjpg'] else ""))
 
+names = {k: v[0] for k, v in b.items()}
 leaf, thread_leaf, tsum = collections.Counter(), collections.defaultdict(collections.Counter), collections.Counter()
-for line in open(f"{out}/collapsed.txt"):
-    stack, n = line.rstrip().rsplit(' ', 1); n = int(n)
-    frames = stack.split(';')
-    th = re.sub(r' tid=\d+\]$', ']', frames[0])
-    th = re.sub(r'^\[(VisionRunner|SpectrumDecoder).*', r'[\1 (all cameras)]', th)
-    f = frames[-1].rsplit('/', 1)[-1]
-    leaf[f] += n; thread_leaf[th][f] += n; tsum[th] += n
+for line in open(f"{out}/perf.script", errors="replace"):
+    # without call stacks, one sample a line: "  tid  address  symbol (dso)"
+    m = re.match(r'\s*(\d+)\s+[0-9a-f]+\s+(.*?)\s*\((\S*)\)\s*$', line)
+    if not m: continue
+    tid, sym, dso = m.groups()
+    if sym in ("[unknown]", ""): sym = dso.rsplit('/', 1)[-1] or "?"
+    if dso.startswith("[kernel"): sym += " [k]"
+    f = re.sub(r'\(.*', '', sym).strip()[:90]
+    th = names.get(tid, f"native thread {tid}")
+    th = re.sub(r'^(VisionRunner|SpectrumDecoder).*', r'\1 (all cameras)', th)
+    leaf[f] += 1; thread_leaf[th][f] += 1; tsum[th] += 1
 alln = sum(leaf.values()) or 1
 print("\nWhere the CPU time is spent (self time, % of profiled samples):")
 for f, n in leaf.most_common(15): print(f"  {100*n/alln:5.1f}  {f[:90]}")
-for th, tn in tsum.most_common(3):
+for th, tn in tsum.most_common(5):
     print(f"\n{th} {100*tn/alln:.0f}% of samples; its top functions:")
     for f, n in thread_leaf[th].most_common(8): print(f"  {100*n/tn:5.1f}  {f[:90]}")
-print(f"\nFlame graph: {out}/flame.html  (frames ending _[k] are kernel time)")
+print(f"\nFlame graph: open {out}/perf.script in speedscope.app ([k] = kernel time)")
 EOF
