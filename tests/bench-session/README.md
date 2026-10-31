@@ -35,7 +35,7 @@ Ctrl-C at any time stops and puts everything back.
 | rt | tags in view, keep still | spectrum-rt off vs on with LOAD=0 and LOAD=4 (tests/rt-ab) | spectrum-rt mode |
 | edge | slide a tag off each image edge, then walk it out for range (40 s per value) | detections per camera with the edge filter at 0, 25, 50 px | detector options drop-in (one PhotonVision restart per value, one more at the end) |
 | stills (opt-in) | per camera: a tag on a stand at ~1, 2.5, 4 m, centred; touch nothing while it records (`s` skips one condition) | a Rewind recording per camera x distance x exposure (current, then half; only current if auto exposure), with the detector's tags/frame and decision margin over it | that camera's `cameraExposureRaw` (put back after each recording); Rewind manual recording |
-| usb (opt-in) | watch | seconds until each camera streams again after disable/remove/reset and a hub reset | cuts camera USB links; refuses unless every camera's firmware reports `"recovers": true` |
+| usb (opt-in) | watch | seconds until each camera streams again after disable/remove/reset and a hub reset | cuts camera USB links; tests Thriftiests with the usbrecov firmware (others skipped) and, if you say yes, Swyfts (untested: one may need a replug) |
 
 Every step has a hard time limit; when it runs out the step is marked TIMEOUT and the session moves on.
 
@@ -54,7 +54,7 @@ cameras by PhotonVision name), USB bytes/microframe, min exposure, and USB recov
 usb step ran; then the same per camera. Detect time and decision margin are per model only when
 every camera is the same model (the detector lines don't say which camera they are). Static jitter
 is not computed here: the field-replay accuracy judge does that offline from the stills recordings.
-The usb step still refuses unless every camera is a Thriftiest with the usbrecov firmware.
+The usb step tests each Thriftiest with the usbrecov firmware and, on request, each Swyft (their drop recovery is still unknown).
 
 Copy to the laptop: `rsync -a jetson:bench-results/ logs/bench-results/`
 

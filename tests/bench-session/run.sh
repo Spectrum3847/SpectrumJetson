@@ -488,16 +488,29 @@ step_edge() {
 }
 
 step_usb() {
-  local fw ok ports
-  fw=$(tmo 60 sudo -n python3 "$REPO/scripts/jetson/thriftiest-fw.py" variant --json) || { note "refused: couldn't read the camera firmware"; return 1; }
+  local fw sw ports swports
+  # Thriftiests: only those with the usbrecov firmware (a stock one can wedge until it's unplugged).
+  fw=$(tmo 60 sudo -n python3 "$REPO/scripts/jetson/thriftiest-fw.py" variant --json) || fw="[]"
   echo "$fw" > "$OUT/firmware.json"
-  ok=$(python3 -c 'import json,sys; c=json.loads(sys.argv[1]); print("yes" if c and all(x["recovers"] for x in c) else "no")' "$fw")
-  note "firmware: $(python3 -c 'import json,sys; print("; ".join("%s %s" % (x["port"], x["label"]) for x in json.loads(sys.argv[1])))' "$fw")"
-  if [[ $ok != yes ]]; then
-    note "refused: not every camera has the usbrecov firmware (\"recovers\": true); flash it first (scripts/host/thriftiest-flash.sh)"
-    return 1
-  fi
-  ports=$(python3 -c 'import json,sys; print(" ".join(x["port"] for x in json.loads(sys.argv[1])))' "$fw")
+  ports=$(python3 -c 'import json,sys
+seen=set(); out=[]
+for x in json.loads(sys.argv[1]):
+    if x["port"] in seen: continue
+    seen.add(x["port"])
+    if x["recovers"]: out.append(x["port"])
+print(" ".join(out))' "$fw")
+  python3 -c 'import json,sys
+for x in {x["port"]: x for x in json.loads(sys.argv[1])}.values():
+    print("%s %s%s" % (x["port"], x["label"], "" if x["recovers"] else " (no usbrecov firmware: skipped)"))' "$fw" | while read -r l; do note "Thriftiest $l"; done
+  # Swyfts: their drop recovery is what we want to learn; it may need a replug or power cycle.
+  sw=$(tmo 60 sudo -n python3 "$REPO/scripts/jetson/swyft-fw.py" list --json 2>/dev/null) || sw="[]"
+  echo "$sw" > "$OUT/swyft.json"
+  swports=$(python3 -c 'import json,sys; print(" ".join(x["port"] for x in json.loads(sys.argv[1]) if not x.get("bootloader")))' "$sw" 2>/dev/null)
+  if [[ -n $swports ]] && ask "Also test the Swyft camera(s) on ports $swports? Untested: one may stay stuck until you unplug it or power-cycle. Enter = yes, s = skip"; then
+    ports="$ports $swports"; note "Swyft ports tested: $swports"
+  elif [[ -n $swports ]]; then note "Swyft ports skipped: $swports"; fi
+  ports=$(xargs <<< "$ports")
+  [[ -n $ports ]] || { note "refused: no camera to test (Thriftiests need the usbrecov firmware; flash it from Settings)"; return 1; }
   ask "USB RECOVERY on ports $ports: this cuts each camera's USB link (disable, remove, reset) and resets the hub. Cameras stay plugged in; watch PhotonVision." || return
   # shellcheck disable=SC2086  # one argument per port
   tmo $(((3 * $(wc -w <<< "$ports") + 2) * 75 + 60)) "$REPO/tests/usb-recovery-bench/run.sh" 1 $ports > "$OUT/usb-recovery.txt" 2>&1
