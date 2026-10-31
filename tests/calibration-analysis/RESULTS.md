@@ -192,3 +192,28 @@ distribution, and the model:
    let the user delete a snapshot.
 8. **Export** the full observations (with correctly aligned per-corner residuals and outlier
    flags) so this analysis can be re-run on the result.
+
+## 7. Refit calibrations (`refit.py` → `refit.json`, `calibrations/*-refit.json`)
+
+The immediate step from §6.6 is done. All detected corners are kept, with a gross-outlier cut at
+max(1 px, 6x robust scale), which removed none. The fit uses 8 coefficients and a global board warp. A
+flat-board variant scored the same on the field and wasn't picked. A fold check covers the whole
+image plus a 16 px border: the radial curve must increase past 1.05x the corner radius, and every
+pixel must unproject and round-trip through OpenCV. No unconstrained fit folded, so no
+constrained fit was needed. The bootstrap used 20 resamples.
+
+| | TC01 deployed → refit | TC02 deployed → refit | TC02 320x240 deployed → refit |
+|---|---|---|---|
+| rms (mrcal inliers) | 0.150 → 0.138 px | 0.223 → 0.219 px | 0.400 → 0.403 px |
+| rms of readmitted corners | 1.24 → 0.23 px (136) | 2.72 → 0.43 px (71) | → 0.39 px (669) |
+| folds at r (corner at ~1.09 / 0.93) | 1.009 → 5.2 | 0.917 → 5.4 | 0.851 → 3.3 |
+| image with no valid ray | 1.4% → 0 | 4.8% → 0 | 3.2% → 0 |
+| bootstrap unc. centre / ring / worst corner cell | 0.47 / 0.81 / 4.5 → 0.45 / 0.82 / 1.1 px | 0.28 / 0.48 / 1.1 → 0.30 / 0.53 / 0.9 px | → 1.0 / 1.8 / 2.2 px |
+| TXMAN1 in-frame median / p90 | 1.04 / 6.32 → **0.89 / 4.93** | 1.51 / 10.96 → **1.10 / 4.98** | (no field data) |
+
+The "deployed" uncertainty is §3's bootstrap of our 8-coefficient refit. A bootstrap of mrcal's
+own solve isn't available. The files were parsed with the fork's own classes
+(`Jsonb.instance().type(CameraCalibrationCoefficients.class)` from the photon-server jar). All
+per-corner lists line up, and `optimizationInputs.rt_cam_ref` holds our board poses so
+PhotonVision's uncertainty view has inputs. 320x240 has no field score, so the pick there rests on
+the fold check and rms alone.
