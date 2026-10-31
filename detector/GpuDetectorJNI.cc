@@ -25,6 +25,7 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -366,41 +367,67 @@ void RecordFailure(DetectorSlot &s, jlong handle, const char *what) {
   }
 }
 
-jobject MakeJObject(JNIEnv *env, const apriltag_detection_t *detect) {
+// Pixel convention: AprilTag puts a pixel's centre at +0.5 (pixel (0,0) spans 0..1); OpenCV, and so
+// every camera calibration and PhotonVision's pose solve, puts it at 0. Left alone, every corner
+// is 0.5 px down-right of where the calibration expects it: a fixed ~0.04 deg bearing bias in
+// every pose (measured +0.49 px on rendered frames, tools/fieldcal/README.md). So results leave
+// here in OpenCV's convention: corners and centre shifted by -0.5, and the homography (tag
+// coordinates -> image) with them, as H' = T*H, T = [[1,0,-0.5],[0,1,-0.5],[0,0,1]].
+// Only here: the detector, the far search and fieldcal_detect keep AprilTag's convention inside.
+constexpr double kPixelCentre = 0.5;
+
+std::array<jdouble, 9> ToOpenCvH(const double *h) {
+  std::array<jdouble, 9> out;
+  for (int c = 0; c < 3; ++c) {
+    out[c] = h[c] - kPixelCentre * h[6 + c];
+    out[3 + c] = h[3 + c] - kPixelCentre * h[6 + c];
+    out[6 + c] = h[6 + c];
+  }
+  return out;
+}
+
+std::array<jdouble, 8> ToOpenCvCorners(const double (*p)[2]) {
+  std::array<jdouble, 8> out;
+  for (int k = 0; k < 4; ++k) {
+    out[2 * k] = p[k][0] - kPixelCentre;
+    out[2 * k + 1] = p[k][1] - kPixelCentre;
+  }
+  return out;
+}
+
+jobject MakeJObject(JNIEnv *env, const char *family, int id, int hamming, float margin,
+                    const std::array<jdouble, 9> &h, double cx, double cy,
+                    const std::array<jdouble, 8> &corners) {
   static jmethodID constructor =
       env->GetMethodID(detectionCls, "<init>", "(Ljava/lang/String;IIF[DDD[D)V");
   if (!constructor) return nullptr;
-
-  wpi_compat::JLocal<jstring> fam{env, wpi_compat::MakeJString(env, detect->family->name)};
-  auto homography = detect->H;
-  wpi_compat::JLocal<jdoubleArray> harr{
-      env, wpi_compat::MakeJDoubleArray(
-               env, {reinterpret_cast<const jdouble *>(homography->data),
-                     static_cast<size_t>(homography->nrows * homography->ncols)})};
-  wpi_compat::JLocal<jdoubleArray> carr{
-      env, wpi_compat::MakeJDoubleArray(
-               env, {reinterpret_cast<const jdouble *>(detect->p), 4 * 2})};
-
-  return env->NewObject(detectionCls, constructor, fam.obj(), static_cast<jint>(detect->id),
-                        static_cast<jint>(detect->hamming),
-                        static_cast<jfloat>(detect->decision_margin), harr.obj(),
-                        static_cast<jdouble>(detect->c[0]), static_cast<jdouble>(detect->c[1]),
+  wpi_compat::JLocal<jstring> fam{env, wpi_compat::MakeJString(env, family)};
+  wpi_compat::JLocal<jdoubleArray> harr{env, wpi_compat::MakeJDoubleArray(env, h)};
+  wpi_compat::JLocal<jdoubleArray> carr{env, wpi_compat::MakeJDoubleArray(env, corners)};
+  return env->NewObject(detectionCls, constructor, fam.obj(), static_cast<jint>(id),
+                        static_cast<jint>(hamming), static_cast<jfloat>(margin), harr.obj(),
+                        static_cast<jdouble>(cx - kPixelCentre), static_cast<jdouble>(cy - kPixelCentre),
                         carr.obj());
+}
+
+jobject MakeJObject(JNIEnv *env, const apriltag_detection_t *detect) {
+  const matd_t *H = detect->H;
+  if (H->nrows != 3 || H->ncols != 3) return nullptr;
+  return MakeJObject(env, detect->family->name, detect->id, detect->hamming,
+                     detect->decision_margin, ToOpenCvH(H->data), detect->c[0], detect->c[1],
+                     ToOpenCvCorners(detect->p));
 }
 
 // SpectrumJetson: the same from a copied detection (far_search.h), for results with far-search tags.
 jobject MakeJObject(JNIEnv *env, const far_search::Det &d) {
-  static jmethodID constructor =
-      env->GetMethodID(detectionCls, "<init>", "(Ljava/lang/String;IIF[DDD[D)V");
-  if (!constructor) return nullptr;
-  wpi_compat::JLocal<jstring> fam{env, wpi_compat::MakeJString(env, d.family->name)};
-  wpi_compat::JLocal<jdoubleArray> harr{
-      env, wpi_compat::MakeJDoubleArray(env, {reinterpret_cast<const jdouble *>(d.H.data()), d.H.size()})};
-  wpi_compat::JLocal<jdoubleArray> carr{
-      env, wpi_compat::MakeJDoubleArray(env, {reinterpret_cast<const jdouble *>(d.p.data()), d.p.size()})};
-  return env->NewObject(detectionCls, constructor, fam.obj(), static_cast<jint>(d.id),
-                        static_cast<jint>(d.hamming), static_cast<jfloat>(d.margin), harr.obj(),
-                        static_cast<jdouble>(d.c[0]), static_cast<jdouble>(d.c[1]), carr.obj());
+  if (d.H.size() != 9 || d.p.size() != 8) return nullptr;
+  double p[4][2];
+  for (int k = 0; k < 4; ++k) {
+    p[k][0] = d.p[2 * k];
+    p[k][1] = d.p[2 * k + 1];
+  }
+  return MakeJObject(env, d.family->name, d.id, d.hamming, d.margin, ToOpenCvH(d.H.data()), d.c[0],
+                     d.c[1], ToOpenCvCorners(p));
 }
 
 // A line every 10 s while the far search has done anything since the last one.
