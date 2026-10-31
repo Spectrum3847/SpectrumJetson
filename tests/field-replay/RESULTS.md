@@ -68,6 +68,8 @@ neither confirms nor refutes it.
 |---|---|---|---|---|
 | base (mse 10, mwbd 20, half-res, far off) | 38,489 | | | 3.1 ms |
 | **mse 2.5** | 38,383 | 107 (48 / 26 / 33) | 1 (1/0/0) | 3.2 ms |
+| mse 15 | 38,493 | 0 | 4 (0/1/3) | (6.4 ms, PV live) |
+| mse 20 | 38,496 | 0 | 7 (1/1/5) | (6.4 ms, PV live) |
 | mwbd 5 | 38,483 | 7 (6/1/0) | 1 | ~same |
 | mwbd 10 | 38,483 | 7 (6/1/0) | 1 | ~same |
 | mwbd 30 | 38,482 | 11 (7/1/3) | 4 (1/1/2) | ~same |
@@ -92,6 +94,17 @@ waits. Differences under ~0.5 ms are noise.
   - Mid-image, mid-size: 71 (44 good / 6 bad).
 - What it buys: about 20 bad sightings removed per 6 matches. The cost is ~50 good ones and a few
   cut-off ones.
+
+**max_line_fit_mse 15 / 20 (2026-10-31).** Going above 10 does nothing useful.
+- Nothing is lost and no corner moves on the 38,489 shared sightings (shift 0.000 px).
+- mse 15 adds 4 sightings (0 good / 1 bad / 3 unknown); mse 20 adds 7 (1 / 1 / 5). Only one
+  of them can be checked in-frame (10.6 px error, vs 1.3 px typical).
+- All are close, large tags (side 98–500 px, range 0.8–1.55 m), mid-image, margin 30–100. No
+  far/small tags are gained: smallest good side (p1 18.5 px) and range (p99 7.73 m, max 9.24 m)
+  are unchanged.
+- Detect time 6.0–6.6 ms/frame for both, but these ran with PhotonVision live on 2 cameras and
+  throttled clocks; base's 3.1 ms was measured on an idle GPU. Not a real difference.
+- **Keep 10.** 10 is already past the point where the line-fit test rejects anything that matters.
 
 **Edge filter (AOS style) on the base output:**
 
@@ -173,7 +186,8 @@ good and bad sightings it rejects.
 ## Recommendations
 
 1. **Keep max_line_fit_mse at 10.** 2.5 removes 0.28% of sightings, of which only a minority are
-   bad (in-frame: 2 of 32 checkable). It changes nothing else.
+   bad (in-frame: 2 of 32 checkable). It changes nothing else. 15 and 20 add only 4 / 7
+   close-tag sightings (0–1 good) and no range.
 2. **No AOS-style edge filter.** At 10/25/50 px it removes 5/7/11% of sightings, 85–90% of them
    good. If anything, a 5–10 px border trims the least accurate (median in-frame error 5 px vs
    1.3), but it isn't needed.

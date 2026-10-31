@@ -499,6 +499,8 @@ for v in sorted(times):
 
 # Item 2: detector settings.
 compare(args.base, "mse2.5", "max_line_fit_mse 10 (base) vs 2.5")
+for x in ("mse15", "mse20"):
+    compare(args.base, x, f"max_line_fit_mse 10 (base) vs {x[3:]}")
 for x in ("mwbd5", "mwbd10", "mwbd30"):
     compare(args.base, x, f"min_white_black_diff 20 (base) vs {x[4:]}")
 for x in ("mcp50", "mcp100"):
@@ -579,5 +581,20 @@ if "fullres" in R:
     F = R["fullres"]
     gd = F["good"]
     P(f"  fullres: good {gd.sum()}, side p1 {pct(F['side'][gd], 1):.1f} px, range p99 {pct(F['range'][gd], 99):.2f} m")
+for x in ("mse2.5", "mse15", "mse20"):
+    if x not in R:
+        continue
+    X = R[x]
+    P(f"\n=== {args.base} vs {x}: size and range of what each finds that the other doesn't (good / bad by in-frame, all)")
+    for nm, r, o in ((f"only {args.base}", B, ~np.isin(B["key"], X["key"]) & ~B["far"]), (f"only {x}", X, ~np.isin(X["key"], B["key"]) & ~X["far"])):
+        if o.sum() == 0:
+            P(f"  {nm}: none"); continue
+        li = o & np.isfinite(r["loo"])
+        P(f"  {nm}: {o.sum()}; side px p10/p50/p90 {pct(r['side'][o], 10):.1f}/{pct(r['side'][o], 50):.1f}/{pct(r['side'][o], 90):.1f}, "
+          f"range m p50/p90/max {pct(r['range'][o], 50):.2f}/{pct(r['range'][o], 90):.2f}/{pct(r['range'][o], 100):.2f}; "
+          f"in-frame {li.sum()} checked, {(li & (r['loo'] > T_LOO)).sum()} bad, p50 {pct(r['loo'][li], 50):.2f} px")
+    for nm, r in ((args.base, B), (x, X)):
+        gd = r["good"] & ~r["far"]
+        P(f"  {nm}: good {gd.sum()}, side p1 {pct(r['side'][gd], 1):.1f} px, range p99 {pct(r['range'][gd], 99):.2f} m, max {pct(r['range'][gd], 100):.2f} m")
 if args.json:
     json.dump({"summary": summary, "info": info, "T_TOT": T_TOT, "T_SHAPE": T_SHAPE}, open(args.json, "w"), indent=1, default=float)

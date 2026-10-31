@@ -24,6 +24,8 @@ fi
 declare -A OPTS=(
   [base]="--off --mwbd 20 --mse 10"
   [mse2.5]="--off --mwbd 20 --mse 2.5"
+  [mse15]="--off --mwbd 20 --mse 15"
+  [mse20]="--off --mwbd 20 --mse 20"
   [mwbd5]="--off --mwbd 5 --mse 10"
   [mwbd10]="--off --mwbd 10 --mse 10"
   [mwbd30]="--off --mwbd 30 --mse 10"
@@ -33,7 +35,7 @@ declare -A OPTS=(
   [far]="--mwbd 20 --mse 10"
   [half]="--off --mwbd 20 --mse 10 --half"
 )
-ORDER=(base mse2.5 half fullres far mwbd5 mwbd10 mwbd30 mcp50 mcp100)
+ORDER=(base mse2.5 mse15 mse20 half fullres far mwbd5 mwbd10 mwbd30 mcp50 mcp100)
 (($#)) && ORDER=("$@")
 
 if ! nice cmake --build "$BUILD" --target far_replay --parallel 3 >/tmp/field-replay-build.log 2>&1; then
@@ -53,6 +55,21 @@ wait_cool() {
   return 1
 }
 
+# While a replay runs: pause it (SIGSTOP) when tj > 92 C, resume under 85 C.
+tj() { timeout 5 tegrastats --interval 1000 2>/dev/null | head -1 | grep -o 'tj@[0-9.]*' | cut -d@ -f2; }
+hot_pause() {
+  local pid=$1 kids t stopped=0
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 10; t=$(tj); [[ -z $t ]] && continue
+    kids=$(pgrep -P "$pid")
+    if ((!stopped)) && awk -v t="$t" 'BEGIN{exit !(t > 92)}'; then
+      echo "tj $t C: pausing the replay" >&2; kill -STOP $kids 2>/dev/null; stopped=1
+    elif ((stopped)) && awk -v t="$t" 'BEGIN{exit !(t < 85)}'; then
+      kill -CONT $kids 2>/dev/null; stopped=0
+    fi
+  done
+}
+
 OUT=$DATA/replay
 for src in "$DATA"/TXMAN1_*/; do
   m=$(basename "$src")
@@ -68,8 +85,11 @@ for v in "${ORDER[@]}"; do
     mkdir -p "$dst"
     wait_cool || exit 3
     # shellcheck disable=SC2046
-    if ! nice -n 19 timeout --kill-after=10 1800 "$BUILD/far_replay" "$sdir" --out "$dst/$s.csv" ${OPTS[$v]} \
-        $(cat "$sdir/calib.args") >"$dst/$s.log" 2>&1; then
+    nice -n 19 timeout --kill-after=10 1800 "$BUILD/far_replay" "$sdir" --out "$dst/$s.csv" ${OPTS[$v]} \
+        $(cat "$sdir/calib.args") >"$dst/$s.log" 2>&1 &
+    pid=$!
+    hot_pause "$pid"
+    if ! wait "$pid"; then
       echo "TIMEOUT or FAIL: $v $m $s (see $dst/$s.log)" >&2
       rm -f "$dst/$s.csv"
       continue
