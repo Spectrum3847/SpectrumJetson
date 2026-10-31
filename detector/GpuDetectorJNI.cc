@@ -243,6 +243,11 @@ struct DetectorSlot {
   frc::apriltag::CameraMatrix camera_matrix = DefaultCameraMatrix();
   frc::apriltag::DistCoeffs dist_coeffs = DefaultDistCoeffs();
   long gpu_input_frames = 0;  // for the GPU input check
+  // This detector's own GPU input buffer, a fixed address: the first-stage graph (bos-05) replays
+  // only when the input is where it was recorded. Frames from the shared decode pool are copied
+  // into it on the GPU (~1 MB device to device), so the graph runs every frame.
+  uint8_t *dev_in = nullptr;
+  int dev_in_w = 0, dev_in_h = 0;
   // bos-09: the most candidate quads seen in one frame, logged at each doubling from 512, to see
   // how close real scenes get to the detector's limit (GpuDetector::kMaxBlobs).
   size_t quads_logged = 256;
@@ -787,13 +792,28 @@ constexpr long kCheckEvery = 240;
 
 // One hardware decoder per camera thread (a decoder isn't thread-safe; PhotonVision decodes
 // each camera's frames on that camera's own thread).
+// JetPack 7 (r39) drives one NVJPG engine (the nvgpu driver exposes nvjpg0 only; JetPack 6 used
+// both, ~37% each with 4 cameras). With 2 cameras it was already 55% busy, so more cameras would
+// queue on it. The first SPECTRUM_NVJPG_MAX_CAMERAS decode threads (default 2) get it; the rest
+// decode with libjpeg-turbo on the CPU, which has the headroom. A thread that ends frees its place.
+std::atomic<int> nvjpg_users{0};
+int MaxNvjpgCameras() {
+  static const int n = [] {
+    const char *e = std::getenv("SPECTRUM_NVJPG_MAX_CAMERAS");
+    return e ? std::max(0, std::atoi(e)) : 2;
+  }();
+  return n;
+}
+
 struct NvjpgThread {
   SnjDecoder *dec = nullptr;
+  bool counted = false;  // holds one of the MaxNvjpgCameras places
   bool unavailable = false;       // no decoder
   bool path_unavailable[2] = {};  // [0] gray, [1] colour: this camera's JPEGs can't use it
   int unsupported_in_a_row[2] = {};
   long frames = 0;
   ~NvjpgThread() {
+    if (counted) nvjpg_users--;
     if (dec) LoadNvjpg()->destroy(dec);
   }
 };
@@ -929,6 +949,18 @@ int NvjpgDecode(const uint8_t *jpeg, size_t size, cv::Mat &mat, bool bgr) {
     if (!api) t.unavailable = true;
     t.path_unavailable[bgr] = true;
     return SNJ_UNSUPPORTED;
+  }
+  if (!t.dec && !t.counted) {
+    if (nvjpg_users.fetch_add(1) >= MaxNvjpgCameras()) {
+      nvjpg_users--;
+      std::cout << "971 jpeg: " << MaxNvjpgCameras()
+                << " camera(s) already decode on the NVJPG engine (one on JetPack 7); this camera "
+                   "uses libjpeg-turbo (SPECTRUM_NVJPG_MAX_CAMERAS)"
+                << std::endl;
+      t.unavailable = true;
+      return SNJ_UNSUPPORTED;
+    }
+    t.counted = true;
   }
   if (!t.dec && !(t.dec = api->create())) {
     std::cout << "971 jpeg: no hardware decoder (" << api->create_error()
@@ -1247,6 +1279,9 @@ JNIEXPORT void JNICALL Java_org_photonvision_jni_GpuDetectorJNI_destroyGpuDetect
   far_search::Forget(static_cast<int>(handle));
   delete s->gpu;
   s->gpu = nullptr;
+  if (s->dev_in) cudaFree(s->dev_in);
+  s->dev_in = nullptr;
+  s->dev_in_w = s->dev_in_h = 0;
   if (s->td) apriltag_detector_destroy(s->td);
   s->td = nullptr;
   if (s->family) tag36h11_destroy(s->family);
@@ -1456,6 +1491,33 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
         image_device = nullptr;
       }
     }
+  }
+  // Into this detector's fixed buffer (see DetectorSlot::dev_in), and the pool slot back at once.
+  // 2026-10-30: handing the pool's buffer straight to Detect() moved the input every frame, so the
+  // graph was re-recorded about once a second per camera, under an exclusive lock that stalled
+  // every camera, and ran step by step in between.
+  if (image_device) {
+    const size_t n = static_cast<size_t>(img.cols) * img.rows;
+    if (!s->dev_in || s->dev_in_w != img.cols || s->dev_in_h != img.rows) {
+      if (s->dev_in) cudaFree(s->dev_in);
+      s->dev_in = nullptr;
+      s->dev_in_w = s->dev_in_h = 0;
+      if (cudaMalloc(reinterpret_cast<void **>(&s->dev_in), n) == cudaSuccess) {
+        s->dev_in_w = img.cols;
+        s->dev_in_h = img.rows;
+      } else {
+        cudaGetLastError();
+        s->dev_in = nullptr;
+      }
+    }
+    if (s->dev_in && cudaMemcpy(s->dev_in, image_device, n, cudaMemcpyDeviceToDevice) == cudaSuccess) {
+      image_device = s->dev_in;
+    } else {
+      cudaGetLastError();
+      image_device = nullptr;  // copied up from the host frame instead
+    }
+    FreeGpuFrameSlot(slot_release.i);
+    slot_release.i = -1;
   }
 
   // Everything from here to the far search can throw: with bos-01, CHECK_CUDA throws instead of
