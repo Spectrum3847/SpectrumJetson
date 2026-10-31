@@ -43,6 +43,40 @@ For a new Jetson, or a spare SSD. You need an Orin Nano (Super) devkit, an NVMe 
 
 The rest of this README explains what each step does and why.
 
+## What's in this repo, and what the names mean
+
+**The pieces:**
+- **PhotonVision fork** ([Spectrum3847/photonvision](https://github.com/Spectrum3847/photonvision), branch `spectrum-2027`): the vision app that runs on the Jetson. Upstream PhotonVision plus our features; [SPECTRUM.md](https://github.com/Spectrum3847/photonvision/blob/spectrum-2027/SPECTRUM.md) there lists them. The code lives in that repo, not this one.
+- **GPU AprilTag detector:** finds tags on the Jetson's GPU in ~1.5 ms a frame. Austin Schuh's CUDA detector, plus our changes, wrapped so PhotonVision can call it.
+- **This repo:** everything else to turn a blank Jetson into a robot coprocessor, and to check it.
+
+**The folders:**
+
+| Folder | What's in it |
+|---|---|
+| `scripts/host/` | Run on the laptop: flash the Jetson, back up and restore its SSD, set it up |
+| `scripts/jetson/` | Run on the Jetson, in number order (`01-…16`), plus its helpers (`spectrum-clocks`, `spectrum-rt`, the fan, health check, camera firmware tools) |
+| `detector/` | Our wrapper around the GPU detector (`GpuDetectorJNI.cc`), the hardware JPEG decoder, and replay tools that run recordings through the detector |
+| `patches/` | Our changes to the GPU detector (`bos-01…`) and the 2026 PhotonVision patches (`photonvision-NN`, kept for history) |
+| `kernel/` | Our changes to Linux's USB camera driver (`uvcvideo`) |
+| `robot-vision/` | The **robot-side** Java library: reads the Jetson's results, checks and fuses them into the robot's pose |
+| `calibrations/` | Lens calibrations for our cameras |
+| `tests/` | Bench and field tests, one folder each, with a `run.sh` |
+| `tools/` | Bigger helpers: fake cameras, field calibration, the field model |
+| `docs/` | The details: [TECHNICAL.md](docs/TECHNICAL.md) (every measurement and decision), REWIND.md, research notes, reviews |
+| `training/` | The student course website |
+
+**Names you'll see:**
+- **971 / AOS / bos:** FRC 971 Spartan Robotics, their robot framework (AOS, now kept by Realtime Robotics Group), and `frc971/bos`, the repo we took the GPU detector from. In our files, "971" and "bos" just mean **the GPU detector**: `08-select-detector.sh bos`, `SPECTRUM_971_*` settings, `971 stats` log lines. (These are being renamed to plain "detector" names.)
+- **4143:** FRC 4143's CUDA PhotonVision, where the 2026 version of this started.
+- **Rewind:** recording every camera during a match, to replay later.
+- **Match Ready:** PhotonVision's page that says whether the Jetson is ready for a match.
+- **Quiet mode / idle mode:** after a match or while disabled, the Jetson saves less to disk and runs the cameras slower; after 20 s disabled (or with no robot) it also lowers its clocks (`spectrum-clocks`).
+- **Far search:** a slower second look for small, far-away tags.
+- **NVJPG:** the Jetson's hardware JPEG decoder; camera frames are decoded there instead of on the CPU.
+- **Thriftiest Cam / Swyft:** the USB cameras we use.
+- **JetPack / L4T r39:** NVIDIA's Jetson software (JetPack 7 = L4T r39, Ubuntu 24.04).
+
 ## Overview
 
 We turned an NVIDIA Jetson Orin Nano Super into a vision coprocessor that finds AprilTags on its GPU, for team 8515's robot at the October 2026 off-season event.
