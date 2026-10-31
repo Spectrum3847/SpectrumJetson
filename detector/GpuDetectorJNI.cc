@@ -23,7 +23,6 @@
 //   - no per-detection std::cout; a once-per-second stats line instead
 
 #include <jni.h>
-#include <wpi/jni_util.h>
 
 #include <algorithm>
 #include <atomic>
@@ -54,8 +53,7 @@
 #include <jpeglib.h>
 #include "far_search.h"
 #include "nvjpg_decoder.h"
-#include <wpi/RawFrame.h>
-#include <wpi/timestamp.h>
+#include "wpi_compat.h"
 #include "absl/status/status.h"
 #include <opencv2/core/mat.hpp>
 
@@ -67,10 +65,8 @@ void SpectrumInjectStickyCudaFault();  // fault_kernel.cu (test only)
 
 namespace {
 
-wpi::java::JClass detectionCls;
-
-const wpi::java::JClassInit classes[] = {
-    {"edu/wpi/first/apriltag/AprilTagDetection", &detectionCls}};
+// AprilTagDetection, a global ref: WPILib 2027's name first, then 2026's (JNI_OnLoad).
+jclass detectionCls = nullptr;
 
 // Contrast threshold for the GPU thresholding step. 4143 used 5, frc971/bos uses 4,
 // and RealtimeRoboticsGroup/aos 76d8f216 moved to 20 for speed. Override at launch
@@ -375,14 +371,14 @@ jobject MakeJObject(JNIEnv *env, const apriltag_detection_t *detect) {
       env->GetMethodID(detectionCls, "<init>", "(Ljava/lang/String;IIF[DDD[D)V");
   if (!constructor) return nullptr;
 
-  wpi::java::JLocal<jstring> fam{env, wpi::java::MakeJString(env, detect->family->name)};
+  wpi_compat::JLocal<jstring> fam{env, wpi_compat::MakeJString(env, detect->family->name)};
   auto homography = detect->H;
-  wpi::java::JLocal<jdoubleArray> harr{
-      env, wpi::java::MakeJDoubleArray(
+  wpi_compat::JLocal<jdoubleArray> harr{
+      env, wpi_compat::MakeJDoubleArray(
                env, {reinterpret_cast<const jdouble *>(homography->data),
                      static_cast<size_t>(homography->nrows * homography->ncols)})};
-  wpi::java::JLocal<jdoubleArray> carr{
-      env, wpi::java::MakeJDoubleArray(
+  wpi_compat::JLocal<jdoubleArray> carr{
+      env, wpi_compat::MakeJDoubleArray(
                env, {reinterpret_cast<const jdouble *>(detect->p), 4 * 2})};
 
   return env->NewObject(detectionCls, constructor, fam.obj(), static_cast<jint>(detect->id),
@@ -397,11 +393,11 @@ jobject MakeJObject(JNIEnv *env, const far_search::Det &d) {
   static jmethodID constructor =
       env->GetMethodID(detectionCls, "<init>", "(Ljava/lang/String;IIF[DDD[D)V");
   if (!constructor) return nullptr;
-  wpi::java::JLocal<jstring> fam{env, wpi::java::MakeJString(env, d.family->name)};
-  wpi::java::JLocal<jdoubleArray> harr{
-      env, wpi::java::MakeJDoubleArray(env, {reinterpret_cast<const jdouble *>(d.H.data()), d.H.size()})};
-  wpi::java::JLocal<jdoubleArray> carr{
-      env, wpi::java::MakeJDoubleArray(env, {reinterpret_cast<const jdouble *>(d.p.data()), d.p.size()})};
+  wpi_compat::JLocal<jstring> fam{env, wpi_compat::MakeJString(env, d.family->name)};
+  wpi_compat::JLocal<jdoubleArray> harr{
+      env, wpi_compat::MakeJDoubleArray(env, {reinterpret_cast<const jdouble *>(d.H.data()), d.H.size()})};
+  wpi_compat::JLocal<jdoubleArray> carr{
+      env, wpi_compat::MakeJDoubleArray(env, {reinterpret_cast<const jdouble *>(d.p.data()), d.p.size()})};
   return env->NewObject(detectionCls, constructor, fam.obj(), static_cast<jint>(d.id),
                         static_cast<jint>(d.hamming), static_cast<jfloat>(d.margin), harr.obj(),
                         static_cast<jdouble>(d.c[0]), static_cast<jdouble>(d.c[1]), carr.obj());
@@ -433,7 +429,7 @@ jobjectArray MakeJObjectArray(JNIEnv *env, const std::vector<far_search::Det> &d
   jobjectArray jarr = env->NewObjectArray(static_cast<jsize>(dets.size()), detectionCls, nullptr);
   if (!jarr) return nullptr;
   for (size_t i = 0; i < dets.size(); ++i) {
-    wpi::java::JLocal<jobject> elem{env, MakeJObject(env, dets[i])};
+    wpi_compat::JLocal<jobject> elem{env, MakeJObject(env, dets[i])};
     env->SetObjectArrayElement(jarr, static_cast<jsize>(i), elem.obj());
   }
   return jarr;
@@ -460,7 +456,7 @@ jobjectArray MakeJObjectArray(JNIEnv *env, const zarray_t *detections) {
   for (int i = 0; i < n; ++i) {
     apriltag_detection_t *det;
     zarray_get(detections, i, &det);
-    wpi::java::JLocal<jobject> elem{env, MakeJObject(env, det)};
+    wpi_compat::JLocal<jobject> elem{env, MakeJObject(env, det)};
     env->SetObjectArrayElement(jarr, i, elem.obj());
   }
   return jarr;
@@ -907,9 +903,9 @@ int NvjpgDecode(const uint8_t *jpeg, size_t size, cv::Mat &mat, bool bgr) {
 // A "971 jpeg" line every 10 s (not "971 stats", which health-check.sh parses per detector).
 // Colour frames are also counted on their own, in a clause at the end of the line.
 std::atomic<int> last_timestamp_src{-1};  // WPI_TimestampSource of the last gray frame
-// The capture timestamp (wpi::Now microseconds) of the last gray frame decoded on this thread;
+// The capture timestamp (WPI_Now ticks: us on 2026, ns on 2027) of the last gray frame decoded on this thread;
 // processimage reports how old that frame is when its detection ends ("frame age at result").
-thread_local uint64_t last_capture_us = 0;
+thread_local uint64_t last_capture_ticks = 0;
 
 // age_ms: how old the frame was when its decode started (from cscore's capture timestamp, which
 // the camera driver takes when the frame's first USB packet arrives), or < 0 if unknown.
@@ -992,12 +988,23 @@ __attribute__((visibility("default"))) void spectrum_cuda_unlock_shared() {
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
   JNIEnv *env;
   if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
-  for (auto &c : classes) {
-    *c.cls = wpi::java::JClass(env, c.name);
-    if (!*c.cls) {
-      std::cout << "971 library could not find class " << c.name << std::endl;
-      return JNI_ERR;
+  // WPILib 2027 moved AprilTagDetection (and made WPI_Now nanoseconds); 2026 is microseconds.
+  for (const auto &[name, ticks_per_ms] :
+       {std::pair{"org/wpilib/vision/apriltag/AprilTagDetection", 1e6},
+        std::pair{"edu/wpi/first/apriltag/AprilTagDetection", 1e3}}) {
+    jclass local = env->FindClass(name);
+    if (!local) {
+      env->ExceptionClear();
+      continue;
     }
+    detectionCls = static_cast<jclass>(env->NewGlobalRef(local));
+    env->DeleteLocalRef(local);
+    wpi_compat::TicksPerMs() = ticks_per_ms;
+    break;
+  }
+  if (!detectionCls) {
+    std::cout << "971 library could not find AprilTagDetection (WPILib 2027 or 2026)" << std::endl;
+    return JNI_ERR;
   }
   std::string sync;
   const cudaError_t sync_err = cudaSetDeviceFlags(CudaScheduleFlag(&sync));
@@ -1025,17 +1032,19 @@ JNIEXPORT jint JNICALL Java_org_photonvision_jni_GpuDetectorJNI_decodeMjpegGray(
   auto *frame = reinterpret_cast<WPI_RawFrame *>(raw_ptr);
   auto *mat = reinterpret_cast<cv::Mat *>(mat_ptr);
   if (!frame || !mat) return -2;
-  if (frame->pixelFormat != WPI_PIXFMT_MJPEG || !frame->data || frame->size < 4) return -1;
+  if (frame->pixelFormat != kWpiPixfmtMjpeg || !frame->data || frame->size < 4) return -1;
   if (mat->type() != CV_8UC1 || !mat->isContinuous()) return -3;
   const auto *data = reinterpret_cast<const uint8_t *>(frame->data);
   const size_t size = static_cast<size_t>(frame->size);
 
   const auto t0 = std::chrono::steady_clock::now();
   const double age_ms =
-      frame->timestamp ? (static_cast<double>(wpi::Now()) - static_cast<double>(frame->timestamp)) / 1000
-                       : -1;
+      frame->timestamp && wpi_compat::Now()
+          ? (static_cast<double>(wpi_compat::Now()) - static_cast<double>(frame->timestamp)) /
+                wpi_compat::TicksPerMs()
+          : -1;
   last_timestamp_src = frame->timestampSrc;
-  last_capture_us = frame->timestamp;
+  last_capture_ticks = frame->timestamp;
   // Latency probe (tests only): while /tmp/spectrum-971-kmsg exists (checked every 60 frames),
   // log each decode start to the kernel log, next to uvcvideo's "Frame complete" trace lines.
   {
@@ -1088,7 +1097,7 @@ JNIEXPORT jint JNICALL Java_org_photonvision_jni_GpuDetectorJNI_decodeMjpegBgr(
   auto *frame = reinterpret_cast<WPI_RawFrame *>(raw_ptr);
   auto *mat = reinterpret_cast<cv::Mat *>(mat_ptr);
   if (!frame || !mat) return -2;
-  if (frame->pixelFormat != WPI_PIXFMT_MJPEG || !frame->data || frame->size < 4) return -1;
+  if (frame->pixelFormat != kWpiPixfmtMjpeg || !frame->data || frame->size < 4) return -1;
   if (mat->type() != CV_8UC3 || !mat->isContinuous()) return -3;
   const auto *data = reinterpret_cast<const uint8_t *>(frame->data);
   const size_t size = static_cast<size_t>(frame->size);
@@ -1114,7 +1123,8 @@ JNIEXPORT jint JNICALL Java_org_photonvision_jni_GpuDetectorJNI_decodeMjpegBgr(
 JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *) {
   JNIEnv *env;
   if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) return;
-  for (auto &c : classes) c.cls->free(env);
+  if (detectionCls) env->DeleteGlobalRef(detectionCls);
+  detectionCls = nullptr;
 }
 
 JNIEXPORT jlong JNICALL Java_org_photonvision_jni_GpuDetectorJNI_createGpuDetector(
@@ -1478,13 +1488,14 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
     result = MakeJObjectArray(env, all);
   }
   auto t2 = std::chrono::steady_clock::now();
-  if (last_capture_us) {
-    const double age = (static_cast<double>(wpi::Now()) - static_cast<double>(last_capture_us)) / 1000;
+  if (last_capture_ticks) {
+    const double age = (static_cast<double>(wpi_compat::Now()) - static_cast<double>(last_capture_ticks)) /
+                       wpi_compat::TicksPerMs();
     if (age >= 0 && age < 1000) {
       s->stats.age_ms += age;
       s->stats.ages++;
     }
-    last_capture_us = 0;  // one frame, one reading
+    last_capture_ticks = 0;  // one frame, one reading
   }
   RecordStats(s->stats, handle, img, detections, failed, t0, t1, t2);
   return result;

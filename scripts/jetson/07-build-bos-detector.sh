@@ -6,7 +6,8 @@
 # Also builds libspectrumnvjpg.so, the optional NVJPG hardware JPEG decoder that
 # lib971apriltag.so loads when SPECTRUM_JPEG_DECODER=nvjpg (detector/nvjpg_decoder.h).
 #
-# Run ON THE JETSON after 04-build-allwpilib.sh. Builds only; does NOT install.
+# Run ON THE JETSON (after 02-jetpack.sh: CUDA, JDK). Builds only; does NOT install.
+# No WPILib needed (detector/wpi_compat.h): the AprilTag C library is built in from source.
 # Install with 08-select-detector.sh bos (it installs both libraries), or by hand:
 #   sudo install -m 755 ~/build/bos-detector/lib971apriltag.so /usr/lib/lib971apriltag.so
 #   sudo install -m 755 ~/build/bos-detector/libspectrumnvjpg.so /usr/lib/libspectrumnvjpg.so
@@ -18,14 +19,26 @@ set -euo pipefail
 
 BOS_REPO=https://github.com/frc971/bos.git
 BOS_SHA=62e93b4   # 2026-09-07; third_party/971apriltag last changed in 1dbdf51 (2026-05-19)
+# The AprilTag C library: the AprilRobotics commit WPILib 2027 alpha-8 bundles
+# (allwpilib upstream_utils/apriltag.py, "master on 2026-08-07").
+APRILTAG_REPO=https://github.com/AprilRobotics/apriltag.git
+APRILTAG_SHA=b7c0ebe9aa20f82ec7a828579004f9e706bfecd9
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 SRC=$HOME/build/bos
+APRILTAG_SRC=$HOME/build/apriltag-src/apriltag   # in a directory named apriltag: <apriltag/...>
 OUT=$HOME/build/bos-detector
 
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64
+# Only for jni.h; the library runs in whichever JVM loads it.
+export JAVA_HOME=$(ls -d /usr/lib/jvm/java-25-openjdk-arm64 /usr/lib/jvm/java-17-openjdk-arm64 2>/dev/null | head -1)
 export PATH=$PATH:/usr/local/cuda/bin
+command -v cmake >/dev/null && command -v ninja >/dev/null && dpkg -s libjpeg-turbo8-dev libopencv-dev >/dev/null 2>&1 ||
+  sudo apt-get install -y cmake ninja-build build-essential libjpeg-turbo8-dev libopencv-dev
 
-[[ -f /usr/local/lib/libwpiutil.so ]] || { echo "Run 04-build-allwpilib.sh first." >&2; exit 1; }
+if [[ ! -d $APRILTAG_SRC/.git ]]; then
+  git clone --filter=blob:none "$APRILTAG_REPO" "$APRILTAG_SRC"
+fi
+git -C "$APRILTAG_SRC" fetch -q origin || echo "==> Can't reach $APRILTAG_REPO; using the local clone"
+git -C "$APRILTAG_SRC" checkout -q -f "$APRILTAG_SHA"
 
 if [[ ! -d $SRC/.git ]]; then
   git clone --filter=blob:none "$BOS_REPO" "$SRC"
@@ -44,10 +57,18 @@ for p in "$REPO_ROOT"/patches/bos-*.patch; do
   git apply "$p"
 done
 
-cmake -S "$REPO_ROOT/detector" -B "$OUT" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBOS_DIR="$SRC"
-cmake --build "$OUT" --parallel 4 --target 971apriltag_jni spectrumtrt_jni spectrumnvjpg
+cmake -S "$REPO_ROOT/detector" -B "$OUT" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBOS_DIR="$SRC" \
+  -DAPRILTAG_DIR="$APRILTAG_SRC"
+cmake --build "$OUT" --parallel 4 --target 971apriltag_jni
+# The hardware JPEG decoder and TensorRT are optional (the CMake skips them when their libraries
+# are missing), and each is built on its own so one failing doesn't stop the detector.
+for t in spectrumnvjpg spectrumtrt_jni; do
+  cmake --build "$OUT" --parallel 4 --target "$t" || echo "==> $t didn't build (optional)"
+done
 
 echo
-ldd "$OUT/lib971apriltag.so" | grep -E "not found|wpiutil|apriltag|cudart" || true
+ldd "$OUT/lib971apriltag.so" | grep -E "not found|wpi|apriltag|cudart" || true
+# Exported: the JNI entry points and spectrum_cuda_* only (nothing from AprilTag or abseil).
+echo "exported: $(nm -D --defined-only "$OUT/lib971apriltag.so" | awk '{print $3}' | grep -v -E '^(Java_|JNI_|spectrum_cuda_)' | wc -l) symbols besides JNI and spectrum_cuda_*"
 echo "Built $OUT/lib971apriltag.so and $OUT/libspectrumnvjpg.so (not installed)"
 echo "Check the hardware JPEG decoder with tests/jpeg-hw/run.sh"

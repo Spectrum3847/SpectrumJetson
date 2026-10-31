@@ -1,0 +1,29 @@
+SpectrumJetson: CUB 3 (CUDA 13) writes selected items through *(d_out + offset), where CUB 2
+used d_out[offset], and bos's TransformOutputIterator has no operator+. Adds operator+ and +=,
+same as indexing; harmless on CUDA 12.
+
+diff --git a/third_party/971apriltag/transform_output_iterator.h b/third_party/971apriltag/transform_output_iterator.h
+index 3cdfefc..8b089f3 100644
+--- a/third_party/971apriltag/transform_output_iterator.h
++++ b/third_party/971apriltag/transform_output_iterator.h
+@@ -68,6 +68,20 @@ class TransformOutputIterator {
+     return Reference(ptr + num, convert_op);
+   }
+ 
++  // offset (CUB 3, CUDA 13, writes through *(it + n) where CUB 2 used it[n])
++  template <typename Distance>
++  __host__ __device__ __forceinline__ self_type operator+(Distance n) const {
++    self_type retval = *this;
++    retval.ptr += n;
++    return retval;
++  }
++
++  template <typename Distance>
++  __host__ __device__ __forceinline__ self_type& operator+=(Distance n) {
++    ptr += n;
++    return *this;
++  }
++
+   // equal to
+   __host__ __device__ __forceinline__ bool operator==(
+       const TransformOutputIterator& rhs) const {
