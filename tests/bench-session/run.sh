@@ -37,7 +37,7 @@ EDGE_VALUES=${EDGE_VALUES:-"0 25 50"}
 GRAPHS_FILE=/tmp/spectrum-971-graphs
 DROPIN=/etc/systemd/system/photonvision.service.d/971.conf
 PVDB=/opt/photonvision/photonvision_config/photon.sqlite
-DEFAULT_STEPS=(inventory baseline graphs 3d rt edge)
+DEFAULT_STEPS=(inventory baseline graphs far 3d rt edge)
 
 # ---------------------------------------------------------------------------------------------
 # Measurement (run as "run.sh --measure OUT STEP COND ROUND SECS", under a timeout): perf-snapshot
@@ -181,9 +181,9 @@ STEPS=()
 for a in "$@"; do
   case $a in
     all) STEPS+=("${DEFAULT_STEPS[@]}") ;;
-    inventory | baseline | graphs | 3d | rt | edge | usb) STEPS+=("$a") ;;
+    inventory | baseline | graphs | far | 3d | rt | edge | usb) STEPS+=("$a") ;;
     -h | --help) sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
-    *) echo "unknown step $a (inventory baseline graphs 3d rt edge usb all)" >&2; exit 2 ;;
+    *) echo "unknown step $a (inventory baseline graphs far 3d rt edge usb all)" >&2; exit 2 ;;
   esac
 done
 ((${#STEPS[@]})) || STEPS=("${DEFAULT_STEPS[@]}")
@@ -274,6 +274,8 @@ restore() {
   echo "  CUDA graphs switch: $GRAPHS_ORIG"
   [[ $(cat /etc/spectrum-rt 2>/dev/null || echo off) == "$RT_ORIG" ]] || sudo -n spectrum-rt "$RT_ORIG" > /dev/null
   echo "  spectrum-rt: $RT_ORIG"
+  if [[ -n $FAR_ORIG ]]; then far_set "$FAR_ORIG" && echo "  far search: $FAR_ORIG"; fi
+  sudo -n spectrum-clocks mode "$CLOCKS_ORIG" > /dev/null && echo "  spectrum-clocks mode: $CLOCKS_ORIG"
   for e in "${PNP_CHANGED[@]}"; do
     u=${e%%$'\t'*}; v=${e#*$'\t'}
     timeout 15 python3 "$PVPY" set "$u" solvePNPEnabled "$v" && echo "  3D (solvePNPEnabled) $v: $u"
@@ -288,6 +290,10 @@ restore() {
   render
 }
 trap restore EXIT
+# The bench has no robot, so spectrum-clocks would lower the clocks after 20 s: hold them full.
+CLOCKS_ORIG=$(cat /etc/spectrum-clocks-mode 2>/dev/null || echo auto)
+sudo -n spectrum-clocks mode full > /dev/null && echo "Clocks held full for the session (was: $CLOCKS_ORIG)"
+FAR_ORIG=""
 trap 'echo; echo "Interrupted"; exit 130' INT TERM
 
 # ---------------------------------------------------------------------------------------------
@@ -356,6 +362,27 @@ step_graphs() {
     done
   done
   if [[ $GRAPHS_ORIG == absent ]]; then rm -f "$GRAPHS_FILE"; else echo "$GRAPHS_ORIG" > "$GRAPHS_FILE"; fi
+}
+
+# Far search (photonvision-55) on/off, live through Settings > Robot state's endpoint. The TXMAN1
+# replays (tests/field-replay) found +1,728 sightings (1,306 good) for ~1.7 ms/frame; live it once
+# cost 5.9 ms. Turn it on for the robot if the live cost is close to the replay's.
+far_get() { curl -s -m 10 localhost:5800/api/robotState | python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("farSearch")).lower())'; }
+far_set() { curl -s -m 10 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"farSearch\": $1}" localhost:5800/api/robotState | grep -q 200; }
+
+step_far() {
+  local r v
+  FAR_ORIG=$(far_get)
+  [[ $FAR_ORIG == true || $FAR_ORIG == false ]] || { note "can't read farSearch ($FAR_ORIG)"; FAR_ORIG=""; return 1; }
+  note "far search was $FAR_ORIG"
+  ask "TAGS: every camera at tags, some FAR away (5+ m) if you can; leave them still." || return
+  for ((r = 1; r <= ROUNDS; r++)); do
+    for v in true false; do
+      far_set "$v" || { note "farSearch change failed"; return 1; }
+      settle; measure "far search $([[ $v == true ]] && echo on || echo off)" "$r" || return
+    done
+  done
+  far_set "$FAR_ORIG"; note "far search put back to $FAR_ORIG"; FAR_ORIG=""
 }
 
 step_3d() {
