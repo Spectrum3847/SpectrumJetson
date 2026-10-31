@@ -2259,10 +2259,85 @@ For comparison, one camera alone took 1.45 ms and 7% GPU at the start.
   same wall time. Without a calibration (refinement is cheap) it costs ~+130 µs of wall time and
   a little CPU, for the extra wait. GPU +~70 µs a frame (nsys, TXMAN Q17).
   - A polling wait instead of blocking was tried: ~−20 µs wall for +60 µs CPU. Not kept.
-- **Next step, if it's wanted:** fit the quads' corners (`UpdateFitQuads`, the area and angle
-  checks) on the GPU too, and refine inside the stage 3 graph. That removes the extra wait, so
-  the wall time would drop too.
+- **Next step:** done in `detector-16` (below): no extra wait.
 - Off by default until reviewed. Off, the output is identical to `detector-14`.
+
+#### Corners and RefineEdges inside the stage 3 graph (`detector-16`, off by default)
+
+- **What:** `SPECTRUM_DETECTOR_GPU_REFINE=2` (read at start: it is recorded into the stage graphs)
+  ends stage 3's graph with two more kernels:
+  - `CornersFromFitQuads`: `UpdateFitQuads` with its area and angle checks, then
+    `AdjustPixelCenters`, one thread per fit quad.
+  - `detector-15`'s refinement kernel.
+  Both write into pinned memory, so `detector-15`'s extra wait is gone. The host takes the valid
+  corners in the fit quads' order and their refined corners, then only decodes.
+  - The image pointer, the calibration and an on/off flag are read from pinned memory each
+    frame, not baked into the graph.
+  - Without a lens calibration (all distortion coefficients 0) the flag is off: both kernels
+    return at once, and the CPU fits and refines as before. Its refinement is cheap there, and the
+    kernels cost ~+50 µs of wall time a frame (measured before this gate).
+  - `0` in `/tmp/spectrum-detector-gpu-refine` also turns the flag off, live.
+  - It needs the stage graphs (`detector-11`). A frame that runs step by step uses the CPU.
+- **Same results with it off:** identical to `detector-15` on all 14 cameras (`graph_bench --out`).
+  With it on, uncalibrated cameras are identical too (fieldcal-synth, synthetic-near-far).
+- **Accuracy** (`judge.py`, all TXMAN1, `detector-replay --graphs` so the in-graph path runs; against
+  CPU refinement):
+  - in-frame p50 1.283 → 1.278 px (CI −0.011..+0.000), p90 9.133 → 9.130 (CI −0.109..+0.102).
+  - static jitter 0.084 → 0.085 px (CI −0.001..+0.002).
+  - sightings 38,489 → 38,482 (20 lost, 13 gained), the same as `detector-15`. Corners match
+    `detector-15`'s to 2e-5 px.
+  - Not worse.
+- **Measured:** see the table under `detector-17` (`graph_bench`, 6 interleaved runs).
+- The judge's replays ran before the calibration gate, when frames outside the stage graphs used
+  `detector-15`'s refinement. Those frames now refine on the CPU. That changes 22 corners of the
+  38,482 sightings (by ≤0.1 px) and none of the sightings.
+- **`detector-replay --graphs`:** the normal search through the CUDA graphs, as PhotonVision runs it
+  (identical detections). Needed to replay anything that only runs inside the graphs.
+
+#### The decode in the graph too (`detector-17`, off by default)
+
+- **What:** `SPECTRUM_DETECTOR_GPU_REFINE=3` (read at start) is `detector-16` plus
+  `quad_decode_index` (apriltag.c) as a third kernel in stage 3's graph, one block (64 threads)
+  per quad. The block does the homography (`homography_compute2`, and `matd_inverse`'s singular
+  check), the border samples and gray models, the bit samples, the sharpening, the code, the
+  table lookup (the family's quick-decode table, copied to the GPU once), and the rotated H, centre
+  and corners.
+  - The samples are taken in parallel. One thread adds them up, in the CPU's order.
+  - The rotations' cos/sin come from the host.
+  - Results go to pinned memory. The host makes the `apriltag_detection_t`s, then reconciles
+    and sorts as before. The worker threads aren't used on that path.
+  - One tag family only, and only calibrated cameras (the same per-frame flag as `detector-16`).
+    Anything else, or a frame outside the stage graphs, decodes on the CPU as before.
+- **Same results:** with it off, identical to `detector-16`. On, against `detector-16` (`graph_bench --out`, %a, 600 frames, 10
+  calibrated cameras: fieldcal-synth x4 with their lens calibrations, TXMAN1 Q17/Q24/Q32 left and
+  right): **ids, hamming, decision margins and corners bit-identical** on all 5,550 detections.
+  Uncalibrated cameras are identical to the CPU path.
+- **Accuracy** (`judge.py`, all TXMAN1, `--graphs`; against CPU refinement): as `detector-16`.
+  - in-frame p50 1.282 → 1.278 (CI −0.010..+0.001); static jitter 0.084 → 0.085 (CI −0.001..+0.002).
+  - 38,482 sightings, the same set as `detector-16`.
+- **Speed:** the decode kernel is ~269 µs of GPU a frame on TXMAN Q17 (nsys). It was 340 µs
+  before the homography's eliminations and the two gray models were spread over the block's
+  threads (still bit-identical). It runs in double, as the CPU does, for identical results, and
+  the Orin GPU's double rate is low.
+- **Measured** (`graph_bench`, 150 frames x 2 timed loops, the three interleaved x 6, full clocks,
+  PhotonVision stopped; µs, medians of the runs' medians; thread CPU / Detect wall / process CPU):
+
+  | Recording | CPU refine and decode | `detector-16` (`=2`) | `detector-17` (`=3`) |
+  | --- | --- | --- | --- |
+  | TXMAN1 Q17 orin-left (calib, busy) | 200 / 1975 / 1045 | 172 / **1949** / 426 | **128** / 2133 / **132** |
+  | TXMAN1 Q24 orin-right (calib) | 189 / 1914 / 1019 | 168 / **1808** / 372 | **127** / 1970 / **131** |
+  | ceiling-4cam TopLeft (no calib) | 162 / 1360 / 317 | 164 / 1373 / 317 | 161 / 1388 / 317 |
+  | fieldcal-synth TopLeft (no calib) | 153 / 814 / 276 | 155 / 830 / 279 | 154 / 843 / 278 |
+
+  - `detector-16`: −60% process CPU on calibrated cameras, with the same or slightly better wall
+    time.
+  - `detector-17`: −87% process CPU (the worker threads aren't used), but ~+160 µs of wall time
+    over `detector-16` for the decode kernel.
+  - Uncalibrated cameras: +13..16 µs (`=2`) and +28 µs (`=3`) of wall time. The gated kernels are
+    still nodes in the graph. Recording separate graphs without them for uncalibrated cameras
+    would remove that.
+  - So: `=2` when wall time matters most, `=3` when the CPU runs out (more cameras). Both are
+    off by default until reviewed.
 
 #### Where the remaining CPU goes (4 cameras, 1.2 cores)
 

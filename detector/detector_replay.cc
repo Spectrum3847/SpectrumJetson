@@ -5,7 +5,7 @@
 //
 //   detector-replay SESSION_DIR [--out OUT.csv] [--budget N] [--off] [--every N] [--threads N]
 //              [--calib CAMERA=fx,fy,cx,cy,k1,k2,p1,p2,k3,k4,k5,k6]... [--mwbd N] [--mse X]
-//              [--exclude ID,ID...] [--mcp N] [--fullres | --half] [--edge N]
+//              [--exclude ID,ID...] [--mcp N] [--fullres | --half | --scale S] [--edge N] [--graphs]
 //
 // SESSION_DIR: a Rewind session (one folder per camera, docs/REWIND.md). --budget: full-size
 // searches a second (default 30, as live). --off: the far search switched off, for a baseline.
@@ -17,6 +17,11 @@
 // search's full-size search does) instead of the detector's half-resolution quad search.
 // --half: the frame downscaled 2x (2x2 average) first, as a 640x400 camera mode; corners and sizes
 // are reported in full-frame pixels (X = 2U, the 971 detector's pixel-edge convention).
+// --scale S: the frame resized by S (bilinear, OpenCV's centre-aligned mapping; padded with its edge
+// pixels to a multiple of 8) first, and the calibration with it; corners back as X = U / S. S = 4/3
+// emulates a detector decimating by 1.5 instead of 2 (its fixed half-res quad search on the bigger
+// frame), but the corners are refined on the interpolated frame, not the camera's (accuracy/).
+// --edge N is scaled too.
 //
 // OUT.csv, one row per detection: camera,frame,jetson_us,id,margin,side_px,source,x0,y0,...,x3,y3
 // (source: normal or far). Summary on stdout: tag sightings (camera x frame x tag) by the normal
@@ -26,6 +31,9 @@
 // SPECTRUM_DETECTOR_EDGE_BORDER_PX live; default 0 = off). Normal search only, not the far search's crops.
 // With --half, N/2 rounded up in the small frame; ignored with --fullres.
 // --trace: each frame's far-search time on stderr as it goes (to find a frame that stalls).
+// --graphs: the normal search through the CUDA graphs, as PhotonVision runs it (detector-05/11/13; the
+// graphs recorded between frames). Same detections; needed for anything that only runs in the
+// graphs (detector-16's SPECTRUM_DETECTOR_GPU_REFINE=2).
 // Accuracy knobs (tests/field-replay/accuracy/; all off by default, output unchanged without them):
 // --subpix W: each reported corner refined with OpenCV's cornerSubPix on the full-res gray frame,
 // window (2W+1)^2. --edgefit: each corner re-found as the intersection of lines fitted to the
@@ -82,6 +90,7 @@ struct Camera {
   std::vector<int> tile_x0;
   int tile_w = 0;
   std::vector<uint8_t> up, small;
+  cv::Mat scaled;  // --scale
 };
 
 constexpr int kTileSide = 1024;  // frame pixels; upscaled 2x, the 971 detector's 2048 limit
@@ -267,13 +276,13 @@ int main(int argc, char **argv) {
                                : fs::path(argv[1]).lexically_normal();
   std::string out_path;
   double budget = 30;
-  bool off = false, trace = false, fullres = false, half = false;
+  bool off = false, trace = false, fullres = false, half = false, graphs = false;
   int mcp = -1;
   int edge = 0;
   int every = 1, threads = 5;
   int subpix = 0, nmaxima = -1;
   bool edgefit = false, edgefit_undist = false, no_refine_edges = false;
-  double cos_crit = -1;
+  double cos_crit = -1, scale = 0;
   double mwbd = EnvOr("MIN_WHITE_BLACK_DIFF", 5), mse = EnvOr("MAX_LINE_FIT_MSE", 10);
   std::map<std::string, std::vector<double>> calibs;
   std::vector<int> excluded;
@@ -284,8 +293,10 @@ int main(int argc, char **argv) {
     else if (a == "--budget") budget = std::atof(v), ++i;
     else if (a == "--off") off = true;
     else if (a == "--trace") trace = true;
+    else if (a == "--graphs") graphs = true;
     else if (a == "--fullres") fullres = true;
     else if (a == "--half") half = true;
+    else if (a == "--scale") scale = std::atof(v), ++i;
     else if (a == "--edge") edge = std::max(0, std::atoi(v)), ++i;
     else if (a == "--mcp") mcp = std::atoi(v), ++i;
     else if (a == "--every") every = std::max(1, std::atoi(v)), ++i;
@@ -321,6 +332,11 @@ int main(int argc, char **argv) {
       std::cerr << "unknown option " << a << "\n";
       return 2;
     }
+  }
+
+  if (scale != 0 && (scale < 0.25 || scale > 4 || half || fullres)) {
+    std::cerr << "--scale needs 0.25..4, not with --half or --fullres\n";
+    return 2;
   }
 
   // Every camera folder with frames.
@@ -372,6 +388,16 @@ int main(int argc, char **argv) {
       c.small.resize(static_cast<size_t>(c.width / 2) * (c.height / 2));
       c.gpu = new frc::apriltag::GpuDetector(c.width / 2, c.height / 2, c.td, cm, c.dc, vision::ImageFormat::MONO8);
       c.gpu->SetEdgeBorder((edge + 1) / 2);
+    } else if (scale != 0) {
+      // OpenCV-convention centres: x' = S (x + 0.5) - 0.5.
+      auto cm = c.cm;
+      if (calibs.count(c.name))
+        cm = {scale * c.cm.fx, scale * (c.cm.cx + 0.5) - 0.5, scale * c.cm.fy, scale * (c.cm.cy + 0.5) - 0.5};
+      const int sw = (static_cast<int>(std::ceil(c.width * scale)) + 7) / 8 * 8;
+      const int sh = (static_cast<int>(std::ceil(c.height * scale)) + 7) / 8 * 8;
+      c.scaled.create(sh, sw, CV_8UC1);
+      c.gpu = new frc::apriltag::GpuDetector(sw, sh, c.td, cm, c.dc, vision::ImageFormat::MONO8);
+      c.gpu->SetEdgeBorder(static_cast<int>(std::ceil(edge * scale)));
     } else if (fullres) {
       if (edge > 0 && &c == &cams[0]) std::cerr << "--edge is ignored with --fullres\n";
       if (c.height > kTileSide || c.width > 2 * kTileSide) {
@@ -403,7 +429,10 @@ int main(int argc, char **argv) {
 
   std::printf("%s: %zu cameras, %zu frames, %.1f s; far search %s (%.0f full-size searches a second)%s\n",
               session.filename().c_str(), cams.size(), items.size(), seconds, off ? "OFF" : "on", budget,
-              fullres ? "; normal search at FULL resolution" : half ? "; frames downscaled 2x" : "");
+              fullres ? "; normal search at FULL resolution"
+              : half  ? "; frames downscaled 2x"
+              : scale ? "; frames resized" : "");
+  if (scale) std::printf("  frames resized by %.4f (detector %dx%d)\n", scale, cams[0].scaled.cols, cams[0].scaled.rows);
   for (auto &c : cams)
     std::printf("  %s: %zu frames %dx%d%s\n", c.name.c_str(), c.frames.size(), c.width, c.height,
                 calibs.count(c.name) ? ", calibrated" : "");
@@ -430,7 +459,7 @@ int main(int argc, char **argv) {
     int frame;
   };
   std::vector<Slow> slow;
-  double refine_ms = 0;
+  double refine_ms = 0, resize_ms = 0;  // resize_ms: --scale's resize, part of the detect time
   std::map<std::string, Lens> lenses;
   for (auto &[name, k] : calibs) {
     Lens l;
@@ -475,6 +504,13 @@ int main(int argc, char **argv) {
           }
         if (!c.gpu->Detect(c.small.data(), nullptr).ok()) continue;
         for (const auto &d : far_search::Copy(c.gpu->Detections())) normal.push_back(Rescale(d, 2, 0));
+      } else if (scale != 0) {
+        const double m[] = {scale, 0, 0.5 * scale - 0.5, 0, scale, 0.5 * scale - 0.5};
+        cv::warpAffine(img, c.scaled, cv::Mat(2, 3, CV_64F, const_cast<double *>(m)), c.scaled.size(),
+                       cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+        resize_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (!c.gpu->Detect(c.scaled.data, nullptr).ok()) continue;
+        for (const auto &d : far_search::Copy(c.gpu->Detections())) normal.push_back(Rescale(d, 1 / scale, 0));
       } else if (fullres) {
         for (size_t t = 0; t < c.tiles.size(); ++t) {
           Upscale2x(gray[k].data(), c.width, c.tile_x0[t], c.tile_w, c.height, c.up.data());
@@ -487,6 +523,10 @@ int main(int argc, char **argv) {
           }
         }
       } else {
+        if (graphs) {  // as the JNI bridge: recorded between frames, never inside Detect()
+          if (c.gpu->FirstStageGraphWanted(nullptr)) (void)c.gpu->RecordFirstStageGraph(nullptr);
+          if (c.gpu->StageGraphsWanted()) (void)c.gpu->RecordStageGraphs();
+        }
         if (!c.gpu->Detect(gray[k].data(), nullptr).ok()) continue;
         normal = far_search::Copy(c.gpu->Detections());
       }
@@ -571,6 +611,8 @@ int main(int argc, char **argv) {
               frames_total ? detect_ms / frames_total : 0, frames_total ? far_ms / frames_total : 0, wall);
   if (subpix > 0 || edgefit || edgefit_undist)
     std::printf("Refine: %.3f ms a frame (CPU, one thread)\n", frames_total ? refine_ms / frames_total : 0);
+  if (scale)
+    std::printf("Resize: %.3f ms a frame (CPU, included in detect)\n", frames_total ? resize_ms / frames_total : 0);
   std::sort(slow.begin(), slow.end(), [](const Slow &a, const Slow &b) { return a.ms > b.ms; });
   std::printf("Frames where the far search took over 20 ms: %zu", slow.size());
   for (size_t i = 0; i < slow.size() && i < 5; ++i)

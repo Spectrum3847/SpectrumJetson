@@ -1,0 +1,641 @@
+diff --git a/third_party/971apriltag/apriltag.cc b/third_party/971apriltag/apriltag.cc
+index 1faa601..6f903a5 100644
+--- a/third_party/971apriltag/apriltag.cc
++++ b/third_party/971apriltag/apriltag.cc
+@@ -28,6 +28,8 @@
+ #include "absl/log/log.h"
+ #include "absl/log/vlog_is_on.h"
+ #include "apriltag/common/g2d.h"
++#include "apriltag/common/matd.h"
++#include "apriltag/common/zarray.h"
+ 
+ // #include "aos/time/time.h"
+ #include "absl/status/status.h"
+@@ -208,6 +210,7 @@ static size_t DeviceScanInclusiveScanByKeyScratchSpace(size_t elements) {
+ 
+ bool SpectrumGpuRefine();    // detector-15, below
+ bool SpectrumGraphRefine();  // detector-16, below
++bool SpectrumGraphDecode();  // detector-17, below
+ 
+ GpuDetector::GpuDetector(size_t width, size_t height,
+                          apriltag_detector_t* tag_detector,
+@@ -1464,10 +1467,14 @@ absl::Status GpuDetector::EnqueueThirdStage(size_t points_bucket, size_t quads_b
+                       tag_detector_->qtp.cos_critical_rad, fit_quads_device_.get(), stream);
+   CHECK_CUDA(cudaMemcpyAsync(stage_counts_host_.get() + 1, num_quad_peaked_quads_device_.get(),
+                              sizeof(int), cudaMemcpyDeviceToHost, stream));
+-  if (SpectrumGraphRefine() && tag_detector_->refine_edges &&
++  if ((SpectrumGraphRefine() || SpectrumGraphDecode()) && tag_detector_->refine_edges &&
+       !EnqueueGraphRefine(quads_bucket, stream)) {  // detector-16
+     return absl::UnknownError("the in-graph refinement couldn't be recorded");
+   }
++  if (SpectrumGraphDecode() && tag_detector_->refine_edges && gpu_decode_family_ &&
++      !EnqueueGraphDecode(quads_bucket, stream)) {  // detector-17
++    return absl::UnknownError("the in-graph decode couldn't be recorded");
++  }
+   // The fit quads themselves, as many as there are, straight into pinned memory (a pageable copy
+   // after the graph cost ~70 us of CPU a frame).
+   void* pinned = DeviceAddress(fit_quads_pinned_.get());
+@@ -1542,6 +1549,7 @@ cudaGraphExec_t GpuDetector::RecordStageGraph(int stage, size_t points_bucket,
+       return fail("stream", e);
+     }
+   }
++  if (stage == 3 && SpectrumGraphDecode()) PrepareGpuDecode();  // detector-17: no cudaMalloc while capturing
+   cudaError_t e = cudaStreamBeginCapture(capture_stream_, cudaStreamCaptureModeThreadLocal);
+   if (e != cudaSuccess) return fail("begin", e);
+   absl::Status status;
+@@ -1566,7 +1574,10 @@ cudaGraphExec_t GpuDetector::RecordStageGraph(int stage, size_t points_bucket,
+   cudaGraphDestroy(graph);
+   if (e != cudaSuccess) return fail("instantiate", e);
+   cudaGraphUpload(exec, stream_.get());  // now, not on its first launch
+-  if (stage == 3) stage3_refines_ = SpectrumGraphRefine() && tag_detector_->refine_edges;
++  if (stage == 3) {
++    stage3_refines_ = (SpectrumGraphRefine() || SpectrumGraphDecode()) && tag_detector_->refine_edges;
++    stage3_decodes_ = SpectrumGraphDecode() && tag_detector_->refine_edges && gpu_decode_family_;
++  }
+   stage_graphs_[key] = exec;
+   return exec;
+ }
+@@ -1719,7 +1730,7 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+   if (timing) after_image_memcpy_to_device_.Record(&stream_);
+ 
+   refine_image_device_ = image_device;  // detector-15
+-  if (SpectrumGraphRefine()) SetGraphRefineParams(image_device);  // detector-16
++  if (SpectrumGraphRefine() || SpectrumGraphDecode()) SetGraphRefineParams(image_device);  // detector-16
+   if (graph) {
+     gray_image_host_ptr_ = image;
+     CHECK_CUDA(cudaGraphLaunch(first_stage_exec_, stream_.get()));
+@@ -2245,15 +2256,18 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+   //     aos::monotonic_clock::now();
+   // detector-16: a stage 3 graph that fit the corners and refined them already.
+   decode_refined_ = nullptr;
+-  if (staged && TakeGraphCorners(num_quad_peaked_quads_host)) {
+-    decode_refined_ = graph_refined_host_.data();
++  if (staged && TakeGraphDetections(num_quad_peaked_quads_host)) {
++    // detector-17: decoded in the graph too
+   } else {
+-    UpdateFitQuads();
+-    AdjustPixelCenters();
++    if (staged && TakeGraphCorners(num_quad_peaked_quads_host)) {
++      decode_refined_ = graph_refined_host_.data();
++    } else {
++      UpdateFitQuads();
++      AdjustPixelCenters();
++    }
++    DecodeTags();
+   }
+ 
+-  DecodeTags();
+-
+   // const aos::monotonic_clock::time_point end_time = aos::monotonic_clock::now();
+ 
+   // TODO(austin): Bring it back to the CPU and see how good we did.
+@@ -2673,6 +2687,7 @@ bool GpuDetector::EnqueueGraphRefine(size_t quads_bucket, cudaStream_t stream) {
+ // the two kernels would only add GPU time (~+50 us of wall a frame, measured).
+ void GpuDetector::SetGraphRefineParams(const uint8_t* image_device) {
+   auto* p = reinterpret_cast<GraphRefineParams*>(graph_refine_params_pinned_.get());
++  // detector-17 decodes only refined quads, so it follows the same switch.
+   const DistCoeffs& d = distortion_coefficients_;
+   const bool calibrated = d.k1 != 0 || d.k2 != 0 || d.p1 != 0 || d.p2 != 0 || d.k3 != 0 ||
+                           d.k4 != 0 || d.k5 != 0 || d.k6 != 0;
+@@ -2716,4 +2731,463 @@ bool GpuDetector::TakeGraphCorners(int num_fit_quads) {
+   return true;
+ }
+ 
++
++namespace {
++// SpectrumJetson (detector-17): quad_decode_index (apriltag.c) on the GPU, after detector-16's
++// refinement in stage 3's graph: one block per quad. The same steps and, where a sum's order decides
++// its rounding, the same order (one thread adds them up); the samples themselves in parallel. GPU
++// fused multiply-adds (and aarch64 GCC's own) can move margins and corners in the last bits.
++struct DecodeEntry {  // apriltag.c's struct quick_decode_entry
++  uint64_t rcode;
++  uint16_t id;
++  uint8_t hamming;
++  uint8_t rotation;
++};
++struct QuickDecode {  // apriltag.c's struct quick_decode
++  int nentries;
++  DecodeEntry* entries;
++};
++
++__device__ __forceinline__ void Project(const double* H, double x, double y, double* ox, double* oy) {
++  const double xx = H[0] * x + H[1] * y + H[2];
++  const double yy = H[3] * x + H[4] * y + H[5];
++  const double zz = H[6] * x + H[7] * y + H[8];
++  *ox = xx / zz;
++  *oy = yy / zz;
++}
++
++// homography_compute2 (apriltag.c) with the whole block: the same operations on each element, in the
++// same order, the eliminations spread over the threads. Call from every thread; A is
++// shared scratch (72 doubles). *ok (shared) false: singular.
++__device__ void HomographyBlock(const float p[4][2], double* A, double* H, bool* ok) {
++  const int t = threadIdx.x, nt = blockDim.x;
++  __shared__ double f[8];
++  __shared__ int pivot;
++  if (t < 4) {
++    const int i = t;
++    const double c0 = (i == 0 || i == 3) ? -1 : 1, c1 = (i == 0 || i == 1) ? -1 : 1;
++    const double c2 = p[i][0], c3 = p[i][1];
++    double* r0 = A + (2 * i) * 9;
++    double* r1 = A + (2 * i + 1) * 9;
++    r0[0] = c0; r0[1] = c1; r0[2] = 1; r0[3] = 0; r0[4] = 0; r0[5] = 0;
++    r0[6] = -c0 * c2; r0[7] = -c1 * c2; r0[8] = c2;
++    r1[0] = 0; r1[1] = 0; r1[2] = 0; r1[3] = c0; r1[4] = c1; r1[5] = 1;
++    r1[6] = -c0 * c3; r1[7] = -c1 * c3; r1[8] = c3;
++  }
++  if (t == 0) *ok = true;
++  __syncthreads();
++  for (int col = 0; col < 8; col++) {
++    if (t == 0) {
++      double max_val = 0;
++      int max_val_idx = -1;
++      for (int row = col; row < 8; row++) {
++        double val = fabs(A[row * 9 + col]);
++        if (val > max_val) {
++          max_val = val;
++          max_val_idx = row;
++        }
++      }
++      if (max_val < 1e-10) *ok = false;
++      pivot = max_val_idx;
++    }
++    __syncthreads();
++    if (!*ok) return;
++    if (pivot != col && t >= col && t < 9) {
++      double tmp = A[col * 9 + t];
++      A[col * 9 + t] = A[pivot * 9 + t];
++      A[pivot * 9 + t] = tmp;
++    }
++    __syncthreads();
++    if (t > col && t < 8) f[t] = A[t * 9 + col] / A[col * 9 + col];
++    __syncthreads();
++    // rows col+1..7, columns col+1..8
++    const int rows = 7 - col, cols = 8 - col;
++    for (int k = t; k < rows * cols; k += nt) {
++      const int i = col + 1 + k / cols, j = col + 1 + k % cols;
++      A[i * 9 + j] -= f[i] * A[col * 9 + j];
++    }
++    if (t > col && t < 8) A[t * 9 + col] = 0;
++    __syncthreads();
++  }
++  if (t == 0) {
++    for (int col = 7; col >= 0; col--) {
++      double sum = 0;
++      for (int i = col + 1; i < 8; i++) sum += A[col * 9 + i] * A[i * 9 + 8];
++      A[col * 9 + 8] = (A[col * 9 + 8] - sum) / A[col * 9 + col];
++    }
++    const double h[9] = {A[8], A[17], A[26], A[35], A[44], A[53], A[62], A[71], 1};
++    for (int i = 0; i < 9; i++) H[i] = h[i];
++  }
++  __syncthreads();
++}
++
++// matd_inverse's 3x3 path fails when matd_plu finds a pivot under MATD_EPS (1e-8).
++__device__ bool InvertibleLikeMatd(const double* H) {
++  double lu[9];
++  for (int i = 0; i < 9; i++) lu[i] = H[i];
++  for (int j = 0; j < 3; j++) {
++    for (int i = 0; i < 3; i++) {
++      int kmax = i < j ? i : j;
++      double acc = 0;
++      for (int k = 0; k < kmax; k++) acc += lu[i * 3 + k] * lu[k * 3 + j];
++      lu[i * 3 + j] -= acc;
++    }
++    int p = j;
++    for (int i = j + 1; i < 3; i++)
++      if (fabs(lu[i * 3 + j]) > fabs(lu[p * 3 + j])) p = i;
++    if (p != j)
++      for (int k = 0; k < 3; k++) {
++        double t = lu[p * 3 + k];
++        lu[p * 3 + k] = lu[j * 3 + k];
++        lu[j * 3 + k] = t;
++      }
++    double LUjj = lu[j * 3 + j];
++    if (fabs(LUjj) < 1e-8) return false;
++    if (LUjj != 0) {
++      LUjj = 1.0 / LUjj;
++      for (int i = j + 1; i < 3; i++) lu[i * 3 + j] *= LUjj;
++    }
++  }
++  return true;
++}
++
++// mat33_sym_solve (apriltag_math.h) over the upper triangle of A.
++__device__ void SymSolve(const double* A, const double* B, double* R) {
++  double L[9];
++  L[0] = sqrt(A[0]);
++  L[3] = A[1] / L[0];
++  L[6] = A[2] / L[0];
++  L[4] = sqrt(A[4] - L[3] * L[3]);
++  L[7] = (A[5] - L[3] * L[6]) / L[4];
++  L[8] = sqrt(A[8] - L[6] * L[6] - L[7] * L[7]);
++  double M[9];
++  M[0] = 1 / L[0];
++  M[3] = -L[3] * M[0] / L[4];
++  M[4] = 1 / L[4];
++  M[6] = (-L[6] * M[0] - L[7] * M[3]) / L[8];
++  M[7] = -L[7] * M[4] / L[8];
++  M[8] = 1 / L[8];
++  double tmp[3];
++  tmp[0] = M[0] * B[0];
++  tmp[1] = M[3] * B[0] + M[4] * B[1];
++  tmp[2] = M[6] * B[0] + M[7] * B[1] + M[8] * B[2];
++  R[0] = M[0] * tmp[0] + M[3] * tmp[1] + M[6] * tmp[2];
++  R[1] = M[4] * tmp[1] + M[7] * tmp[2];
++  R[2] = M[8] * tmp[2];
++}
++
++struct GrayModel {
++  double A[9], B[3], C[3];
++};
++__device__ void GrayAdd(GrayModel* gm, double x, double y, double gray) {
++  gm->A[0] += x * x;
++  gm->A[1] += x * y;
++  gm->A[2] += x;
++  gm->A[4] += y * y;
++  gm->A[5] += y;
++  gm->A[8] += 1;
++  gm->B[0] += x * gray;
++  gm->B[1] += y * gray;
++  gm->B[2] += gray;
++}
++__device__ __forceinline__ double GrayAt(const GrayModel& gm, double x, double y) {
++  return gm.C[0] * x + gm.C[1] * y + gm.C[2];
++}
++
++__device__ double ValueForPixel(const uint8_t* im, int width, int height, double px, double py) {
++  int x1 = floor(px - 0.5);
++  int x2 = ceil(px - 0.5);
++  double x = px - 0.5 - x1;
++  int y1 = floor(py - 0.5);
++  int y2 = ceil(py - 0.5);
++  double y = py - 0.5 - y1;
++  if (x1 < 0 || x2 >= width || y1 < 0 || y2 >= height) return -1;
++  return im[y1 * width + x1] * (1 - x) * (1 - y) + im[y1 * width + x2] * x * (1 - y) +
++         im[y2 * width + x1] * (1 - x) * y + im[y2 * width + x2] * x * y;
++}
++
++__device__ uint64_t Rotate90(uint64_t w, int numBits) {
++  int p = numBits;
++  uint64_t l = 0;
++  if (numBits % 4 == 1) {
++    p = numBits - 1;
++    l = 1;
++  }
++  w = ((w >> l) << (p / 4 + l)) | (w >> (3 * p / 4 + l) << l) | (w & l);
++  w &= ((uint64_t{1} << numBits) - 1);
++  return w;
++}
++}  // namespace
++
++__global__ void DecodeQuadsKernel(const QuadCorners* corners, const int* valid,
++                                  const float (*refined)[4][2], const int* count,
++                                  const GraphRefineParams* prm, const GpuDecodeFamily* fam,
++                                  const DecodeEntry* entries, double sharpening,
++                                  GpuDecodeResult* out) {
++  const int q = blockIdx.x;
++  if (!prm->enabled || q >= *count) return;
++  GpuDecodeResult* r = &out[q];
++  if (threadIdx.x == 0) r->found = 0;
++  if (!valid[q] || corners[q].reversed_border != fam->reversed_border) return;
++  const uint8_t* im = prm->image;
++  const int width = prm->width, height = prm->height;
++  __shared__ float p[4][2];
++  __shared__ double H[9];
++  __shared__ bool ok;
++  __shared__ double sx[128], sy[128];
++  __shared__ int sv[128];
++  __shared__ GrayModel white, black;
++  __shared__ double values[256];
++  __shared__ double sharpened[256];
++  if (threadIdx.x < 8) p[threadIdx.x / 2][threadIdx.x % 2] = refined[q][threadIdx.x / 2][threadIdx.x % 2];
++  __syncthreads();
++  if (threadIdx.x == 0) {
++    // QuadDecodeTask's sanity check (detector-08), on the unrefined corners as there.
++    bool sane = true;
++    const float w = static_cast<float>(width), h = static_cast<float>(height);
++    for (int k = 0; k < 4 && sane; ++k) {
++      const float x = corners[q].corners[k][0], y = corners[q].corners[k][1];
++      sane = isfinite(x) && isfinite(y) && x > -w && x < 2 * w && y > -h && y < 2 * h;
++    }
++    ok = sane;
++  }
++  __syncthreads();
++  if (!ok) return;
++  {
++    __shared__ double A[72];
++    HomographyBlock(p, A, H, &ok);
++    if (!ok) return;
++    if (threadIdx.x == 0) ok = InvertibleLikeMatd(H);
++    __syncthreads();
++    if (!ok) return;
++  }
++  const int wab = fam->width_at_border;
++  // The border patterns: 8 lines of wab samples each (quad_decode's `patterns`).
++  const int nsamples = 8 * wab;
++  for (int k = threadIdx.x; k < nsamples; k += blockDim.x) {
++    const int pi = k / wab, i = k % wab;
++    float pat[5];
++    switch (pi) {
++      case 0: pat[0] = -0.5f; pat[1] = 0.5f; pat[2] = 0; pat[3] = 1; pat[4] = 1; break;
++      case 1: pat[0] = 0.5f; pat[1] = 0.5f; pat[2] = 0; pat[3] = 1; pat[4] = 0; break;
++      case 2: pat[0] = wab + 0.5f; pat[1] = .5f; pat[2] = 0; pat[3] = 1; pat[4] = 1; break;
++      case 3: pat[0] = wab - 0.5f; pat[1] = .5f; pat[2] = 0; pat[3] = 1; pat[4] = 0; break;
++      case 4: pat[0] = 0.5f; pat[1] = -0.5f; pat[2] = 1; pat[3] = 0; pat[4] = 1; break;
++      case 5: pat[0] = 0.5f; pat[1] = 0.5f; pat[2] = 1; pat[3] = 0; pat[4] = 0; break;
++      case 6: pat[0] = 0.5f; pat[1] = wab + 0.5f; pat[2] = 1; pat[3] = 0; pat[4] = 1; break;
++      default: pat[0] = 0.5f; pat[1] = wab - 0.5f; pat[2] = 1; pat[3] = 0; pat[4] = 0; break;
++    }
++    double tagx01 = (pat[0] + i * pat[2]) / (wab);
++    double tagy01 = (pat[1] + i * pat[3]) / (wab);
++    double tagx = 2 * (tagx01 - 0.5);
++    double tagy = 2 * (tagy01 - 0.5);
++    double px, py;
++    Project(H, tagx, tagy, &px, &py);
++    int ix = px;
++    int iy = py;
++    sx[k] = tagx;
++    sy[k] = tagy;
++    sv[k] = (ix < 0 || iy < 0 || ix >= width || iy >= height) ? -1 : im[iy * width + ix];
++  }
++  __syncthreads();
++  // The white model in thread 0, the black one in thread 32 (another warp): each adds its own
++  // samples in the CPU's order.
++  if (threadIdx.x == 0 || threadIdx.x == 32) {
++    const bool want_white = threadIdx.x == 0;
++    GrayModel* gm = want_white ? &white : &black;
++    for (int i = 0; i < 9; i++) gm->A[i] = 0;
++    for (int i = 0; i < 3; i++) gm->B[i] = 0;
++    for (int k = 0; k < nsamples; k++) {
++      if (sv[k] < 0) continue;
++      const bool is_white = (k / wab) % 2 == 0;
++      if (is_white == want_white) GrayAdd(gm, sx[k], sy[k], sv[k]);
++    }
++    if (want_white || wab > 1) {
++      SymSolve(gm->A, gm->B, gm->C);
++    } else {
++      gm->C[0] = 0;
++      gm->C[1] = 0;
++      gm->C[2] = gm->B[2] / 4;
++    }
++  }
++  __syncthreads();
++  if (threadIdx.x == 0) ok = !((GrayAt(white, 0, 0) - GrayAt(black, 0, 0) < 0) != fam->reversed_border);
++  __syncthreads();
++  if (!ok) return;
++  const int tw = fam->total_width;
++  const int min_coord = (wab - tw) / 2;
++  for (int k = threadIdx.x; k < tw * tw; k += blockDim.x) values[k] = 0;
++  __syncthreads();
++  for (int i = threadIdx.x; i < fam->nbits; i += blockDim.x) {
++    int bity = fam->bit_y[i];
++    int bitx = fam->bit_x[i];
++    double tagx01 = (bitx + 0.5) / (wab);
++    double tagy01 = (bity + 0.5) / (wab);
++    double tagx = 2 * (tagx01 - 0.5);
++    double tagy = 2 * (tagy01 - 0.5);
++    double px, py;
++    Project(H, tagx, tagy, &px, &py);
++    double v = ValueForPixel(im, width, height, px, py);
++    if (v == -1) continue;
++    double thresh = (GrayAt(black, tagx, tagy) + GrayAt(white, tagx, tagy)) / 2.0;
++    values[tw * (bity - min_coord) + bitx - min_coord] = v - thresh;
++  }
++  __syncthreads();
++  // sharpen (apriltag.c), each cell's 3x3 sum in the same order.
++  for (int k = threadIdx.x; k < tw * tw; k += blockDim.x) {
++    const int y = k / tw, x = k % tw;
++    const double kernel[9] = {0, -1, 0, -1, 4, -1, 0, -1, 0};
++    double acc = 0;
++    for (int i = 0; i < 3; i++)
++      for (int j = 0; j < 3; j++) {
++        if ((y + i - 1) < 0 || (y + i - 1) > tw - 1 || (x + j - 1) < 0 || (x + j - 1) > tw - 1) continue;
++        acc += values[(y + i - 1) * tw + (x + j - 1)] * kernel[i * 3 + j];
++      }
++    sharpened[k] = acc;
++  }
++  __syncthreads();
++  for (int k = threadIdx.x; k < tw * tw; k += blockDim.x) values[k] = values[k] + sharpening * sharpened[k];
++  __syncthreads();
++  if (threadIdx.x != 0) return;
++  float black_score = 0, white_score = 0;
++  float black_score_count = 1, white_score_count = 1;
++  uint64_t rcode = 0;
++  for (int i = 0; i < fam->nbits; i++) {
++    int bity = fam->bit_y[i];
++    int bitx = fam->bit_x[i];
++    rcode = (rcode << 1);
++    double v = values[(bity - min_coord) * tw + bitx - min_coord];
++    if (v > 0) {
++      white_score += v;
++      white_score_count++;
++      rcode |= 1;
++    } else {
++      black_score -= v;
++      black_score_count++;
++    }
++  }
++  // quick_decode_codeword
++  DecodeEntry entry{0, 65535, 255, 0};
++  const int n = fam->nentries;
++  for (int ridx = 0; ridx < 4 && entry.hamming == 255; ridx++) {
++    for (int bucket = rcode % n; entries[bucket].rcode != UINT64_MAX; bucket = (bucket + 1) % n) {
++      if (entries[bucket].rcode == rcode) {
++        entry = entries[bucket];
++        entry.rotation = ridx;
++        break;
++      }
++    }
++    rcode = Rotate90(rcode, fam->nbits);
++  }
++  const float margin = fmin(white_score / white_score_count, black_score / black_score_count);
++  if (!(margin >= 0 && entry.hamming < 255)) return;
++  r->id = entry.id;
++  r->hamming = entry.hamming;
++  r->decision_margin = margin;
++  // det->H = quad->H * R(rotation), R's cos and sin from the host (the CPU's cos/sin of k*pi/2).
++  const double c = fam->rot_cos[entry.rotation], s = fam->rot_sin[entry.rotation];
++  const double R[9] = {c, -s, 0, s, c, 0, 0, 0, 1};
++  for (int i = 0; i < 3; i++)
++    for (int j = 0; j < 3; j++) {
++      double acc = 0;
++      for (int k = 0; k < 3; k++) acc += H[i * 3 + k] * R[k * 3 + j];
++      r->H[i * 3 + j] = acc;
++    }
++  Project(r->H, 0, 0, &r->c[0], &r->c[1]);
++  for (int i = 0; i < 4; i++) {
++    int tcx = (i == 1 || i == 2) ? 1 : -1;
++    int tcy = (i < 2) ? 1 : -1;
++    Project(r->H, tcx, tcy, &r->p[i][0], &r->p[i][1]);
++  }
++  r->found = 1;
++}
++
++// detector-17: SPECTRUM_DETECTOR_GPU_REFINE=3 (read once): detector-16 and the decode in the graph.
++bool SpectrumGraphDecode() {
++  static const bool on = [] {
++    const char* v = std::getenv("SPECTRUM_DETECTOR_GPU_REFINE");
++    return v && std::string(v) == "3";
++  }();
++  return on;
++}
++
++// The tag family and its decode table on the GPU, once (before any recording). False: not
++// possible here (not exactly one family, or no decode table): the CPU decodes.
++bool GpuDetector::PrepareGpuDecode() {
++  if (gpu_decode_family_) return true;
++  if (zarray_size(tag_detector_->tag_families) != 1) return false;
++  apriltag_family_t* family;
++  zarray_get(tag_detector_->tag_families, 0, &family);
++  const auto* qd = static_cast<const QuickDecode*>(family->impl);
++  if (!qd || family->nbits > 64 || family->width_at_border * 8 > 128 ||
++      family->total_width * family->total_width > 256)
++    return false;
++  GpuDecodeFamily f{};
++  f.nbits = family->nbits;
++  f.width_at_border = family->width_at_border;
++  f.total_width = family->total_width;
++  f.reversed_border = family->reversed_border;
++  f.nentries = qd->nentries;
++  for (uint32_t i = 0; i < family->nbits; i++) {
++    f.bit_x[i] = family->bit_x[i];
++    f.bit_y[i] = family->bit_y[i];
++  }
++  for (int k = 0; k < 4; k++) {
++    const double theta = k * M_PI / 2.0;
++    f.rot_cos[k] = cos(theta);
++    f.rot_sin[k] = sin(theta);
++  }
++  gpu_decode_entries_ = std::make_unique<GpuMemory<uint8_t>>(qd->nentries * sizeof(DecodeEntry));
++  CHECK_CUDA(cudaMemcpy(gpu_decode_entries_->get(), qd->entries, qd->nentries * sizeof(DecodeEntry),
++                        cudaMemcpyHostToDevice));
++  gpu_decode_family_ = std::make_unique<GpuMemory<GpuDecodeFamily>>(1);
++  CHECK_CUDA(cudaMemcpy(gpu_decode_family_->get(), &f, sizeof(f), cudaMemcpyHostToDevice));
++  gpu_decode_family_ptr_ = family;
++  return true;
++}
++
++bool GpuDetector::EnqueueGraphDecode(size_t quads_bucket, cudaStream_t stream) {
++  auto* corners = static_cast<QuadCorners*>(DeviceAddress(graph_corners_pinned_.get()));
++  auto* valid = static_cast<int*>(DeviceAddress(graph_valid_pinned_.get()));
++  auto* refined = static_cast<float(*)[4][2]>(DeviceAddress(graph_refined_pinned_.get()));
++  auto* prm = static_cast<const GraphRefineParams*>(DeviceAddress(graph_refine_params_pinned_.get()));
++  auto* results = static_cast<GpuDecodeResult*>(DeviceAddress(graph_decode_pinned_.get()));
++  if (!corners || !valid || !refined || !prm || !results || !gpu_decode_family_) return false;
++  DecodeQuadsKernel<<<quads_bucket, 64, 0, stream>>>(
++      corners, valid, refined, num_quad_peaked_quads_device_.get(), prm, gpu_decode_family_->get(),
++      reinterpret_cast<const DecodeEntry*>(gpu_decode_entries_->get()),
++      tag_detector_->decode_sharpening, results);
++  return cudaGetLastError() == cudaSuccess;
++}
++
++// detector-17: the graph's detections into detections_, then as DecodeTags ends. False: the host
++// decodes as before.
++bool GpuDetector::TakeGraphDetections(int num_fit_quads) {
++  if (!stage3_decodes_ || !graph_refine_enabled_) return false;
++  for (int i = 0; i < zarray_size(detections_); ++i) {
++    apriltag_detection_t* det;
++    zarray_get(detections_, i, &det);
++    apriltag_detection_destroy(det);
++  }
++  zarray_truncate(detections_, 0);
++  const GpuDecodeResult* r = graph_decode_pinned_.get();
++  for (int i = 0; i < num_fit_quads; ++i) {
++    if (!graph_valid_pinned_.get()[i] || !r[i].found) continue;
++    apriltag_detection_t* det =
++        static_cast<apriltag_detection_t*>(calloc(1, sizeof(apriltag_detection_t)));
++    det->family = gpu_decode_family_ptr_;
++    det->id = r[i].id;
++    det->hamming = r[i].hamming;
++    det->decision_margin = r[i].decision_margin;
++    det->H = matd_create(3, 3);
++    std::memcpy(det->H->data, r[i].H, sizeof(r[i].H));
++    det->c[0] = r[i].c[0];
++    det->c[1] = r[i].c[1];
++    std::memcpy(det->p, r[i].p, sizeof(det->p));
++    zarray_add(detections_, &det);
++  }
++  FinishDetections();
++  return true;
++}
++
+ }  // namespace frc::apriltag
+diff --git a/third_party/971apriltag/apriltag.h b/third_party/971apriltag/apriltag.h
+index 178744a..854e586 100644
+--- a/third_party/971apriltag/apriltag.h
++++ b/third_party/971apriltag/apriltag.h
+@@ -66,6 +66,21 @@ struct QuadCorners {
+   uint32_t blob_index;
+ };
+ 
++// SpectrumJetson (detector-17): a tag family as the GPU decode reads it, and one quad's result.
++struct GpuDecodeFamily {
++  int nbits, width_at_border, total_width, nentries;
++  bool reversed_border;
++  uint32_t bit_x[64], bit_y[64];
++  double rot_cos[4], rot_sin[4];
++};
++struct GpuDecodeResult {
++  int found, id, hamming;
++  float decision_margin;
++  double H[9];
++  double c[2];
++  double p[4][2];
++};
++
+ struct CameraMatrix {
+   double fx;
+   double cx;
+@@ -495,6 +510,16 @@ class GpuDetector {
+   void SetGraphRefineParams(const uint8_t* image_device);
+   bool TakeGraphCorners(int num_fit_quads);
+   bool stage3_refines_ = false;
++  // detector-17: the decode in the graph too.
++  bool PrepareGpuDecode();
++  bool EnqueueGraphDecode(size_t quads_bucket, cudaStream_t stream);
++  bool TakeGraphDetections(int num_fit_quads);
++  void FinishDetections();
++  bool stage3_decodes_ = false;
++  std::unique_ptr<GpuMemory<GpuDecodeFamily>> gpu_decode_family_;
++  std::unique_ptr<GpuMemory<uint8_t>> gpu_decode_entries_;
++  apriltag_family_t* gpu_decode_family_ptr_ = nullptr;
++  HostMemory<GpuDecodeResult> graph_decode_pinned_{kMaxBlobs};
+   bool graph_refine_enabled_ = false;  // this frame's GraphRefineParams::enabled
+   HostMemory<QuadCorners> graph_corners_pinned_{kMaxBlobs};
+   HostMemory<int> graph_valid_pinned_{kMaxBlobs};
+diff --git a/third_party/971apriltag/apriltag_detect.cc b/third_party/971apriltag/apriltag_detect.cc
+index 906b4c1..386f0c5 100644
+--- a/third_party/971apriltag/apriltag_detect.cc
++++ b/third_party/971apriltag/apriltag_detect.cc
+@@ -658,6 +658,7 @@ void GpuDetector::QuadDecodeTask(void* _u) {
+ 
+ bool SpectrumGpuRefine();    // apriltag.cc (detector-15)
+ bool SpectrumGraphRefine();  // apriltag.cc (detector-16)
++bool SpectrumGraphDecode();  // apriltag.cc (detector-17)
+ 
+ void GpuDetector::DecodeTags() {
+   size_t chunksize =
+@@ -685,8 +686,8 @@ void GpuDetector::DecodeTags() {
+   const float(*refined)[4][2] = nullptr;
+   if (decode_refined_) {  // detector-16: refined inside stage 3's graph
+     refined = &decode_refined_[0].p;
+-  } else if (tag_detector_->refine_edges && !SpectrumGraphRefine() && SpectrumGpuRefine() &&
+-             RefineEdgesOnGpu()) {
++  } else if (tag_detector_->refine_edges && !SpectrumGraphRefine() && !SpectrumGraphDecode() &&
++             SpectrumGpuRefine() && RefineEdgesOnGpu()) {
+     refined = RefinedCorners();
+   }
+ 
+@@ -710,6 +711,11 @@ void GpuDetector::DecodeTags() {
+ 
+   workerpool_run(tag_detector_->wp);
+ 
++  FinishDetections();
++}
++
++// As DecodeTags ends (detector-17's GPU decode ends the same way).
++void GpuDetector::FinishDetections() {
+   reconcile_detections(detections_, poly0_, poly1_);
+ 
+   zarray_sort(detections_, detection_compare_function);
