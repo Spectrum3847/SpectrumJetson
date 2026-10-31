@@ -26,6 +26,13 @@
 // SPECTRUM_971_EDGE_BORDER_PX live; default 0 = off). Normal search only, not the far search's crops.
 // With --half, N/2 rounded up in the small frame; ignored with --fullres.
 // --trace: each frame's far-search time on stderr as it goes (to find a frame that stalls).
+// Accuracy knobs (tests/field-replay/accuracy/; all off by default, output unchanged without them):
+// --subpix W: each reported corner refined with OpenCV's cornerSubPix on the full-res gray frame,
+// window (2W+1)^2. --edgefit: each corner re-found as the intersection of lines fitted to the
+// strongest gradient across each tag edge (subpixel peak, every ~1.5 px along the edge);
+// --edgefit-undist: the same, with the lines fitted in undistorted coordinates (needs --calib).
+// --no-refine-edges: the detector's own RefineEdges off. --cos X: qtp.cos_critical_rad.
+// --nmaxima N: qtp.max_nmaxima. Refinement time goes on its own "Refine:" line.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -44,6 +51,7 @@
 
 #include <cuda_runtime.h>
 #include <opencv2/core/mat.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include "absl/status/status.h"
 #include "apriltag/apriltag.h"
@@ -111,6 +119,132 @@ struct Item {
   long long jetson_us;
 };
 
+// Accuracy knobs: the lens model (OpenCV's rational model, 8 coefficients) and corner refiners.
+// Corners in and out in the detector's convention (pixel edges at whole numbers); the refiners
+// work in OpenCV's (pixel centres), x_cv = x - 0.5.
+struct Lens {
+  bool valid = false;
+  double fx = 1, fy = 1, cx = 0, cy = 0, k[8] = {};
+  void Distort(double x, double y, double *u, double *v) const {
+    const double r2 = x * x + y * y;
+    const double rad = (1 + k[0] * r2 + k[1] * r2 * r2 + k[4] * r2 * r2 * r2) /
+                       (1 + k[5] * r2 + k[6] * r2 * r2 + k[7] * r2 * r2 * r2);
+    const double xd = x * rad + 2 * k[2] * x * y + k[3] * (r2 + 2 * x * x);
+    const double yd = y * rad + k[2] * (r2 + 2 * y * y) + 2 * k[3] * x * y;
+    *u = fx * xd + cx;
+    *v = fy * yd + cy;
+  }
+  // Pixel -> normalized undistorted (fixed-point iteration, as cv::undistortPoints).
+  void Undistort(double u, double v, double *x, double *y) const {
+    const double xd = (u - cx) / fx, yd = (v - cy) / fy;
+    double X = xd, Y = yd;
+    for (int it = 0; it < 20; ++it) {
+      const double r2 = X * X + Y * Y;
+      const double icdist = (1 + k[5] * r2 + k[6] * r2 * r2 + k[7] * r2 * r2 * r2) /
+                            (1 + k[0] * r2 + k[1] * r2 * r2 + k[4] * r2 * r2 * r2);
+      const double dx = 2 * k[2] * X * Y + k[3] * (r2 + 2 * X * X);
+      const double dy = k[2] * (r2 + 2 * Y * Y) + 2 * k[3] * X * Y;
+      X = (xd - dx) * icdist;
+      Y = (yd - dy) * icdist;
+    }
+    *x = X;
+    *y = Y;
+  }
+};
+
+double Bilinear(const cv::Mat &img, double x, double y) {
+  if (x < 0 || y < 0 || x > img.cols - 1.001 || y > img.rows - 1.001) return -1;
+  const int x0 = static_cast<int>(x), y0 = static_cast<int>(y);
+  const double fx = x - x0, fy = y - y0;
+  const uint8_t *r0 = img.ptr<uint8_t>(y0), *r1 = img.ptr<uint8_t>(y0 + 1);
+  return (1 - fy) * ((1 - fx) * r0[x0] + fx * r0[x0 + 1]) + fy * ((1 - fx) * r1[x0] + fx * r1[x0 + 1]);
+}
+
+void SubpixRefine(const cv::Mat &img, far_search::Det &d, int w) {
+  std::vector<cv::Point2f> pts;
+  for (int i = 0; i < 4; ++i) pts.emplace_back(d.p[2 * i] - 0.5, d.p[2 * i + 1] - 0.5);
+  for (auto &q : pts)
+    if (q.x < w + 1 || q.y < w + 1 || q.x > img.cols - w - 2 || q.y > img.rows - w - 2) return;
+  cv::cornerSubPix(img, pts, cv::Size(w, w), cv::Size(-1, -1),
+                   cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.01));
+  for (int i = 0; i < 4; ++i) {
+    const double dx = pts[i].x + 0.5 - d.p[2 * i], dy = pts[i].y + 0.5 - d.p[2 * i + 1];
+    if (std::hypot(dx, dy) > w + 1) continue;  // ran off: keep the detector's corner
+    d.p[2 * i] = pts[i].x + 0.5;
+    d.p[2 * i + 1] = pts[i].y + 0.5;
+  }
+}
+
+// Edge fit: along each edge, the strongest gradient across it (subpixel, parabola through the
+// peak), weighted by gradient strength; a total-least-squares line per edge; corners where
+// neighbouring lines meet. With a lens (undist), the edge points are undistorted before the
+// line fit (tag edges are straight only there) and the corners distorted back.
+void EdgeFit(const cv::Mat &img, far_search::Det &d, const Lens *lens) {
+  double cxy[4][2];
+  for (int i = 0; i < 4; ++i) cxy[i][0] = d.p[2 * i] - 0.5, cxy[i][1] = d.p[2 * i + 1] - 0.5;
+  double line[4][3];  // a x + b y = c, in pixels or normalized coordinates
+  for (int e = 0; e < 4; ++e) {
+    const double *A = cxy[e], *B = cxy[(e + 1) % 4];
+    const double ex = B[0] - A[0], ey = B[1] - A[1], len = std::hypot(ex, ey);
+    if (len < 6) return;
+    const double tx = ex / len, ty = ey / len, nx = -ty, ny = tx;
+    const double reach = std::clamp(0.08 * len, 1.5, 4.0), step = 0.25;
+    const int ns = static_cast<int>(2 * reach / step) + 1;
+    const int np = std::max(6, static_cast<int>(len / 1.5));
+    double sw = 0, sx = 0, sy = 0;
+    std::vector<double> px, py, pw;
+    std::vector<double> prof(ns + 2);
+    for (int s = 0; s < np; ++s) {
+      const double f = 0.12 + 0.76 * s / (np - 1);
+      const double bx = A[0] + f * ex, by = A[1] + f * ey;
+      bool okp = true;
+      for (int j = 0; j < ns + 2 && okp; ++j) {
+        const double o = -reach - step + j * step;
+        prof[j] = Bilinear(img, bx + o * nx, by + o * ny);
+        okp = prof[j] >= 0;
+      }
+      if (!okp) continue;
+      int best = -1;
+      double g = 0;
+      std::vector<double> gr(ns);
+      for (int j = 0; j < ns; ++j) {
+        gr[j] = std::abs(prof[j + 2] - prof[j]);
+        if (gr[j] > g) g = gr[j], best = j;
+      }
+      if (best <= 0 || best >= ns - 1 || g < 4) continue;
+      const double den = gr[best - 1] - 2 * gr[best] + gr[best + 1];
+      const double off = den < 0 ? 0.5 * (gr[best - 1] - gr[best + 1]) / den : 0;
+      const double o = -reach + (best + off) * step;
+      double X = bx + o * nx, Y = by + o * ny;
+      if (lens) lens->Undistort(X, Y, &X, &Y);
+      px.push_back(X), py.push_back(Y), pw.push_back(g);
+      sw += g, sx += g * X, sy += g * Y;
+    }
+    if (px.size() < 4) return;
+    const double mx = sx / sw, my = sy / sw;
+    double sxx = 0, sxy = 0, syy = 0;
+    for (size_t j = 0; j < px.size(); ++j) {
+      const double dx = px[j] - mx, dy = py[j] - my;
+      sxx += pw[j] * dx * dx, sxy += pw[j] * dx * dy, syy += pw[j] * dy * dy;
+    }
+    // Normal = eigenvector of the smaller eigenvalue.
+    const double th = 0.5 * std::atan2(2 * sxy, sxx - syy);
+    const double a = -std::sin(th), b = std::cos(th);
+    line[e][0] = a, line[e][1] = b, line[e][2] = a * mx + b * my;
+  }
+  double out[4][2];
+  for (int i = 0; i < 4; ++i) {
+    const double *l1 = line[(i + 3) % 4], *l2 = line[i];  // corner i: edges (i-1) and i
+    const double det = l1[0] * l2[1] - l1[1] * l2[0];
+    if (std::abs(det) < 1e-9) return;
+    double X = (l1[2] * l2[1] - l1[1] * l2[2]) / det, Y = (l1[0] * l2[2] - l1[2] * l2[0]) / det;
+    if (lens) lens->Distort(X, Y, &X, &Y);
+    if (std::hypot(X - cxy[i][0], Y - cxy[i][1]) > 3) return;  // implausible: keep the detector's
+    out[i][0] = X, out[i][1] = Y;
+  }
+  for (int i = 0; i < 4; ++i) d.p[2 * i] = out[i][0] + 0.5, d.p[2 * i + 1] = out[i][1] + 0.5;
+}
+
 double EnvOr(const char *name, double fallback) {
   const char *v = std::getenv(name);
   return v && *v ? std::atof(v) : fallback;
@@ -135,6 +269,9 @@ int main(int argc, char **argv) {
   int mcp = -1;
   int edge = 0;
   int every = 1, threads = 5;
+  int subpix = 0, nmaxima = -1;
+  bool edgefit = false, edgefit_undist = false, no_refine_edges = false;
+  double cos_crit = -1;
   double mwbd = EnvOr("SPECTRUM_971_MIN_WHITE_BLACK_DIFF", 5), mse = EnvOr("SPECTRUM_971_MAX_LINE_FIT_MSE", 10);
   std::map<std::string, std::vector<double>> calibs;
   std::vector<int> excluded;
@@ -153,6 +290,12 @@ int main(int argc, char **argv) {
     else if (a == "--threads") threads = std::max(1, std::atoi(v)), ++i;
     else if (a == "--mwbd") mwbd = std::atof(v), ++i;
     else if (a == "--mse") mse = std::atof(v), ++i;
+    else if (a == "--subpix") subpix = std::max(1, std::atoi(v)), ++i;
+    else if (a == "--edgefit") edgefit = true;
+    else if (a == "--edgefit-undist") edgefit_undist = true;
+    else if (a == "--no-refine-edges") no_refine_edges = true;
+    else if (a == "--cos") cos_crit = std::atof(v), ++i;
+    else if (a == "--nmaxima") nmaxima = std::atoi(v), ++i;
     else if (a == "--exclude") {
       std::stringstream ss(v);
       std::string t;
@@ -208,6 +351,9 @@ int main(int argc, char **argv) {
     c.td->qtp.min_white_black_diff = static_cast<int>(mwbd);
     c.td->qtp.max_line_fit_mse = static_cast<float>(mse);
     if (mcp > 0) c.td->qtp.min_cluster_pixels = mcp;
+    if (cos_crit >= 0) c.td->qtp.cos_critical_rad = static_cast<float>(cos_crit);
+    if (nmaxima > 0) c.td->qtp.max_nmaxima = nmaxima;
+    if (no_refine_edges) c.td->refine_edges = false;
     c.td->debug = false;
     c.dc.num_params = 5;
     if (auto it = calibs.find(c.name); it != calibs.end()) {
@@ -282,6 +428,16 @@ int main(int argc, char **argv) {
     int frame;
   };
   std::vector<Slow> slow;
+  double refine_ms = 0;
+  std::map<std::string, Lens> lenses;
+  for (auto &[name, k] : calibs) {
+    Lens l;
+    l.valid = true;
+    l.fx = k[0], l.fy = k[1], l.cx = k[2], l.cy = k[3];
+    for (size_t j = 4; j < k.size() && j - 4 < 8; ++j) l.k[j - 4] = k[j];
+    lenses[name] = l;
+  }
+  if (edgefit_undist && lenses.empty()) std::cerr << "--edgefit-undist without --calib: lines fitted in pixels\n";
   for (size_t b0 = 0; b0 < items.size(); b0 += batch) {
     const size_t n = std::min(batch, items.size() - b0);
     std::atomic<size_t> next{0};
@@ -339,6 +495,18 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, " %.1f ms\n",
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count());
       auto t2 = std::chrono::steady_clock::now();
+      if (subpix > 0 || edgefit || edgefit_undist) {
+        const Lens *lens = nullptr;
+        if (edgefit_undist)
+          if (auto li = lenses.find(c.name); li != lenses.end()) lens = &li->second;
+        for (auto *v : {&normal, &far})
+          for (auto &d : *v) {
+            if (d.margin < 15) continue;
+            if (edgefit || edgefit_undist) EdgeFit(img, d, lens);
+            if (subpix > 0) SubpixRefine(img, d, subpix);
+          }
+        refine_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t2).count();
+      }
       detect_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
       const double this_far_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
       far_ms += this_far_ms;
@@ -399,6 +567,8 @@ int main(int argc, char **argv) {
               fc.crops ? fc.crop_ms / fc.crops : 0);
   std::printf("Time: detect %.2f ms a frame, far search %.2f ms a frame on average; replay took %.0f s\n",
               frames_total ? detect_ms / frames_total : 0, frames_total ? far_ms / frames_total : 0, wall);
+  if (subpix > 0 || edgefit || edgefit_undist)
+    std::printf("Refine: %.3f ms a frame (CPU, one thread)\n", frames_total ? refine_ms / frames_total : 0);
   std::sort(slow.begin(), slow.end(), [](const Slow &a, const Slow &b) { return a.ms > b.ms; });
   std::printf("Frames where the far search took over 20 ms: %zu", slow.size());
   for (size_t i = 0; i < slow.size() && i < 5; ++i)

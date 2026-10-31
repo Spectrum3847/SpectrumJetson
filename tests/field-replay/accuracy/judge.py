@@ -317,6 +317,41 @@ def rstd(x):
     return 1.4826 * np.median(np.abs(x - np.median(x)))
 
 
+_full = {}
+
+
+def full_loo(v):
+    """In-frame error of every sighting of variant v, with all of v's tags in the frame."""
+    if v not in _full:
+        out = {}
+        for m in matches:
+            A = data[v][m]
+            if not A:
+                continue
+            groups = {}
+            for k in A:
+                groups.setdefault(k[:3], []).append(k)
+            out.update({(m,) + k: e for k, e in loo(groups, A, m).items()})
+        _full[v] = out
+    return _full[v]
+
+
+def lost_gained(v):
+    """Sightings only the base has (lost) and only v has (gained), with their in-frame error."""
+    fb, fv = full_loo(args.base), full_loo(v)
+    res = {}
+    for name, A, B, F in (("lost", args.base, v, fb), ("gained", v, args.base, fv)):
+        keys = [(m,) + k for m in matches for k in set(data[A][m] or {}) - set(data[B][m] or {})]
+        e = np.array([F[k] for k in keys if k in F])
+        res[name] = dict(n=len(keys), checkable=int(len(e)),
+                         median=float(np.median(e)) if len(e) else float("nan"),
+                         p90=float(np.percentile(e, 90)) if len(e) else float("nan"),
+                         over5=int(np.sum(e > 5)), over20=int(np.sum(e > 20.4)))
+    allb = np.array(list(fb.values()))
+    res["base_all"] = dict(median=float(np.median(allb)), p90=float(np.percentile(allb, 90)))
+    return res
+
+
 summary = {}
 base = data[args.base]
 P(f"Judge: base {args.base}; matches {', '.join(matches)}")
@@ -332,6 +367,13 @@ for v in variants:
     common_n = sum(len(set(base[m] or {}) & set(vb[m] or {})) for m in matches)
     res = {"sightings": cnt_b, "base_sightings": cnt_a, "common": common_n, "detect_ms": det_ms, "refine_ms": ref_ms}
     P(f"\n== {v}: {cnt_b} sightings (base {cnt_a}, common {common_n}); detect {det_ms:.2f} ms/frame, refine {ref_ms:.3f} ms/frame")
+
+    if "+noise" not in v:
+        lg = lost_gained(v)
+        res["lost_gained"] = lg
+        P("  " + "; ".join(f"{k} {lg[k]['n']} (in-frame checkable {lg[k]['checkable']}: median {lg[k]['median']:.2f} px, "
+                            f"p90 {lg[k]['p90']:.2f}, >5 px {lg[k]['over5']}, >20.4 px {lg[k]['over20']})" for k in ("lost", "gained"))
+          + f"; all base: median {lg['base_all']['median']:.2f}, p90 {lg['base_all']['p90']:.2f}")
 
     jr = jitter_pairs(base, vb)
     if jr:
