@@ -2198,15 +2198,71 @@ For comparison, one camera alone took 1.45 ms and 7% GPU at the start.
   measurable gain) and decoding up to 4 quads on the calling thread (more calling-thread CPU,
   no wall gain).
 - **What's left, by size:** (1) the decode workers' `RefineEdges`/`UnDistort`, ~0.6-0.7 ms of CPU
-  per busy calibrated frame. On the GPU, corners would differ in the last bits (needs
-  `judge.py`). (2) The sorts: the angle and peak sorts could be segmented by blob (points
-  arrive grouped by blob, and the angle key is total, so the output stays the same), fewer
-  passes. (3) The one remaining wait still costs ~110 µs of wake-up; spinning would buy that back
+  per busy calibrated frame: see `detector-15`. (2) The sorts: per-blob sorts were tried and
+  were slower (below). (3) The one remaining wait still costs ~110 µs of wake-up; spinning would buy that back
   for ~0.3 ms of CPU a frame, so it isn't worth it. (4) Pre-existing: on the graph path, the
   "Impossible increase in markers" check reads the pinned point count before any wait, so it
-  sees the previous frame's count.
+  sees the previous frame's count (fixed in `detector-14`).
 - **Tools:** `graph_bench` now takes `--calib fx,fy,cx,cy,k1..k6` (the CPU tail as a calibrated
   camera runs it) and `--threads N`, and prints the whole process's CPU too.
+
+#### Per-blob sorts: tried, slower (2026-10-31)
+
+- **Idea:** stage 3's angle and peak sorts order by blob first, and both arrays already arrive
+  grouped by blob, so sorting each blob's run alone gives exactly the same order with fewer passes
+  than the radix sort over the whole bucket (8 + 6 onesweep passes, ~21-25% of the GPU time).
+- **Result:** bit-identical detections on all 14 cameras, but slower. `cub::DeviceSegmentedSort`
+  copies counts back and waits inside (6 copies a frame), which breaks the stage 3 graph.
+  TXMAN Q17: thread CPU 200 → 1980 µs and wall 1969 → 2518 µs, even though GPU busy fell
+  ~120 µs. `cub::DeviceSegmentedRadixSort` can go in a graph, but it gives each blob one block,
+  so big blobs take long: wall 2.9 → 6.6 ms. Trimming the sorts' bit ranges saves no pass. Not
+  kept.
+
+#### The point-count check after the wait (`detector-14`)
+
+- On the graph path, `Detect()` checked "Impossible increase in markers" (the first stage's point
+  count against its buffer) before waiting for the GPU, so it read the previous frame's count.
+  The check now runs after the first wait: in `DetectGraphStages`, in `DetectChainedStages`, and
+  in the step-by-step fallback after its copy. The check is unchanged off the graph path.
+  Detections are identical (TXMAN Q17 left, 600 frames, with chaining on and off, and with the
+  graphs off).
+
+#### RefineEdges on the GPU (`detector-15`, off by default)
+
+- **What:** `SPECTRUM_DETECTOR_GPU_REFINE=1` (at start) or `1` in `/tmp/spectrum-detector-gpu-refine`
+  (live) runs the edge refinement (`RefineEdges` with `UnDistort`/`ReDistort`) as one kernel after
+  the quads are fit: one block per quad, one warp per edge. The quads go in, and the refined
+  corners come out, through pinned memory the kernel reads and writes directly (CPU and GPU share
+  DRAM: no copies). Then the worker threads only decode. It costs one more wait for the GPU per
+  frame that has quads. The edge search and undistortion run in float (Orin's GPU runs double
+  at a fraction of float's rate: the kernel took 314 µs a frame in double, ~70 µs in float).
+  The sums and the line fits stay in double. Corners move by up to ~1e-4 px against the CPU's.
+- **Accuracy** (`judge.py`, all 6 TXMAN1 matches, 13 sessions, `--off --mwbd 20 --mse 10` with each
+  camera's calibration; GPU against CPU refinement, same build):
+  - in-frame p50 1.282 → 1.279 px (paired CI −0.010..+0.001), p90 9.133 → 9.133 (CI −0.112..+0.105);
+    per sighting 28% better, 28% worse, 44% same, median paired difference 0.0000 px.
+  - static jitter median 0.084 → 0.085 px (CI −0.001..+0.002), 32 tag-stretches.
+  - sightings 38,489 → 38,482: 20 lost (10 checkable, median 4.95 px in-frame error), 13 gained (4
+    checkable, median 5.38 px), all mostly poor sightings. Smoothness 1.144 → 1.145.
+  - No worse.
+- **Measured** (`graph_bench`, 150 frames x 2 timed loops, CPU/GPU interleaved x 6, full clocks,
+  PhotonVision stopped, `detector-13` on; µs, medians of the runs' medians):
+
+  | Recording | process CPU (all threads) | Detect wall | calling-thread CPU |
+  | --- | --- | --- | --- |
+  | TXMAN1 Q17 orin-left (calib, busy) | 1049 → **537** | 1975 → 2027 | 199 → 290 |
+  | TXMAN1 Q24 orin-right (calib) | 1018 → **478** | 1911 → 1889 | 188 → 280 |
+  | fieldcal-synth TopLeft (no calib) | 280 → 329 | 812 → 943 | 154 → 248 |
+  | ceiling-4cam TopLeft (no calib) | 313 → 343 | 1355 → 1481 | 159 → 259 |
+
+  On busy calibrated cameras it halves the CPU per frame (−0.5 ms of worker CPU) for about the
+  same wall time. Without a calibration (refinement is cheap) it costs ~+130 µs of wall time and
+  a little CPU, for the extra wait. GPU +~70 µs a frame (nsys, TXMAN Q17).
+  - A polling wait instead of blocking was tried: ~−20 µs wall for +60 µs CPU. Not kept.
+- **Next step, if it's wanted:** fit the quads' corners (`UpdateFitQuads`, the area and angle
+  checks) on the GPU too, and refine inside the stage 3 graph. That removes the extra wait, so
+  the wall time would drop too.
+- Off by default until reviewed. Off, the output is identical to `detector-14`.
 
 #### Where the remaining CPU goes (4 cameras, 1.2 cores)
 
