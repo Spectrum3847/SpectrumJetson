@@ -52,6 +52,11 @@ public record PoseObservation(
     public enum Type {
         /** PhotonVision's multi-tag solve: every corner of every tag in one fit. Full pose. */
         MULTI_TAG,
+        /**
+         * The robot-side solve over every corner of every tag of every camera ({@link
+         * org.spectrum3847.vision.solve.MultiCameraSolver}): x, y and heading, the robot taken as flat.
+         */
+        MULTI_CAMERA,
         /** One tag, its solutions clearly different (low ambiguity): the best one. Full pose. */
         SINGLE_TAG,
         /** One tag, ambiguous: the solution whose heading agrees with the gyro. Full pose. */
@@ -65,6 +70,6 @@ public record PoseObservation(
 
     /** True if the heading comes from the camera (and may correct the gyro). */
     public boolean headingFromVision() {
-        return type == Type.MULTI_TAG || type == Type.SINGLE_TAG || type == Type.SINGLE_TAG_GYRO;
+        return type == Type.MULTI_TAG || type == Type.MULTI_CAMERA || type == Type.SINGLE_TAG || type == Type.SINGLE_TAG_GYRO;
     }
 }

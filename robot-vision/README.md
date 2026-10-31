@@ -121,6 +121,47 @@ drivetrain.registerTelemetry(state -> vision.addMotion(
 
 Change it with `Solvers.multiTagThen(Solvers.singleTag(new Solvers.SingleTagConfig().preferTrig(false)))`, or write your own `PoseSolver`.
 
+### Multi-camera solve (optional, not the default yet)
+
+`Solvers.multiCamera(config)` (`MultiCameraSolver`) solves **one robot pose from every corner of every tag of every camera**. It's for PhotonVision with its 3D mode off, where the coprocessor sends only 2D results and corners and the robot does the geometry. It returns `MULTI_CAMERA` candidates.
+
+What it does:
+- **Unknowns:** the robot's x, y and heading at one reference time, the newest frame's. The robot is taken as flat, so each camera's height and tilt come from its mount. That's why one tag on one camera still solves.
+- **Gyro:** an optional heading prior, σ 1.5° by default.
+- **Cameras at different times:** each frame is moved to the reference time with the odometry history, `Δ = odom(tRef)⁻¹ ∘ odom(tFrame)`. Odometry drift doesn't matter, only its changes do. Without odometry it uses the gyro's heading change, and without either the frames are taken as simultaneous.
+- **Corners:** undistorted with each camera's OpenCV calibration (`getCameraMatrix()`, `getDistCoeffs()`), in OpenCV's pixel convention, which is what the 2027 fork sends. Set `cornerShiftPx` if a source differs.
+- **Corner σ per tag:** set from the tag's size in pixels, its distance, how near it is to the image edge, and its decision margin. You can swap this out with `weighting(...)`.
+- **The fit:** Levenberg–Marquardt with a Cauchy robust loss (or Huber), seeded from every tag on its own. A tag that still doesn't fit is dropped and flagged.
+- **Out:** the pose, a 3×3 covariance for the EKF or a trust model, and every tag's residual for gates.
+
+```java
+var solver = Solvers.multiCamera(new MultiCameraSolver.Config());
+var frames = new ArrayList<MultiCameraSolver.CameraFrame>();
+for (var cam : vision.cameras()) {
+    // the camera's newest frame; intrinsics from PhotonCamera.getCameraMatrix()/getDistCoeffs()
+    frames.add(new MultiCameraSolver.CameraFrame(frame, intrinsics, cam.robotToCamera()));
+}
+solver.solve(frames, field, vision.motion(), MultiCameraSolver.PoseHistory.of(odometryBuffer), estimator.getEstimatedPosition())
+      .ifPresent(r -> estimator.addVisionMeasurement(r.pose(), r.timestampSeconds(), VecBuilder.fill(r.stdDevs()[0], r.stdDevs()[1], r.stdDevs()[2])));
+```
+
+**Simulation results** (`MultiCameraSolverTest`): synthetic corners on the real 2026 field, 4 cameras, perfect mounts and calibration. The per-camera `MULTI_TAG` and `TAG_TRIG` columns are worked out from the same noisy corners. Translation error, median/p90:
+
+| Corner noise | multi-camera | per-camera `MULTI_TAG` (mean of cameras) | `TAG_TRIG` (mean of tags) | multi-camera, 1 camera |
+|---|---|---|---|---|
+| 0.5 px | 0.1 / 0.6 cm | 1.6 / 19 cm | 1.7 / 4.9 cm | 0.8 / 11 cm |
+| 1 px | 0.2 / 0.7 cm | 4.5 / 33 cm | 3.7 / 10 cm | 2.1 / 17 cm |
+| 2 px | 0.4 / 1.6 cm | 7.5 / 52 cm | 7.8 / 18 cm | 2.8 / 47 cm |
+
+Other results from the same test:
+- **Heading error:** 0.03° against 1.3° for the per-camera solve at 1 px.
+- **One tag, one camera, 0.5 px:** 1.9 / 4.1 cm with the gyro prior, and 5 / 50 cm without it.
+- **One tag 12 px off:** 0.2 / 3.4 cm, where least squares gives 1.6 / 4.8 cm.
+- **Covariance consistency:** mean NEES 2.6, against an ideal 3.
+- **Speed:** about 170 µs a solve on the laptop for 4 cameras and 10 tags.
+
+On a real robot, the mount and calibration errors will dominate these numbers.
+
 ## Gates
 
 A gate rejects a pose candidate before it reaches the estimator, for a reason that's logged and counted. `Gates.recommended()`, in order:
@@ -335,8 +376,9 @@ This tests both builds, compiles the examples, runs both simulation tests, and m
   - `PhotonCamera.setEnabled`, which PhotonLib 2026 lacks.
 - **Rules for contributors:** write WPILib names only in import lines, never inline. Put anything version-specific in a compat class.
 
-**Tests:** 27, run on both builds (Java 17 and 25), plus the 2026 simulation test. All the examples compile in both builds against the real CTRE and AdvantageKit libraries. The tests cover:
+**Tests:** 35, run on both builds (Java 17 and 25), plus the 2026 simulation test. All the examples compile in both builds against the real CTRE and AdvantageKit libraries. The tests cover:
 - solvers: exact on synthetic frames; ambiguity resolved by the gyro; the trig solve ignoring a flipped tag;
+- the multi-camera solve: exact without noise, time alignment, noise sweeps against the per-camera solvers, an outlier tag, covariance consistency (NEES), its speed;
 - every gate, plus the innovation reset;
 - the trust model's shape;
 - lens undistortion round trips;

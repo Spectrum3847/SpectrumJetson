@@ -49,6 +49,7 @@ MAP = {
     "edu.wpi.first.networktables.DoubleArraySubscriber": "org.wpilib.networktables.DoubleArraySubscriber",
     "edu.wpi.first.networktables.DoubleSubscriber": "org.wpilib.networktables.DoubleSubscriber",
     "edu.wpi.first.networktables.IntegerArraySubscriber": "org.wpilib.networktables.IntegerArraySubscriber",
+    "edu.wpi.first.networktables.IntegerSubscriber": "org.wpilib.networktables.IntegerSubscriber",
     "edu.wpi.first.networktables.IntegerPublisher": "org.wpilib.networktables.IntegerPublisher",
     "edu.wpi.first.networktables.NetworkTable": "org.wpilib.networktables.NetworkTable",
     "edu.wpi.first.networktables.NetworkTableInstance": "org.wpilib.networktables.NetworkTableInstance",
