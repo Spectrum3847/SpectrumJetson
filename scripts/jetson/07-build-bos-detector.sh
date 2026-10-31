@@ -29,7 +29,7 @@ APRILTAG_SRC=$HOME/build/apriltag-src/apriltag   # in a directory named apriltag
 OUT=$HOME/build/bos-detector
 
 # Only for jni.h; the library runs in whichever JVM loads it.
-JAVA_HOME=$(ls -d /usr/lib/jvm/java-25-openjdk-arm64 /usr/lib/jvm/java-17-openjdk-arm64 2>/dev/null | head -1)
+JAVA_HOME=$(ls -d /usr/lib/jvm/java-25-openjdk-arm64 /usr/lib/jvm/java-17-openjdk-arm64 2>/dev/null | head -1 || true)
 export JAVA_HOME
 export PATH=$PATH:/usr/local/cuda/bin
 command -v cmake >/dev/null && command -v ninja >/dev/null && dpkg -s libjpeg-turbo8-dev libopencv-dev >/dev/null 2>&1 ||
