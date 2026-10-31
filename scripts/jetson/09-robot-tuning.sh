@@ -49,8 +49,12 @@
 #                               2026-10-01). Nothing happens with the radio switched off (events).
 #  13. SSD health readable    - smartmontools (smartctl) for photonvision-82's SSD topics
 #  14. Camera flashing        - pyusb (python3-usb) for photonvision-87's firmware card
+#  15. Low-jitter cameras     - spectrum-rt (scripts/jetson/spectrum-rt.sh), OFF by default: USB
+#                               interrupt on its own core, camera/decode threads at real-time
+#                               priority. RT=on|off sets it; without RT= a re-run keeps the saved
+#                               choice. Also `sudo spectrum-rt on|off|status` at any time.
 #
-# Usage: [FAN=quiet|full|off] 09-robot-tuning.sh [--undo]   (no FAN: keep the saved choice)
+# Usage: [FAN=quiet|full|off] [RT=on|off] 09-robot-tuning.sh [--undo]   (no FAN/RT: keep the saved choice)
 set -euo pipefail
 # Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
 [[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
@@ -115,6 +119,9 @@ if [[ ${1:-} == --undo ]]; then
   sudo systemctl enable snapd.service snapd.socket snapd.seeded.service
   sudo systemctl disable jetson-clocks.service 2>/dev/null || true
   sudo rm -f "$CLOCKS_UNIT"
+  [[ -x /usr/local/bin/spectrum-rt ]] && sudo /usr/local/bin/spectrum-rt off >/dev/null
+  sudo systemctl disable --now spectrum-rt.timer 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/spectrum-rt.{service,timer} /usr/local/bin/spectrum-rt /etc/spectrum-rt
   sudo systemctl set-default graphical.target
   sudo systemctl daemon-reload
   sudo udevadm control --reload
@@ -203,6 +210,30 @@ WantedBy=timers.target
 UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now spectrum-clocks-guard.timer
+
+echo "==> 15. Low-jitter cameras (spectrum-rt, off unless RT=on)"
+sudo install -m 755 "$(dirname "$0")/spectrum-rt.sh" /usr/local/bin/spectrum-rt
+sudo tee /etc/systemd/system/spectrum-rt.service >/dev/null <<'UNIT'
+[Unit]
+Description=Low-jitter camera handling, if switched on (SpectrumJetson spectrum-rt)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/spectrum-rt apply
+UNIT
+sudo tee /etc/systemd/system/spectrum-rt.timer >/dev/null <<'UNIT'
+[Unit]
+Description=Re-apply spectrum-rt every 15 s (new PhotonVision threads) (SpectrumJetson)
+[Timer]
+OnBootSec=40
+OnUnitActiveSec=15
+AccuracySec=1
+[Install]
+WantedBy=timers.target
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl enable --now spectrum-rt.timer
+if [[ -n ${RT:-} ]]; then sudo /usr/local/bin/spectrum-rt "$RT" >/dev/null
+elif [[ ! -e /etc/spectrum-rt ]]; then echo off | sudo tee /etc/spectrum-rt >/dev/null; fi
 
 echo "==> 5. No USB autosuspend for cameras"
 # Any device with a uvcvideo interface: set power/control=on on the USB device (the parent).
@@ -421,5 +452,6 @@ echo "  USB descriptor timeout: $(cat /sys/module/usbcore/parameters/initial_des
 echo "  TCP retries before giving up: $(sysctl -n net.ipv4.tcp_retries2) (~13 s at 5)"
 echo "  Wi-Fi retry: $(systemctl is-active spectrum-wifi-retry.timer) (every 2 min, radio on only)"
 echo "  cooling: $(sudo "$FAN_HELPER" status) (Settings > Robot state)"
+echo "  low-jitter cameras (spectrum-rt): $(cat /etc/spectrum-rt 2>/dev/null || echo off)"
 echo "  photonvision: Restart=$(systemctl show photonvision -p Restart --value), $(systemctl show photonvision -p Environment --value | tr ' ' '\n' | grep -c OPENCV_THREAD_POOL) OpenCV pool settings"
 echo "Reboot to apply the boot changes: sudo reboot"
