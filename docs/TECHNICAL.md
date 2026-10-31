@@ -2339,6 +2339,56 @@ For comparison, one camera alone took 1.45 ms and 7% GPU at the start.
   - So: `=2` when wall time matters most, `=3` when the CPU runs out (more cameras). Both are
     off by default until reviewed.
 
+#### GPU offload ladder (`08-select-detector.sh --gpu-level N`, 2026-10-31)
+
+One number for where the detector's work runs, from most GPU (5) to most CPU (0). When the GPU is
+the bottleneck (a TensorRT model beside the tag cameras), step **down** one level at a time: each
+step is ordered to free the most GPU for the least latency first. `--gpu-level list` prints it.
+Individual flags given as well (`--gpu-refine`, `--graphs`, `--chain`, `--far`) override the level.
+
+| Level | Settings | GPU per camera vs L3 | Process CPU per frame | Detect wall | Change |
+| --- | --- | --- | --- | --- | --- |
+| 5 | `GPU_REFINE=3` (`detector-17`), graphs, chain, far on | ~+340 µs/frame (~+4% GPU) | 132 µs (~2% core) | 2133 µs | restart |
+| 4 | `GPU_REFINE=2` (`detector-16`), graphs, chain, far on | ~+70 µs/frame (~+1%) | 426 µs (~5% core) | **1949 µs** | restart |
+| 3 | `GPU_REFINE` unset (CPU refine and decode), graphs, chain, far on: today's default | baseline | 1045 µs (~13% core) | 1975 µs | restart |
+| 2 | L3 + far search off | frees the far search, only while starved: 19.4 → 16.5% GPU, −0.4 W (5 cameras, live) | same | same (worst detect ~2 → ~1 ms while starved) | live |
+| 1 | L2 + chain off (`SPECTRUM_DETECTOR_CHAIN=0`) | ~−1% of the detector's GPU | +160 µs | +160 µs | env at start; `0` in `/tmp/spectrum-detector-chain` live |
+| 0 | L1 + graphs off (`SPECTRUM_DETECTOR_GRAPHS=0`) | ~0 (same kernels, more gaps) | ~+0.3-0.5 ms (estimate: ~67 CUDA calls at 10-15 µs, `detector-11`) | worse | env at start; `0` in `/tmp/spectrum-detector-graphs` live |
+
+- **Numbers:** `graph_bench` on TXMAN1 Q17 orin-left (calibrated, busy), the `detector-17` table;
+  GPU from nsys (decode kernel ~269 µs, refine kernel ~70 µs a frame; nsys inflates them, so
+  estimates). % of a core and % GPU are per camera at 122 fps (µs × 122 / 10⁶). The far-search row is
+  `photonvision-55`'s live A/B. Uncalibrated cameras run the CPU path at levels 3-5 alike
+  (+13..28 µs wall for the gated kernels at 4/5).
+- **Why this order:**
+  - 5 → 4 frees the biggest GPU item (the double-precision decode kernel, ~270 µs/frame) and
+    *lowers* latency (~−180 µs), for +0.3 ms of worker CPU that runs in parallel. So 4 beats 5
+    unless the CPU is what's short.
+  - 4 → 3 frees the refine kernel (~70 µs) for +0.6 ms CPU and about the same wall time.
+  - 3 → 2 frees the far search's GPU, but only while no camera has a good view (with one it is
+    already off), and costs range (tags under ~20 px). Last of the useful steps.
+  - 1 and 0 free no GPU work: graphs and chaining only cut CPU launch cost and GPU waits. **Never
+    worth stepping down to for a busy GPU**; they're for debugging.
+- **`detector-18`** (`GPU_REFINE=4`, the decode in float, if the build has it): a lighter level 5,
+  `--gpu-level 5 --gpu-refine 4`; not bit-identical to the CPU. Where it sits relative to 4 depends
+  on its measured kernel time (bench `ladder` runs it as `5f`).
+- **Recommended default:** level 4 once the bench `ladder` step confirms it live (best wall time,
+  −60% CPU on calibrated cameras). Until then 3.
+- **Not on the ladder: JPEG decode.** `--jpeg nvjpg` decodes on the two NVJPG engines, which are not
+  the GPU, so it doesn't compete with TensorRT. `--jpeg turbo` (or `echo turbo >
+  /tmp/spectrum-jpeg-decoder`, live) moves it to the CPU: measured 0.52 → 0.85 cores for 2 cameras
+  (~+0.16 cores per camera) and 2.0-2.9 ms per frame depending on the scene.
+- **Live or restart:** `GPU_REFINE` is read at start (recorded into the stage graphs); `0` in
+  `/tmp/spectrum-detector-gpu-refine` turns it off live. Graphs and chain: env at start; their
+  `/tmp` files can only turn them off, live (re-read every 2 s). Far search: PhotonVision's robot
+  state (Settings > Robot state, `POST /api/robotState {"farSearch": …}`), live and saved; `08`
+  sets it through the API when PhotonVision is up.
+- **Bench:** `tests/bench-session/run.sh ladder` walks `LADDER_LEVELS` (default `5 4 3 2`),
+  one restart per level, interleaved over `BENCH_ROUNDS`, with tags in view and a per-camera
+  calibration check. It replaced the `gpurefine` step (that name still runs it). Every
+  measurement now has power: tegrastats `VDD_IN` (board) and `VDD_CPU_GPU_CV` (CPU+GPU rail),
+  average and max, W.
+
 #### Where the remaining CPU goes (4 cameras, 1.2 cores)
 
 - **`tests/cpu-profile.sh`:** the 4 camera threads (15–25% of a core each) split their samples

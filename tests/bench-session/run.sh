@@ -14,9 +14,11 @@
 #              (tests/perf-snapshot.sh, then a perf profile per thread: scripts/jetson/profile-cpu.sh),
 #              GPU %, power, temperature
 #   graphs     CUDA graphs on/off A/B, interleaved through /tmp/spectrum-detector-graphs (no restart)
-#   gpurefine  SPECTRUM_DETECTOR_GPU_REFINE 0 / 2 (detector-16) / 3 (detector-17), interleaved, one
-#              PhotonVision restart per run (read at start): PhotonVision CPU (all threads and camera
-#              threads), detect avg/max, latency, GPU %. Only calibrated cameras gain (notes which aren't)
+#   ladder     the GPU offload ladder (08-select-detector.sh --gpu-level; docs/TECHNICAL.md):
+#              levels LADDER_LEVELS, interleaved over rounds, one PhotonVision restart per run (read
+#              at start): PhotonVision CPU (all threads and camera threads), GPU %, power, detect
+#              avg/max, latency. Only calibrated cameras gain from 4/5 (notes which aren't).
+#              ("gpurefine", its old name, runs it too.)
 #   3d         PhotonVision's 3D mode (solvePNPEnabled) on vs off with tags, through PhotonVision's
 #              websocket (the same message the UI sends); CPU and latency
 #   rt         spectrum-rt A/B (tests/rt-ab/run.sh) with LOAD=0 and LOAD=4
@@ -35,7 +37,10 @@
 #   tests/bench-session/run.sh all usb         everything, USB recovery too
 # Env: BENCH_SECS (measurement window, default 30), BENCH_ROUNDS (A/B rounds, default 2),
 #      RT_SECS (seconds per spectrum-rt run, default 45), EDGE_VALUES (default "0 25 50"),
-#      BENCH_STILL_SECS (seconds per still recording, default 45)
+#      BENCH_STILL_SECS (seconds per still recording, default 45), LADDER_LEVELS (default "5 4 3 2";
+#      "5f" = level 5 with the float decode, detector-18, added when the installed detector has it)
+# Power in every measurement: tegrastats VDD_IN (whole board) and VDD_CPU_GPU_CV (CPU+GPU rail),
+# average and max over the window, W.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -47,11 +52,14 @@ EDGE_VALUES=${EDGE_VALUES:-"0 25 50"}
 STILL_SECS=${BENCH_STILL_SECS:-45}
 GRAPHS_FILE=/tmp/spectrum-detector-graphs
 REFINE_FILE=/tmp/spectrum-detector-gpu-refine
+CHAIN_FILE=/tmp/spectrum-detector-chain
+LADDER_LEVELS_SET=${LADDER_LEVELS:-}
+LADDER_LEVELS=${LADDER_LEVELS:-"5 4 3 2"}
 DROPIN=/etc/systemd/system/photonvision.service.d/detector.conf
 # Before the 2026-10-31 rename 08-select-detector.sh wrote 971.conf (SPECTRUM_971_* names).
 [[ -f $DROPIN || ! -f ${DROPIN%/*}/971.conf ]] || DROPIN=${DROPIN%/*}/971.conf
 PVDB=/opt/photonvision/photonvision_config/photon.sqlite
-DEFAULT_STEPS=(inventory baseline graphs gpurefine far 3d rt edge)
+DEFAULT_STEPS=(inventory baseline graphs ladder far 3d rt edge)
 
 # ---------------------------------------------------------------------------------------------
 # Measurement (run as "run.sh --measure OUT STEP COND ROUND SECS", under a timeout): perf-snapshot
@@ -98,7 +106,8 @@ with open(f"{out}/cams.tsv", "a") as o:
                            f(statistics.mean(x[4] for x in w) if all(x[4] is not None for x in w) else None)]) + "\n")
 t = collections.defaultdict(list)
 for line in open(tl, errors="replace"):
-    for k, pat in (("gpu", r'GR3D_FREQ (\d+)%'), ("power", r'VDD_IN (\d+)mW'), ("temp", r'tj@([\d.]+)C'),
+    for k, pat in (("gpu", r'GR3D_FREQ (\d+)%'), ("power", r'VDD_IN (\d+)mW'), ("cpugpu", r'VDD_CPU_GPU_CV (\d+)mW'),
+                   ("temp", r'tj@([\d.]+)C'),
                    ("nvjpg0", r'NVJPG0? (\d+)%'), ("nvjpg1", r'NVJPG1 (\d+)%')):
         m = re.search(pat, line)
         t[k].append(float(m.group(1)) if m else 0.0)
@@ -107,17 +116,21 @@ for line in open(tl, errors="replace"):
         v = [int(x.split('%')[0]) for x in c.group(1).split(',') if '%' in x]
         t["cpu"].append(sum(v) / max(len(v), 1))
 avg = lambda k: statistics.mean(t[k]) if t[k] else None
+watts = lambda k, fn: f(fn(t[k]) / 1000) if any(t[k]) else ""
 snap = open(ps).read()
 m = re.search(r'CPU (\d+)% \(camera threads (\d+)%, workers (\d+)%, other (\d+)%\)', snap)
 pv = m.groups() if m else ("", "", "", "")
 with open(f"{out}/sys.tsv", "a") as o:
+    # power: VDD_IN avg, max; VDD_CPU_GPU_CV avg, max (W)
     o.write("\t".join([step, cond, rnd, *pv, f(avg("cpu")), f(avg("gpu")),
-                       f(avg("power") / 1000 if t["power"] else None),
+                       watts("power", statistics.mean), watts("power", max),
+                       watts("cpugpu", statistics.mean), watts("cpugpu", max),
                        f(max(t["temp"]) if t["temp"] else None), f(avg("nvjpg0")), f(avg("nvjpg1")),
                        f(statistics.mean(x[0] for x in jpeg)) if jpeg else "",
                        f(statistics.mean(x[1] for x in jpeg)) if jpeg else ""]) + "\n")
 print(f"  {step} {cond} r{rnd}: {len(loop)} cameras, {len(det)} detectors, PV CPU {pv[0] or '?'}%, "
-      f"GPU {f(avg('gpu'))}%, {f(avg('power') / 1000 if t['power'] else None)} W")
+      f"GPU {f(avg('gpu'))}%, board {watts('power', statistics.mean) or '?'} W (max {watts('power', max) or '?'}), "
+      f"CPU+GPU rail {watts('cpugpu', statistics.mean) or '?'} W (max {watts('cpugpu', max) or '?'})")
 for cam, w in sorted(loop.items()):
     print(f"    {cam:24s} {statistics.mean(x[0] for x in w) / 10:6.1f} fps  latency median "
           f"{statistics.median(x[1] for x in w):.1f} p95 {statistics.median(x[2] for x in w):.1f} max {max(x[3] for x in w):.1f} ms")
@@ -230,9 +243,10 @@ STEPS=()
 for a in "$@"; do
   case $a in
     all) STEPS+=("${DEFAULT_STEPS[@]}") ;;
-    inventory | baseline | graphs | gpurefine | far | 3d | rt | edge | usb | stills) STEPS+=("$a") ;;
+    inventory | baseline | graphs | ladder | far | 3d | rt | edge | usb | stills) STEPS+=("$a") ;;
+    gpurefine) STEPS+=(ladder) ;;  # folded into ladder
     -h | --help) sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
-    *) echo "unknown step $a (inventory baseline graphs gpurefine far 3d rt edge usb stills all)" >&2; exit 2 ;;
+    *) echo "unknown step $a (inventory baseline graphs ladder far 3d rt edge usb stills all)" >&2; exit 2 ;;
   esac
 done
 ((${#STEPS[@]})) || STEPS=("${DEFAULT_STEPS[@]}")
@@ -311,6 +325,7 @@ restart_pv() {
 RT_ORIG=$(cat /etc/spectrum-rt 2>/dev/null || echo off)
 if [[ -e $GRAPHS_FILE ]]; then GRAPHS_ORIG=$(cat "$GRAPHS_FILE"); else GRAPHS_ORIG=absent; fi
 if [[ -e $REFINE_FILE ]]; then REFINE_ORIG=$(cat "$REFINE_FILE"); else REFINE_ORIG=absent; fi
+if [[ -e $CHAIN_FILE ]]; then CHAIN_ORIG=$(cat "$CHAIN_FILE"); else CHAIN_ORIG=absent; fi
 DROPIN_BACKUP=$OUT/$(basename "$DROPIN").orig
 [[ -f $DROPIN ]] && cp "$DROPIN" "$DROPIN_BACKUP"
 PNP_CHANGED=()   # "uniqueName<TAB>original value"
@@ -326,6 +341,8 @@ restore() {
   echo "  CUDA graphs switch: $GRAPHS_ORIG"
   if [[ $REFINE_ORIG == absent ]]; then rm -f "$REFINE_FILE"; else echo "$REFINE_ORIG" > "$REFINE_FILE"; fi
   echo "  GPU RefineEdges switch: $REFINE_ORIG"
+  if [[ $CHAIN_ORIG == absent ]]; then rm -f "$CHAIN_FILE"; else echo "$CHAIN_ORIG" > "$CHAIN_FILE"; fi
+  echo "  chained stages switch: $CHAIN_ORIG"
   [[ $(cat /etc/spectrum-rt 2>/dev/null || echo off) == "$RT_ORIG" ]] || sudo -n spectrum-rt "$RT_ORIG" > /dev/null
   echo "  spectrum-rt: $RT_ORIG"
   if [[ -n $FAR_ORIG ]]; then far_set "$FAR_ORIG" && echo "  far search: $FAR_ORIG"; fi
@@ -429,15 +446,17 @@ step_graphs() {
   if [[ $GRAPHS_ORIG == absent ]]; then rm -f "$GRAPHS_FILE"; else echo "$GRAPHS_ORIG" > "$GRAPHS_FILE"; fi
 }
 
-# GPU refine modes, 3-way interleaved: SPECTRUM_DETECTOR_GPU_REFINE 0 (CPU corners, refine and
-# decode), 2 (detector-16: corners + RefineEdges in stage 3's graph), 3 (detector-17: + the quad
-# decode in the graph). 2 and 3 are read once at start (recorded into the stage graphs), so every
-# mode is a drop-in change (08-select-detector.sh --gpu-refine, other options kept) and a
-# PhotonVision restart; the live switch file is removed so it can't override. graph_bench (calibrated,
-# busy): process CPU 1045 / 426 / 132 us a frame. Uncalibrated cameras run the CPU path in every mode,
-# so the per-camera calibration check goes in the notes.
-step_gpurefine() {
-  local r v lib nvlib args mwbd mse jpeg conn edge modes m since
+# The GPU offload ladder (08-select-detector.sh --gpu-level, docs/TECHNICAL.md "GPU offload
+# ladder"): 5 = corners, refine and decode in stage 3's graph (detector-17), 4 = corners and refine
+# in the graph (detector-16), 3 = CPU refine/decode, 2 = 3 + far search off (1/0: chain/graphs off,
+# debug only; add them to LADDER_LEVELS to measure). GPU refine is read once at start (recorded
+# into the stage graphs), so every level is a drop-in change (other options kept) and a PhotonVision
+# restart; the live switch files are removed so they can't override. Levels interleaved over rounds
+# (order reversed every other round). Uncalibrated cameras run the CPU path at 3-5 alike, so the
+# per-camera calibration check goes in the notes. The far search only works while no camera has a
+# good view, so with tags in view 2 and 3 should match.
+step_ladder() {
+  local r v lib nvlib args mwbd mse jpeg conn edge levels m since lvl want
   lib=$HOME/build/gpu-detector/libspectrum-gpu-apriltag.so
   nvlib=$HOME/build/gpu-detector/libspectrumnvjpg.so
   [[ -f $OUT/cameras.tsv ]] || tmo 120 python3 "$HERE/cameras.py" inventory "$OUT" "$REPO" > /dev/null
@@ -447,19 +466,36 @@ step_gpurefine() {
     [[ -n $state ]] || { echo "    $cam"; continue; }
     note "$cam @$port: streaming $now, calibrations $res: $state"
   done < "$OUT/.calib"
-  grep -q UNCALIBRATED "$OUT/.calib" && note "uncalibrated cameras above run the CPU path in every mode (no gain from 2/3)"
-  note "was: env SPECTRUM_DETECTOR_GPU_REFINE in the drop-in: $(grep -o 'SPECTRUM_DETECTOR_GPU_REFINE=[^ "]*' "$DROPIN" 2>/dev/null || echo unset); switch $REFINE_FILE: $REFINE_ORIG"
-  if ! grep -q -- '--gpu-refine' "$REPO/scripts/jetson/08-select-detector.sh" || ! grep -qa TakeGraphCorners /usr/lib/libspectrum-gpu-apriltag.so; then
-    note "skipped: the installed detector has no in-graph refine (detector-16)"; return 0
+  grep -q UNCALIBRATED "$OUT/.calib" && note "uncalibrated cameras above run the CPU path at levels 3-5 (no gain from 4/5)"
+  note "was: $(grep -o 'Environment=.*' "$DROPIN" 2>/dev/null | sed 's/Environment=//' | tr '\n' ' '); switches: refine $REFINE_ORIG, graphs $GRAPHS_ORIG, chain $CHAIN_ORIG"
+  if ! grep -q -- '--gpu-level' "$REPO/scripts/jetson/08-select-detector.sh"; then
+    note "skipped: 08-select-detector.sh has no --gpu-level"; return 0
   fi
-  modes="0 2"
-  if grep -qa PrepareGpuDecode /usr/lib/libspectrum-gpu-apriltag.so; then modes="0 2 3"
-  else note "the installed detector has no in-graph decode (detector-17): modes 0 and 2 only"; fi
+  # Levels the installed detector can run
+  levels=""
+  for lvl in $LADDER_LEVELS; do
+    case $lvl in
+      5) grep -qa PrepareGpuDecode /usr/lib/libspectrum-gpu-apriltag.so || { note "level 5 skipped: no in-graph decode (detector-17)"; continue; } ;;
+      4) grep -qa TakeGraphCorners /usr/lib/libspectrum-gpu-apriltag.so || { note "level 4 skipped: no in-graph refine (detector-16)"; continue; } ;;
+      5f) grep -qa DecodeQuadsKernelF /usr/lib/libspectrum-gpu-apriltag.so || { note "level 5f skipped: no float decode (detector-18)"; continue; } ;;
+      [0-3]) ;;
+      *) note "unknown level $lvl in LADDER_LEVELS; skipped"; continue ;;
+    esac
+    levels+="$lvl "
+  done
+  if grep -qa DecodeQuadsKernelF /usr/lib/libspectrum-gpu-apriltag.so && [[ " $levels" != *" 5f "* ]] && [[ -z ${LADDER_LEVELS_SET:-} ]]; then
+    levels="5f $levels"; note "the installed detector has the float decode (detector-18): level 5f (5 with --gpu-refine 4) added"
+  fi
+  levels=$(xargs <<< "$levels")
+  [[ -n $levels ]] || { note "skipped: no level to run"; return 0; }
   # 08-select-detector.sh reinstalls the library from ~/build: only if that's what's installed now
   if ! cmp -s "$lib" /usr/lib/libspectrum-gpu-apriltag.so || { [[ -f $nvlib ]] && ! cmp -s "$nvlib" /usr/lib/libspectrumnvjpg.so; }; then
     note "skipped: ~/build/gpu-detector differs from the installed detector; 08-select-detector.sh would swap it"; return 0
   fi
   [[ $(findmnt -n -o FSTYPE /) != overlay ]] || { note "skipped: ro-root is on"; return 0; }
+  # The far search is part of the levels (08 sets it live): remember it for restore()
+  FAR_ORIG=$(far_get)
+  [[ $FAR_ORIG == true || $FAR_ORIG == false ]] || { note "can't read farSearch ($FAR_ORIG); levels 2 and below change it anyway"; FAR_ORIG=""; }
   # keep every other option as it is now
   mwbd=$(sed -En 's/^Environment=SPECTRUM_(DETECTOR|971)_MIN_WHITE_BLACK_DIFF=//p' "$DROPIN" 2>/dev/null)
   mse=$(sed -En 's/^Environment=SPECTRUM_(DETECTOR|971)_MAX_LINE_FIT_MSE=//p' "$DROPIN" 2>/dev/null)
@@ -472,22 +508,29 @@ step_gpurefine() {
   [[ -n $edge ]] && args+=(--edge "$edge")
   [[ -n $jpeg ]] && args+=(--jpeg "$jpeg")
   [[ -n $conn ]] && args+=(--gpu-connections "$conn")
-  ask "TAGS: every camera at tags; leave them still for the A/B (modes ${modes// /, }, one PhotonVision restart each, ~$((ROUNDS * $(wc -w <<< "$modes") * (SECS + 90) / 60 + 1)) min). Only cameras CALIBRATED at their active resolution use 2/3 (PhotonVision > Cameras > Calibration); uncalibrated ones are listed in results.md." || return
-  rm -f "$REFINE_FILE"
+  ask "TAGS: every camera at tags; leave them still for the ladder (levels ${levels// /, }, one PhotonVision restart each, ~$((ROUNDS * $(wc -w <<< "$levels") * (SECS + 90) / 60 + 1)) min). Only cameras CALIBRATED at their active resolution use 4/5 (PhotonVision > Cameras > Calibration); uncalibrated ones are listed in results.md." || return
+  rm -f "$REFINE_FILE" "$GRAPHS_FILE" "$CHAIN_FILE"
   for ((r = 1; r <= ROUNDS; r++)); do
-    m=$modes
-    ((r % 2 == 0)) && m=$(tr ' ' '\n' <<< "$modes" | tac | paste -sd ' ')  # alternate the order
+    m=$levels
+    ((r % 2 == 0)) && m=$(tr ' ' '\n' <<< "$levels" | tac | paste -sd ' ')  # alternate the order
     for v in $m; do
       DROPIN_CHANGED=1
-      tmo 60 "$REPO/scripts/jetson/08-select-detector.sh" gpu "${args[@]}" --gpu-refine "$v" --no-restart > /dev/null || return 1
-      echo "  restarting PhotonVision with GPU refine mode $v"
+      if [[ $v == 5f ]]; then lvl=(--gpu-level 5 --gpu-refine 4); else lvl=(--gpu-level "$v"); fi
+      tmo 60 "$REPO/scripts/jetson/08-select-detector.sh" gpu "${args[@]}" "${lvl[@]}" --no-restart > /dev/null || return 1
+      echo "  restarting PhotonVision at GPU level $v"
       since=$(date '+%Y-%m-%d %H:%M:%S')
-      restart_pv || note "mode $v round $r: not every camera came back after the restart"
+      restart_pv || note "level $v round $r: not every camera came back after the restart"
       sudo -n journalctl -u photonvision --since "$since" -o cat --no-pager 2>/dev/null | grep -q 'detector loaded' ||
-        note "mode $v round $r: no 'detector loaded' line since the restart"
-      settle; measure "gpu refine $v" "$r" || return
+        note "level $v round $r: no 'detector loaded' line since the restart"
+      want=true; [[ $v =~ ^[0-2]$ ]] && want=false
+      [[ $(far_get) == "$want" ]] || { far_set "$want" || note "level $v round $r: far search not set to $want"; }
+      settle; measure "level $v" "$r" || return
     done
   done
+  # The far search back now (the far step reads it as its starting value); the drop-in stays at
+  # the last level until restore() puts the original back at the end of the session.
+  if [[ -n $FAR_ORIG ]]; then far_set "$FAR_ORIG" && note "far search put back to $FAR_ORIG"; FAR_ORIG=""; fi
+  note "detector.conf stays at the last level until the session ends (restore puts the original back)"
 }
 
 # Far search (photonvision-55) on/off, live through Settings > Robot state's endpoint. The TXMAN1
@@ -724,9 +767,9 @@ print()
 sys.stdout.flush()
 subprocess.run([sys.executable, os.path.join(os.environ["BENCH_HERE"], "cameras.py"), "compare", out])
 print("## Whole Jetson\n")
-print("| step | condition | rounds | PV CPU % (1 core = 100) | camera threads % | workers % | other % | Jetson CPU % (avg of 6) | GPU % | power W | max temp C | NVJPG0 % | NVJPG1 % | nvjpg fps | libjpeg-turbo fps |")
-print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
-for k, c, n in agg(rows("sys.tsv"), (0, 1), {10}):
+print("| step | condition | rounds | PV CPU % (1 core = 100) | camera threads % | workers % | other % | Jetson CPU % (avg of 6) | GPU % | board W avg | board W max | CPU+GPU W avg | CPU+GPU W max | max temp C | NVJPG0 % | NVJPG1 % | nvjpg fps | libjpeg-turbo fps |")
+print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+for k, c, n in agg(rows("sys.tsv"), (0, 1), {10, 12, 13}):
     print("| " + " | ".join(k + [str(n)] + c) + " |")
 print("\n## Checks and notes\n")
 print(open(f"{out}/notes.md").read() or "(none)")
@@ -748,7 +791,7 @@ sudo -n true 2>/dev/null || { echo "Needs passwordless sudo (run 'sudo true' fir
 echo "Bench session: ${STEPS[*]} -> $OUT  (window ${SECS}s, ${ROUNDS} rounds; Ctrl-C puts everything back)"
 
 declare -A LIMIT=([inventory]=300 [far]=$((ROUNDS * 2 * (SECS + 90) + 600)) [baseline]=900 [graphs]=$((ROUNDS * 2 * (SECS + 90) + 600))
-                  [gpurefine]=$((ROUNDS * 3 * (SECS + 200) + 900))
+                  [ladder]=$((ROUNDS * 5 * (SECS + 200) + 900))
                   [3d]=$((ROUNDS * 2 * (SECS + 120) + 600)) [rt]=$((4 * ROUNDS * (RT_SECS + 15) + 900))
                   [edge]=2400 [usb]=2400
                   [stills]=$((5 * 3 * 2 * (STILL_SECS + 90) + 600)))

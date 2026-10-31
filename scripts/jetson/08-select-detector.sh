@@ -4,7 +4,9 @@
 # Run ON THE JETSON. Both builds have the same Java API.
 #
 # Usage: 08-select-detector.sh gpu|gpu-4143 [--mwbd N] [--jpeg nvjpg|turbo] [--mse N]
-#                              [--edge N] [--gpu-connections N] [--gpu-refine N] [--no-restart]
+#                              [--edge N] [--gpu-connections N] [--gpu-level N] [--gpu-refine N]
+#                              [--graphs 0|1] [--chain 0|1] [--far on|off] [--no-restart]
+#        08-select-detector.sh --gpu-level list     (what each level does; changes nothing)
 #   gpu       our GPU detector: Austin Schuh's CUDA AprilTag code from frc971/bos + our patches
 #             (07-build-gpu-detector.sh). The one the robot uses.
 #   gpu-4143  the older FRC-Team-4143/GpuDetectorJNI build + our patches (05-build-gpudetector.sh)
@@ -25,10 +27,68 @@
 #   --gpu-refine N   SPECTRUM_DETECTOR_GPU_REFINE, read at start (gpu build only; default 0 = the CPU
 #                    path): 1 RefineEdges on the GPU (detector-15), 2 corners and RefineEdges in
 #                    stage 3's graph (detector-16), 3 the decode in the graph too (detector-17).
+#                    4 the decode in float (detector-18, if the build has it; not bit-identical).
 #                    0 in /tmp/spectrum-detector-gpu-refine turns them off live.
+#   --gpu-level N    the GPU offload ladder (docs/TECHNICAL.md, "GPU offload ladder"): one number for
+#                    --gpu-refine, --graphs, --chain and --far, 5 = most work on the GPU, 0 = least.
+#                    Step down when the GPU is the bottleneck (e.g. a TensorRT model). Individual
+#                    flags given as well override the level's value. --gpu-level list prints it.
+#   --graphs 0|1     SPECTRUM_DETECTOR_GRAPHS (detector-11 stage graphs; default 1). 0 also stops
+#                    --gpu-refine 2-4 (they live in the graphs). Live: echo 0 > /tmp/spectrum-detector-graphs
+#   --chain 0|1      SPECTRUM_DETECTOR_CHAIN (detector-13, one GPU wait a frame; default 1).
+#                    Live: echo 0 > /tmp/spectrum-detector-chain
+#   --far on|off     the far-tag search (a PhotonVision setting, Settings > Robot state; saved
+#                    there, live, no restart). Set through localhost:5800/api/robotState when
+#                    PhotonVision is up; not touched unless --far or --gpu-level is given.
 # Options not given go back to their defaults.
 # (Fault injection for testing: echo N > /tmp/spectrum-detector-fault-every; rm it to stop.)
 set -euo pipefail
+
+# The GPU offload ladder: level -> "refine graphs chain far". Numbers per calibrated camera at
+# 122 fps from graph_bench (TXMAN1 Q17, busy) and the live far-search A/B; docs/TECHNICAL.md.
+level_settings() {
+  case $1 in
+    5) echo "3 1 1 on" ;;
+    4) echo "2 1 1 on" ;;
+    3) echo "0 1 1 on" ;;
+    2) echo "0 1 1 off" ;;
+    1) echo "0 1 0 off" ;;
+    0) echo "0 0 0 off" ;;
+    *) return 1 ;;
+  esac
+}
+level_list() {
+  cat <<'EOF2'
+GPU offload ladder (08-select-detector.sh gpu --gpu-level N). Step DOWN one level at a time when
+the GPU is the bottleneck (TensorRT object detection, ...). Per calibrated camera at 122 fps;
+uncalibrated cameras run the CPU path at levels 3-5 alike. ~ = estimate.
+
+ level  settings                         GPU per camera       CPU per camera        detect wall
+ 5      refine 3: corners, RefineEdges,  ~+340 us/frame       132 us/frame          2133 us
+        decode in stage 3's graph        (~+4% GPU) vs L3     (~2% of a core)       (+160 vs L4)
+        (detector-17). Most GPU.
+ 4      refine 2: corners + RefineEdges  ~+70 us/frame        426 us/frame          1949 us
+        in the graph (detector-16).      (~+1% GPU) vs L3     (~5% of a core)       (best)
+        RECOMMENDED once bench-confirmed.
+ 3      refine 0: CPU corners, refine,   baseline             1045 us/frame         1975 us
+        decode; graphs + chain on.                            (~13% of a core)
+        Today's default.
+ 2      L3 + far search off.             frees the far search only while no camera has a good
+                                         view: measured 19.4 -> 16.5% GPU (5 cameras), -0.4 W.
+                                         Costs range (tags under ~20 px).
+ 1      L2 + chain off (detector-13).    frees ~no GPU (-1%); +160 us CPU and wall a frame.
+ 0      L1 + graphs off (detector-11).   frees ~no GPU; ~+0.3-0.5 ms CPU a frame (~67 CUDA calls).
+        Levels 1 and 0 are for debugging only: they never help a busy GPU.
+
+Levels 5/4 need a restart (read at start, recorded into the graphs); 0 in
+/tmp/spectrum-detector-gpu-refine turns them off live. Graphs/chain: env at start, 0 in
+/tmp/spectrum-detector-graphs or -chain turns them off live (re-read every 2 s). Far search: live.
+--gpu-refine 4 (detector-18, float decode, if built) is a lighter level 5: --gpu-level 5 --gpu-refine 4.
+Not on the ladder: JPEG decode runs on the NVJPG engines, not the GPU (--jpeg nvjpg); --jpeg turbo
+decodes on the CPU instead (~+0.16 cores per camera, measured 0.52 -> 0.85 cores for 2 cameras).
+EOF2
+}
+for a in "$@"; do [[ $a == list ]] && { level_list; exit 0; }; done
 # Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
 [[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 
@@ -40,6 +100,10 @@ mse=""
 edge=""
 connections=32
 refine=""
+level=""
+graphs=""
+chain=""
+far=""
 restart=1
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -53,11 +117,31 @@ while [[ $# -gt 0 ]]; do
             [[ $connections =~ ^[0-9]+$ && $connections -ge 1 && $connections -le 32 ]] ||
               { echo "--gpu-connections must be 1 to 32" >&2; exit 1; } ;;
     --gpu-refine) refine=$2; shift 2
-            [[ $refine =~ ^[0-3]$ ]] || { echo "--gpu-refine must be 0, 1, 2 or 3" >&2; exit 1; } ;;
+            [[ $refine =~ ^[0-4]$ ]] || { echo "--gpu-refine must be 0 to 4" >&2; exit 1; } ;;
+    --gpu-level) level=$2; shift 2
+            level_settings "$level" > /dev/null || { echo "--gpu-level must be 0 to 5 (or list)" >&2; exit 1; } ;;
+    --graphs) graphs=$2; shift 2
+            [[ $graphs == [01] ]] || { echo "--graphs must be 0 or 1" >&2; exit 1; } ;;
+    --chain) chain=$2; shift 2
+            [[ $chain == [01] ]] || { echo "--chain must be 0 or 1" >&2; exit 1; } ;;
+    --far) far=$2; shift 2
+            [[ $far == on || $far == off ]] || { echo "--far must be on or off" >&2; exit 1; } ;;
     --no-restart) restart=0; shift ;;
     *) echo "unknown option $1" >&2; exit 1 ;;
   esac
 done
+
+# The level fills in whatever wasn't given explicitly.
+if [[ -n $level ]]; then
+  read -r l_refine l_graphs l_chain l_far <<< "$(level_settings "$level")"
+  refine=${refine:-$l_refine}; graphs=${graphs:-$l_graphs}; chain=${chain:-$l_chain}; far=${far:-$l_far}
+fi
+if [[ $graphs == 0 && -n $refine && $refine -ge 2 ]]; then
+  echo "Note: --gpu-refine $refine runs inside the stage graphs; with --graphs 0 it does nothing" >&2
+fi
+if [[ $refine == 4 && -f /usr/lib/libspectrum-gpu-apriltag.so ]] && ! grep -qa DecodeQuadsKernelF /usr/lib/libspectrum-gpu-apriltag.so; then
+  echo "Note: the installed detector has no float decode (detector-18): 4 acts as 3 or less" >&2
+fi
 
 case $which in
   bos) echo "Note: \"bos\" is now called \"gpu\" (2026-10-31 rename)"; which=gpu ;;
@@ -107,11 +191,26 @@ env_lines="Environment=CUDA_DEVICE_MAX_CONNECTIONS=$connections"$'\n'
 [[ -n $mse ]] && env_lines+="Environment=SPECTRUM_DETECTOR_MAX_LINE_FIT_MSE=$mse"$'\n'
 [[ -n $edge && $edge != 0 ]] && env_lines+="Environment=SPECTRUM_DETECTOR_EDGE_BORDER_PX=$edge"$'\n'
 [[ -n $refine && $refine != 0 ]] && env_lines+="Environment=SPECTRUM_DETECTOR_GPU_REFINE=$refine"$'\n'
+[[ $graphs == 0 ]] && env_lines+="Environment=SPECTRUM_DETECTOR_GRAPHS=0"$'\n'
+[[ $chain == 0 ]] && env_lines+="Environment=SPECTRUM_DETECTOR_CHAIN=0"$'\n'
 [[ $jpeg == nvjpg ]] && env_lines+="Environment=SPECTRUM_JPEG_DECODER=nvjpg"$'\n'
 printf '[Service]\n%s' "$env_lines" | sudo tee "$dropin" >/dev/null
 sudo systemctl daemon-reload
 
-echo "Selected $which detector${mwbd:+, min_white_black_diff $mwbd}${mse:+, max_line_fit_mse $mse}${edge:+, edge border $edge px}${jpeg:+, JPEG decoder $jpeg}${refine:+, GPU refine $refine}, $connections GPU connections"
+echo "Selected $which detector${level:+, GPU level $level}${mwbd:+, min_white_black_diff $mwbd}${mse:+, max_line_fit_mse $mse}${edge:+, edge border $edge px}${jpeg:+, JPEG decoder $jpeg}${refine:+, GPU refine $refine}${graphs:+, graphs $graphs}${chain:+, chain $chain}, $connections GPU connections"
+if [[ -n $level ]]; then
+  level_list | awk -v l="$level" '/^$/ { on = 0 } $1 ~ /^[0-5]$/ { on = ($1 == l) } on' | sed 's/^/  /'
+fi
+# Far search: a PhotonVision setting (saved in its robot state), live through its API.
+if [[ -n $far ]]; then
+  v=$([[ $far == on ]] && echo true || echo false)
+  if curl -s -m 10 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+       -d "{\"farSearch\": $v}" localhost:5800/api/robotState 2>/dev/null | grep -q 200; then
+    echo "Far search $far (PhotonVision robot state; live)"
+  else
+    echo "Couldn't reach PhotonVision: set far search $far in Settings > Robot state" >&2
+  fi
+fi
 if [[ $restart -eq 1 ]]; then
   sudo systemctl restart photonvision
 fi
