@@ -16,7 +16,16 @@
 
 #include "nvjpg_decoder.h"
 
+#include <dlfcn.h>
+#include <elf.h>
+#include <link.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
+
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
 
 #include <csetjmp>
 #include <cstdio>
@@ -353,9 +362,66 @@ int CopyBgr(SnjDecoder *d, int fd, uint8_t *bgr, int width, int height, size_t s
 
 }  // namespace
 
+// JetPack 7 (r39.2.1) decodes on one of the Orin's two NVJPG engines: libnvmm_jpeg asks the
+// decoder block (libnvmmlite_video attribute 0x1034) for instance 4, "both engines", as
+// (chip <= 10) ? 1 << 2 : 0; libnvmmlite_video only knows 1 (NVJPG1) and 2 (both, frames
+// alternating) and maps anything else to NVJPG0. So NVJPG1 was never opened (tegrastats
+// "NVJPG1 off"), where JetPack 6 used both. The fix, in this process's memory only (approved by
+// Allen 2026-10-30): the two "lsl w1, w1, #2" that make that 4 become "lsl w1, w1, #1", so it
+// asks for 2. Found by its exact surrounding instructions; patched only if exactly 2 are found,
+// else left alone (single engine, as before). Measured (4 threads, 1280x800): 194 -> 342
+// frames/s, pixels identical. SPECTRUM_NVJPG_DUAL=0 turns it off.
+static void PatchDualNvjpg() {
+  const char *off = std::getenv("SPECTRUM_NVJPG_DUAL");
+  if (off && std::strcmp(off, "0") == 0) {
+    std::cout << "971 jpeg: NVJPG dual-engine patch off (SPECTRUM_NVJPG_DUAL=0)" << std::endl;
+    return;
+  }
+  Dl_info info;
+  if (!dladdr(reinterpret_cast<void *>(&jpeg_CreateDecompress), &info) || !info.dli_fbase ||
+      !info.dli_fname || !std::strstr(info.dli_fname, "nvmm_jpeg")) {
+    std::cout << "971 jpeg: NVJPG dual-engine patch skipped (libnvmm_jpeg not found)" << std::endl;
+    return;
+  }
+  static const uint32_t kPattern[4] = {0x1a9f87e1, 0x91288264, 0x52800083, 0x531e7421};
+  constexpr uint32_t kMovAttr = 0x52820681;  // mov w1, #0x1034, 5 instructions after the lsl
+  constexpr uint32_t kLsl1 = 0x531f7821;     // lsl w1, w1, #1
+  const auto *eh = static_cast<const ElfW(Ehdr) *>(info.dli_fbase);
+  const auto *ph = reinterpret_cast<const ElfW(Phdr) *>(static_cast<const char *>(info.dli_fbase) + eh->e_phoff);
+  const uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+  std::vector<uint32_t *> sites;
+  for (int i = 0; i < eh->e_phnum; ++i) {
+    if (ph[i].p_type != PT_LOAD || !(ph[i].p_flags & PF_X)) continue;
+    auto *t = reinterpret_cast<uint32_t *>(base + ph[i].p_vaddr);
+    const size_t n = ph[i].p_memsz / 4;
+    for (size_t k = 0; k + 8 < n; ++k) {
+      if (std::memcmp(t + k, kPattern, sizeof kPattern) == 0 && t[k + 8] == kMovAttr) sites.push_back(t + k + 3);
+    }
+  }
+  if (sites.size() != 2) {
+    std::cout << "971 jpeg: NVJPG dual-engine patch skipped (" << sites.size()
+              << " matches in " << info.dli_fname << ", expected 2: a different JetPack?)" << std::endl;
+    return;
+  }
+  const uintptr_t page = static_cast<uintptr_t>(getpagesize());
+  for (uint32_t *w : sites) {
+    void *pg = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(w) & ~(page - 1));
+    if (mprotect(pg, page, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+      std::cout << "971 jpeg: NVJPG dual-engine patch failed (mprotect)" << std::endl;
+      return;
+    }
+    *w = kLsl1;
+    __builtin___clear_cache(reinterpret_cast<char *>(w), reinterpret_cast<char *>(w + 1));
+    mprotect(pg, page, PROT_READ | PROT_EXEC);
+  }
+  std::cout << "971 jpeg: NVJPG dual-engine patch applied (both engines, frames alternate)" << std::endl;
+}
+
 extern "C" {
 
 SNJ_API SnjDecoder *snj_create(void) {
+  static const bool patched = (PatchDualNvjpg(), true);  // once, before the first decoder
+  (void)patched;
   create_error.clear();
   // The runtime makes the primary context current on this thread; the driver-API calls
   // (EGL registration) need that.
