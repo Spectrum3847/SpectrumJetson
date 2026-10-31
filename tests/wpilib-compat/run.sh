@@ -15,7 +15,7 @@
 # Exit 0 if all match, 1 if anything changed (each named), 2 if GitHub couldn't be read.
 set -uo pipefail
 TAG=${1:-v2027.0.0-alpha-8}
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 2
 command -v gh >/dev/null || { echo "needs gh (GitHub CLI)" >&2; exit 2; }
 
 tree=$(timeout 60 gh api "repos/wpilibsuite/allwpilib/git/trees/$TAG?recursive=1" --jq '.tree[].path') ||
