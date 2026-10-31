@@ -37,10 +37,20 @@ constexpr int kWpiPixfmtMjpeg = 1;  // WPI_PIXFMT_MJPEG
 
 namespace wpi_compat {
 
-// WPI_Now in its own units, or 0 if no WPILib is loaded (a test program).
+// WPI_Now in its own units, or 0 if no WPILib is loaded (a test program). The JVM loads WPILib's
+// libraries RTLD_LOCAL, so a global lookup doesn't see them (2026-10-30: the frame ages were
+// missing); look inside the already-loaded libwpiutil (RTLD_NOLOAD: never load a second copy).
 inline int64_t Now() {
   using NowFn = int64_t (*)();
-  static NowFn fn = reinterpret_cast<NowFn>(dlsym(RTLD_DEFAULT, "WPI_Now"));
+  static NowFn fn = [] {
+    if (void *f = dlsym(RTLD_DEFAULT, "WPI_Now")) return reinterpret_cast<NowFn>(f);
+    for (const char *lib : {"libwpiutil.so", "libwpiutiljni.so"}) {
+      if (void *h = dlopen(lib, RTLD_LAZY | RTLD_NOLOAD)) {
+        if (void *f = dlsym(h, "WPI_Now")) return reinterpret_cast<NowFn>(f);
+      }
+    }
+    return static_cast<NowFn>(nullptr);
+  }();
   return fn ? fn() : 0;
 }
 
