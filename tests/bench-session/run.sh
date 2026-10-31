@@ -14,8 +14,8 @@
 #              (tests/perf-snapshot.sh, then a perf profile per thread: scripts/jetson/profile-cpu.sh),
 #              GPU %, power, temperature
 #   graphs     CUDA graphs on/off A/B, interleaved through /tmp/spectrum-detector-graphs (no restart)
-#   gpurefine  RefineEdges on the GPU (detector-15) on/off A/B, interleaved through
-#              /tmp/spectrum-detector-gpu-refine (no restart): PhotonVision CPU (all threads and camera
+#   gpurefine  SPECTRUM_DETECTOR_GPU_REFINE 0 / 2 (detector-16) / 3 (detector-17), interleaved, one
+#              PhotonVision restart per run (read at start): PhotonVision CPU (all threads and camera
 #              threads), detect avg/max, latency, GPU %. Only calibrated cameras gain (notes which aren't)
 #   3d         PhotonVision's 3D mode (solvePNPEnabled) on vs off with tags, through PhotonVision's
 #              websocket (the same message the UI sends); CPU and latency
@@ -429,12 +429,17 @@ step_graphs() {
   if [[ $GRAPHS_ORIG == absent ]]; then rm -f "$GRAPHS_FILE"; else echo "$GRAPHS_ORIG" > "$GRAPHS_FILE"; fi
 }
 
-# RefineEdges on the GPU (detector-15) on/off, live through its switch file (re-read by the
-# detector). graph_bench: about half the process CPU per busy calibrated frame, same wall time; on an
-# uncalibrated camera it costs ~+130 us wall for the extra GPU wait. So it needs each camera
-# calibrated at the resolution it streams; the per-camera check goes in the notes.
+# GPU refine modes, 3-way interleaved: SPECTRUM_DETECTOR_GPU_REFINE 0 (CPU corners, refine and
+# decode), 2 (detector-16: corners + RefineEdges in stage 3's graph), 3 (detector-17: + the quad
+# decode in the graph). 2 and 3 are read once at start (recorded into the stage graphs), so every
+# mode is a drop-in change (08-select-detector.sh --gpu-refine, other options kept) and a
+# PhotonVision restart; the live switch file is removed so it can't override. graph_bench (calibrated,
+# busy): process CPU 1045 / 426 / 132 us a frame. Uncalibrated cameras run the CPU path in every mode,
+# so the per-camera calibration check goes in the notes.
 step_gpurefine() {
-  local r v l
+  local r v lib nvlib args mwbd mse jpeg conn edge modes m since
+  lib=$HOME/build/gpu-detector/libspectrum-gpu-apriltag.so
+  nvlib=$HOME/build/gpu-detector/libspectrumnvjpg.so
   [[ -f $OUT/cameras.tsv ]] || tmo 120 python3 "$HERE/cameras.py" inventory "$OUT" "$REPO" > /dev/null
   echo "  calibration per camera (config DB against the streaming resolution):"
   tmo 60 python3 "$PVPY" calib "$OUT/cameras.tsv" > "$OUT/.calib" 2>&1 || echo "  calibration check failed"
@@ -442,17 +447,47 @@ step_gpurefine() {
     [[ -n $state ]] || { echo "    $cam"; continue; }
     note "$cam @$port: streaming $now, calibrations $res: $state"
   done < "$OUT/.calib"
-  grep -q UNCALIBRATED "$OUT/.calib" && note "uncalibrated cameras above don't gain from GPU refine (they run it in the A/B anyway)"
-  note "switch $REFINE_FILE was: $REFINE_ORIG (env SPECTRUM_DETECTOR_GPU_REFINE in the drop-in: $(grep -o 'SPECTRUM_DETECTOR_GPU_REFINE=[^ "]*' "$DROPIN" 2>/dev/null || echo unset))"
-  ask "TAGS: every camera at tags; leave them still for the A/B. GPU refine only helps cameras CALIBRATED at their active resolution (PhotonVision > Cameras > Calibration); uncalibrated ones are listed in results.md." || return
+  grep -q UNCALIBRATED "$OUT/.calib" && note "uncalibrated cameras above run the CPU path in every mode (no gain from 2/3)"
+  note "was: env SPECTRUM_DETECTOR_GPU_REFINE in the drop-in: $(grep -o 'SPECTRUM_DETECTOR_GPU_REFINE=[^ "]*' "$DROPIN" 2>/dev/null || echo unset); switch $REFINE_FILE: $REFINE_ORIG"
+  if ! grep -q -- '--gpu-refine' "$REPO/scripts/jetson/08-select-detector.sh" || ! grep -qa TakeGraphCorners /usr/lib/libspectrum-gpu-apriltag.so; then
+    note "skipped: the installed detector has no in-graph refine (detector-16)"; return 0
+  fi
+  modes="0 2"
+  if grep -qa PrepareGpuDecode /usr/lib/libspectrum-gpu-apriltag.so; then modes="0 2 3"
+  else note "the installed detector has no in-graph decode (detector-17): modes 0 and 2 only"; fi
+  # 08-select-detector.sh reinstalls the library from ~/build: only if that's what's installed now
+  if ! cmp -s "$lib" /usr/lib/libspectrum-gpu-apriltag.so || { [[ -f $nvlib ]] && ! cmp -s "$nvlib" /usr/lib/libspectrumnvjpg.so; }; then
+    note "skipped: ~/build/gpu-detector differs from the installed detector; 08-select-detector.sh would swap it"; return 0
+  fi
+  [[ $(findmnt -n -o FSTYPE /) != overlay ]] || { note "skipped: ro-root is on"; return 0; }
+  # keep every other option as it is now
+  mwbd=$(sed -En 's/^Environment=SPECTRUM_(DETECTOR|971)_MIN_WHITE_BLACK_DIFF=//p' "$DROPIN" 2>/dev/null)
+  mse=$(sed -En 's/^Environment=SPECTRUM_(DETECTOR|971)_MAX_LINE_FIT_MSE=//p' "$DROPIN" 2>/dev/null)
+  edge=$(sed -En 's/^Environment=SPECTRUM_(DETECTOR|971)_EDGE_BORDER_PX=//p' "$DROPIN" 2>/dev/null)
+  jpeg=$(sed -n 's/^Environment=SPECTRUM_JPEG_DECODER=//p' "$DROPIN" 2>/dev/null)
+  conn=$(sed -n 's/^Environment=CUDA_DEVICE_MAX_CONNECTIONS=//p' "$DROPIN" 2>/dev/null)
+  args=()
+  [[ -n $mwbd ]] && args+=(--mwbd "$mwbd")
+  [[ -n $mse ]] && args+=(--mse "$mse")
+  [[ -n $edge ]] && args+=(--edge "$edge")
+  [[ -n $jpeg ]] && args+=(--jpeg "$jpeg")
+  [[ -n $conn ]] && args+=(--gpu-connections "$conn")
+  ask "TAGS: every camera at tags; leave them still for the A/B (modes ${modes// /, }, one PhotonVision restart each, ~$((ROUNDS * $(wc -w <<< "$modes") * (SECS + 90) / 60 + 1)) min). Only cameras CALIBRATED at their active resolution use 2/3 (PhotonVision > Cameras > Calibration); uncalibrated ones are listed in results.md." || return
+  rm -f "$REFINE_FILE"
   for ((r = 1; r <= ROUNDS; r++)); do
-    for v in 1 0; do
-      echo "$v" > "$REFINE_FILE"
-      echo "  gpurefine=$v (the detector re-reads the switch)"
-      settle; measure "gpu refine $([[ $v == 1 ]] && echo on || echo off)" "$r" || return
+    m=$modes
+    ((r % 2 == 0)) && m=$(tr ' ' '\n' <<< "$modes" | tac | paste -sd ' ')  # alternate the order
+    for v in $m; do
+      DROPIN_CHANGED=1
+      tmo 60 "$REPO/scripts/jetson/08-select-detector.sh" gpu "${args[@]}" --gpu-refine "$v" --no-restart > /dev/null || return 1
+      echo "  restarting PhotonVision with GPU refine mode $v"
+      since=$(date '+%Y-%m-%d %H:%M:%S')
+      restart_pv || note "mode $v round $r: not every camera came back after the restart"
+      sudo -n journalctl -u photonvision --since "$since" -o cat --no-pager 2>/dev/null | grep -q 'detector loaded' ||
+        note "mode $v round $r: no 'detector loaded' line since the restart"
+      settle; measure "gpu refine $v" "$r" || return
     done
   done
-  if [[ $REFINE_ORIG == absent ]]; then rm -f "$REFINE_FILE"; else echo "$REFINE_ORIG" > "$REFINE_FILE"; fi
 }
 
 # Far search (photonvision-55) on/off, live through Settings > Robot state's endpoint. The TXMAN1
@@ -713,7 +748,7 @@ sudo -n true 2>/dev/null || { echo "Needs passwordless sudo (run 'sudo true' fir
 echo "Bench session: ${STEPS[*]} -> $OUT  (window ${SECS}s, ${ROUNDS} rounds; Ctrl-C puts everything back)"
 
 declare -A LIMIT=([inventory]=300 [far]=$((ROUNDS * 2 * (SECS + 90) + 600)) [baseline]=900 [graphs]=$((ROUNDS * 2 * (SECS + 90) + 600))
-                  [gpurefine]=$((ROUNDS * 2 * (SECS + 90) + 780))
+                  [gpurefine]=$((ROUNDS * 3 * (SECS + 200) + 900))
                   [3d]=$((ROUNDS * 2 * (SECS + 120) + 600)) [rt]=$((4 * ROUNDS * (RT_SECS + 15) + 900))
                   [edge]=2400 [usb]=2400
                   [stills]=$((5 * 3 * 2 * (STILL_SECS + 90) + 600)))

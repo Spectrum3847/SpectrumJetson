@@ -4,7 +4,7 @@
 # Run ON THE JETSON. Both builds have the same Java API.
 #
 # Usage: 08-select-detector.sh gpu|gpu-4143 [--mwbd N] [--jpeg nvjpg|turbo] [--mse N]
-#                              [--edge N] [--gpu-connections N] [--no-restart]
+#                              [--edge N] [--gpu-connections N] [--gpu-refine N] [--no-restart]
 #   gpu       our GPU detector: Austin Schuh's CUDA AprilTag code from frc971/bos + our patches
 #             (07-build-gpu-detector.sh). The one the robot uses.
 #   gpu-4143  the older FRC-Team-4143/GpuDetectorJNI build + our patches (05-build-gpudetector.sh)
@@ -22,19 +22,24 @@
 #                    32; CUDA's own default is 8). With 4 cameras, runs with 32 had ~0.5 ms
 #                    lower worst-frame detect times on average: likely but unproven, since the
 #                    same setting varies 2 ms between restarts. No CPU or GPU cost.
+#   --gpu-refine N   SPECTRUM_DETECTOR_GPU_REFINE, read at start (gpu build only; default 0 = the CPU
+#                    path): 1 RefineEdges on the GPU (detector-15), 2 corners and RefineEdges in
+#                    stage 3's graph (detector-16), 3 the decode in the graph too (detector-17).
+#                    0 in /tmp/spectrum-detector-gpu-refine turns them off live.
 # Options not given go back to their defaults.
 # (Fault injection for testing: echo N > /tmp/spectrum-detector-fault-every; rm it to stop.)
 set -euo pipefail
 # Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
 [[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 
-which=${1:?usage: $0 gpu|gpu-4143 [--mwbd N] [--jpeg nvjpg|turbo] [--mse N] [--edge N] [--gpu-connections N] [--no-restart]}
+which=${1:?usage: $0 gpu|gpu-4143 [--mwbd N] [--jpeg nvjpg|turbo] [--mse N] [--edge N] [--gpu-connections N] [--gpu-refine N] [--no-restart]}
 shift
 mwbd=20  # the robot config (JetPack 7 setup ran at 5 by leaving it out: detect 2.4 vs 1.6 ms)
 jpeg=""
 mse=""
 edge=""
 connections=32
+refine=""
 restart=1
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -47,6 +52,8 @@ while [[ $# -gt 0 ]]; do
     --gpu-connections) connections=$2; shift 2
             [[ $connections =~ ^[0-9]+$ && $connections -ge 1 && $connections -le 32 ]] ||
               { echo "--gpu-connections must be 1 to 32" >&2; exit 1; } ;;
+    --gpu-refine) refine=$2; shift 2
+            [[ $refine =~ ^[0-3]$ ]] || { echo "--gpu-refine must be 0, 1, 2 or 3" >&2; exit 1; } ;;
     --no-restart) restart=0; shift ;;
     *) echo "unknown option $1" >&2; exit 1 ;;
   esac
@@ -99,11 +106,12 @@ env_lines="Environment=CUDA_DEVICE_MAX_CONNECTIONS=$connections"$'\n'
 [[ -n $mwbd ]] && env_lines+="Environment=SPECTRUM_DETECTOR_MIN_WHITE_BLACK_DIFF=$mwbd"$'\n'
 [[ -n $mse ]] && env_lines+="Environment=SPECTRUM_DETECTOR_MAX_LINE_FIT_MSE=$mse"$'\n'
 [[ -n $edge && $edge != 0 ]] && env_lines+="Environment=SPECTRUM_DETECTOR_EDGE_BORDER_PX=$edge"$'\n'
+[[ -n $refine && $refine != 0 ]] && env_lines+="Environment=SPECTRUM_DETECTOR_GPU_REFINE=$refine"$'\n'
 [[ $jpeg == nvjpg ]] && env_lines+="Environment=SPECTRUM_JPEG_DECODER=nvjpg"$'\n'
 printf '[Service]\n%s' "$env_lines" | sudo tee "$dropin" >/dev/null
 sudo systemctl daemon-reload
 
-echo "Selected $which detector${mwbd:+, min_white_black_diff $mwbd}${mse:+, max_line_fit_mse $mse}${edge:+, edge border $edge px}${jpeg:+, JPEG decoder $jpeg}, $connections GPU connections"
+echo "Selected $which detector${mwbd:+, min_white_black_diff $mwbd}${mse:+, max_line_fit_mse $mse}${edge:+, edge border $edge px}${jpeg:+, JPEG decoder $jpeg}${refine:+, GPU refine $refine}, $connections GPU connections"
 if [[ $restart -eq 1 ]]; then
   sudo systemctl restart photonvision
 fi
