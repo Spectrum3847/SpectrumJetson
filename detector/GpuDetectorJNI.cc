@@ -792,15 +792,15 @@ constexpr long kCheckEvery = 240;
 
 // One hardware decoder per camera thread (a decoder isn't thread-safe; PhotonVision decodes
 // each camera's frames on that camera's own thread).
-// JetPack 7 (r39) drives one NVJPG engine (the nvgpu driver exposes nvjpg0 only; JetPack 6 used
-// both, ~37% each with 4 cameras). With 2 cameras it was already 55% busy, so more cameras would
-// queue on it. The first SPECTRUM_NVJPG_MAX_CAMERAS decode threads (default 2) get it; the rest
-// decode with libjpeg-turbo on the CPU, which has the headroom. A thread that ends frees its place.
+// Every camera decodes on NVJPG by default: on JetPack 7 both engines are used again
+// (NvJpgDecoder.cc's dual-engine fix), as on JetPack 6. SPECTRUM_NVJPG_MAX_CAMERAS=N caps it: the
+// first N decode threads get the hardware, the rest decode with libjpeg-turbo on the CPU. A thread
+// that ends frees its place.
 std::atomic<int> nvjpg_users{0};
 int MaxNvjpgCameras() {
   static const int n = [] {
     const char *e = std::getenv("SPECTRUM_NVJPG_MAX_CAMERAS");
-    return e ? std::max(0, std::atoi(e)) : 2;
+    return e ? std::max(0, std::atoi(e)) : 1000;
   }();
   return n;
 }
@@ -954,8 +954,8 @@ int NvjpgDecode(const uint8_t *jpeg, size_t size, cv::Mat &mat, bool bgr) {
     if (nvjpg_users.fetch_add(1) >= MaxNvjpgCameras()) {
       nvjpg_users--;
       std::cout << "971 jpeg: " << MaxNvjpgCameras()
-                << " camera(s) already decode on the NVJPG engine (one on JetPack 7); this camera "
-                   "uses libjpeg-turbo (SPECTRUM_NVJPG_MAX_CAMERAS)"
+                << " camera(s) already decode on NVJPG (SPECTRUM_NVJPG_MAX_CAMERAS); this camera "
+                   "uses libjpeg-turbo"
                 << std::endl;
       t.unavailable = true;
       return SNJ_UNSUPPORTED;
