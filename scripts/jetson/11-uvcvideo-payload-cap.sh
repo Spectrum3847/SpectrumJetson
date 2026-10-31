@@ -42,11 +42,12 @@ FILES="Kconfig Makefile uvc_ctrl.c uvc_debugfs.c uvc_driver.c uvc_entity.c uvc_i
 
 reload() {
   echo "==> Reloading the camera driver (PhotonVision stops for a few seconds)"
-  sudo systemctl stop photonvision
+  local pv=; systemctl cat photonvision.service &>/dev/null && pv=1   # not yet on a fresh flash
+  [[ -z $pv ]] || sudo systemctl stop photonvision
   sudo modprobe -r uvcvideo
   sudo modprobe uvcvideo
   sleep 2
-  sudo systemctl start photonvision
+  [[ -z $pv ]] || sudo systemctl start photonvision
   echo "    now loaded: $(modinfo -F filename uvcvideo), payload_cap=$(cat /sys/module/uvcvideo/parameters/payload_cap 2>/dev/null || echo "(stock driver)")"
 }
 
