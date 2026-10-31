@@ -2389,6 +2389,35 @@ Individual flags given as well (`--gpu-refine`, `--graphs`, `--chain`, `--far`) 
   measurement now has power: tegrastats `VDD_IN` (board) and `VDD_CPU_GPU_CV` (CPU+GPU rail),
   average and max, W.
 
+#### The decode in float (`detector-18`, off by default)
+
+- **What:** `SPECTRUM_DETECTOR_GPU_REFINE=4` is `detector-17` with the decode kernel in float
+  (`DecodeQuadsKernelF`): the homography, sampling, gray models and sharpening in float. It is
+  generated from the double kernel with every double made float. The decode kernel goes from
+  ~269 to **~87 µs** of GPU a frame (nsys, TXMAN Q17).
+- **Results against `detector-16`** (`graph_bench --out`, 600 frames, 12 cameras: fieldcal-synth x4
+  with calibration, synthetic-near-far, ceiling, TXMAN1 Q17/Q24/Q32 left and right):
+  - **ids and hamming identical**: 5,897 detections, none gained, lost or changed.
+  - Decision margins: up to 0.70 apart (≤0.5% relative); most aren't bit-equal.
+  - Corners: ≤0.0005 px apart.
+  - TXMAN1 full replays (`--graphs`): the same 38,482 sightings as `detector-17`. Margins up to
+    2.5 apart and corners up to 0.01 px at the CSV's precision.
+- **Accuracy** (`judge.py`, all TXMAN1, against CPU refinement):
+  - in-frame p50 1.282 → 1.281 (CI −0.009..+0.005), p90 9.135 → 9.122 (CI −0.124..+0.125).
+  - static jitter 0.084 → 0.085 (CI −0.001..+0.003).
+  - Not worse.
+- **Measured** (`graph_bench`, the three interleaved x 8, full clocks, PhotonVision stopped; thread
+  CPU / Detect wall / process CPU, µs):
+
+  | Recording | `detector-16` (`=2`) | `detector-17` (`=3`) | `detector-18` (`=4`) |
+  | --- | --- | --- | --- |
+  | TXMAN1 Q17 orin-left | 172 / 1952 / 427 | 130 / 2134 / 133 | **130 / 1958 / 134** |
+  | TXMAN1 Q24 orin-right | 170 / 1809 / 377 | 128 / 1972 / 131 | **127 / 1811 / 130** |
+
+  `=4` keeps `=3`'s CPU (−87% against the CPU path, the worker threads unused) at `=2`'s wall
+  time. It's the best of the three for calibrated cameras, but the margins aren't the CPU's
+  bits.
+
 #### Where the remaining CPU goes (4 cameras, 1.2 cores)
 
 - **`tests/cpu-profile.sh`:** the 4 camera threads (15–25% of a core each) split their samples
