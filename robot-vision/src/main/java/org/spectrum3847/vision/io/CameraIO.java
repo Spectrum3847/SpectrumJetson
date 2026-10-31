@@ -17,6 +17,14 @@ public interface CameraIO {
     /** The camera's name (as in PhotonVision). */
     String name();
 
+    /**
+     * The camera's calibration if known: {camera matrix (row-major 3x3), distortion coefficients},
+     * PhotonLib's {@code getCameraMatrix()} / {@code getDistCoeffs()}. Used by the mount check.
+     */
+    default java.util.Optional<double[][]> calibration() {
+        return java.util.Optional.empty();
+    }
+
     /** What one update gives. Plain fields, so an AdvantageKit LoggableInputs can wrap it. */
     class Inputs {
         /** PhotonLib's view: results arriving and PhotonVision's heartbeat moving. */

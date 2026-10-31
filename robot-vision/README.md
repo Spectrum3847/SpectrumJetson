@@ -292,6 +292,73 @@ The photonvision-82 alerts stay up until robot code restarts, so the pit sees th
 
 Thresholds are public fields on the `VisionHealth` object.
 
+A camera mount that's wrong in robot code also raises an alert: see [Mount check](#mount-check).
+
+## Mount check
+
+A camera knocked, re-aimed, or measured wrong moves every pose from that camera, while each tag
+detection still looks fine, so no gate catches it. At TXMAN1, team 8515's code had the left camera
+at yaw 90° when it was at 84–87°, and the right camera was re-aimed between days (pitch −19° to
+−25°); nothing noticed. `MountCheck` (on by default in `VisionSystem`) does.
+
+**How it works.** For each frame (at most 25 a second per camera), it solves the camera's own field
+pose from vision alone: a 6-DoF PnP on the tag corners with the camera's calibration (PhotonLib's
+camera matrix, read automatically), or PhotonVision's own solve without it. Frames whose solve is
+too uncertain (far or bunched-up tags, a lone tag that fits two ways) are left out. The camera's
+pose implies a mount, compared with the one in code:
+
+- **Height, roll and pitch** need no reference: the robot is flat on the floor, so they are the
+  camera's own field height and tilt. Every usable frame checks them.
+- **x, y and yaw** need the robot's pose from something other than that camera:
+  - other cameras seeing tags at the same time (moved to one time with the estimator's motion).
+    The largest group of cameras that agree with each other is the reference, so **one bad camera
+    among three or more is the odd one out**;
+  - two cameras that disagree: one of them is wrong. It's the one whose poses disagree more with
+    the pose estimator, and whose height, roll or pitch are off;
+  - otherwise the pose estimator, but only for a camera that gave less than 60% of its recent
+    measurements (otherwise the estimator's pose is mostly that camera's own).
+
+Samples are taken only with the robot slow (< 1 m/s, < 0.75 rad/s). The estimate is the median of
+each camera's last 400 samples. A dimension is **SUSPECT** when it's more than **2° / 4 cm** off
+(plus two standard errors of the median) after 40 samples, **BAD** at twice that. Settings are
+public fields on `vision.mountCheck().config`.
+
+**Pre-match check.** Disabled, robot still, every camera seeing tags for a few seconds (2 s at
+25 Hz fills 40 samples):
+
+```java
+for (var r : vision.health().mountCheck()) {        // or vision.mountCheck().reports()
+    System.out.println(r.camera() + " " + r.status() + ": " + r.message());
+    // r.estimated().code(): the measured mount as Java, to paste into robot code
+}
+```
+
+| Where | What |
+|---|---|
+| Alert (Elastic, AdvantageScope) | "Camera X mount wrong: yaw −5.2 deg (cameras:a+b); measured ..." (warning when SUSPECT, error when BAD). Stays up until `mountCheck().reset()`, so the pit sees it after a match. |
+| `/SpectrumVision/mountCheck/summary` | "left OK, right BAD (yaw −5.2 deg)" (the Jetson's Match Ready view can show it) |
+| `/SpectrumVision/mountCheck/<camera>/` | `status` (NO_DATA/OK/SUSPECT/BAD), `message`, `estimated` and `error` (x, y, z m, roll, pitch, yaw deg), `estimatedMount` (Pose3d, robot-relative: AdvantageScope draws it), `code`, `samples`, `reference`, `disagreement` (m, deg from the other cameras) |
+
+After fixing a mount (or changing it with `camera.setRobotToCamera`, which restarts that camera's
+samples on its own), call `vision.mountCheck().reset()`. A turret camera's mount moves:
+`vision.mountCheck().ignore("Turret")`. Off: `.mountCheck(false)` on the builder.
+
+**What it showed on TXMAN1** (`MountCheckTxman1Test`, 8515's detections replayed with the robot's
+logged pose; the mounts their code had): orin-left BAD in all 6 matches (yaw 82–87° measured vs
+90°, roll +1–2°; on Friday also height 0.48 m vs the placeholder's 0.25 m), orin-right BAD in 5
+(pitch −24° in Q32 against −18° in code: the re-aim; Q27 had too few usable frames). That agrees
+with the mounts tests/field-replay solved offline.
+
+**Limits.**
+- One camera alone: only height, roll and pitch, unless the estimator has another source (more
+  cameras, or a camera that rarely feeds it). Its x/y/yaw then report NaN, reference "none".
+- Two cameras that each see tags only on their own side (8515's): x/y/yaw against the estimator,
+  which those same cameras fed, so errors read smaller than they are.
+- A tilted robot (on a ramp, a bump, a lifted wheel) looks like a pitch or roll error; the check
+  samples only when slow, but it can't tell a tilted floor.
+- Cost: about 25–80 µs a frame on a laptop (one PnP, rate-limited to 25 Hz a camera); several
+  times that on a roboRIO.
+
 ## Robot-code checklist
 
 What robot code must get right, whichever library it uses:

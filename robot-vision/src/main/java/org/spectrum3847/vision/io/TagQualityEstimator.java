@@ -126,6 +126,11 @@ public class TagQualityEstimator {
         return new double[] {cx - fx * p.getY() / p.getX(), cy - fy * p.getZ() / p.getX()};
     }
 
+    /** fx, fy, cx, cy. */
+    public double[] focal() {
+        return new double[] {fx, fy, cx, cy};
+    }
+
     /** The tag's corners in its own frame, in detection order (PhotonLib's TargetModel). */
     public Translation3d[] tagCorners() {
         double s = tagSize / 2;
