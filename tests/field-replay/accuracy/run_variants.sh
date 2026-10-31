@@ -4,10 +4,10 @@
 #   tests/field-replay/accuracy/run_variants.sh [DATA [VARIANT...]]   DATA default /data/scratch/txman1
 # Writes DATA/replay/<match>/out/<variant>/<session>.{csv,log}; resumes. Only one detector-replay on the
 # Jetson at a time, ANYONE's: before each replay it waits (10 s polls, 2 h deadline) until no
-# detector-replay runs and tj < 85 C; nice 19; paused (SIGSTOP) above 92 C until under 85 C.
+# detector-replay or graph_bench runs and tj < 85 C; nice 19; paused (SIGSTOP) above 92 C until under 85 C.
 # Whole run under an 8 h deadline. Doesn't rebuild: build detector-replay first.
 set -uo pipefail
-BUILD=$HOME/build/gpu-detector
+BUILD=${BUILD:-$HOME/build/gpu-detector}  # BUILD=dir to replay another build
 DATA=${1:-/data/scratch/txman1}
 shift || true
 if [[ -z ${ACC_UNDER_TIMEOUT:-} ]]; then
@@ -34,16 +34,21 @@ declare -A OPTS=(
   [a_mse2.5_cos0.996]="$B --mse 2.5 --cos 0.996"
   [a_mse10_cos0.996]="$B --mse 10 --cos 0.996"
   [a_mse20_cos0.996]="$B --mse 20 --cos 0.996"
+  # Decimation 1.5 emulated (frames resized 4/3 before the detector's fixed /2), RESULTS.md "dec 1.5"
+  [d15s_base]="$B --mse 10"
+  [d15s_far]="--mwbd 20 --mse 10"
+  [d15s_s133]="$B --mse 10 --scale 1.3333333333"
+  [d15s_s133_far]="--mwbd 20 --mse 10 --scale 1.3333333333"
 )
 ORDER=(a_base a_mse5 a_mse7.5 a_sub1 a_sub2 a_sub3 a_edgefit a_edgefitu a_edgefitu_sub2 a_norefine
        a_mse10_cos0.94 a_mse10_cos0.996 a_mse2.5_cos0.94 a_mse20_cos0.94 a_mse2.5_cos0.996 a_mse20_cos0.996)
 (($#)) && ORDER=("$@")
 
 tj() { timeout 5 tegrastats --interval 1000 2>/dev/null | head -1 | grep -o 'tj@[0-9.]*' | cut -d@ -f2; }
-wait_turn() {  # no detector-replay running and tj < 85 C, polled every 10 s, 2 h deadline
+wait_turn() {  # no detector-replay or graph_bench running and tj < 85 C, polled every 10 s, 2 h deadline
   local t
   for _ in $(seq 720); do
-    if ! pgrep -f "$BUILD/detector-replay" >/dev/null; then
+    if ! pgrep -x detector-replay >/dev/null && ! pgrep -f graph_bench >/dev/null; then
       t=$(tj)
       [[ -z $t ]] && return 0
       awk -v t="$t" 'BEGIN{exit !(t < 85)}' && return 0

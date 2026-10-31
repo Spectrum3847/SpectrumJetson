@@ -32,6 +32,8 @@ ap.add_argument("root")
 ap.add_argument("--matches", default="")
 ap.add_argument("--base", default="base")
 ap.add_argument("--json", default="")
+ap.add_argument("--variants", default="", help="only these variants (comma list; the base always)")
+ap.add_argument("--compare", default="", help="variants to compare with the base by size and range (far sightings included)")
 ap.add_argument("--pose", default="odom", help="odom (default) or fused: see fieldgt.Robot")
 args = ap.parse_args()
 P = print
@@ -330,6 +332,8 @@ for match, mm in M.items():
     # Every variant's sightings with their errors and features.
     for vdir in sorted(glob.glob(os.path.join(mdir, "out", "*"))):
         variant = os.path.basename(vdir)
+        if args.variants and variant != args.base and variant not in args.variants.split(","):
+            continue
         d, tmv = load_variant(mdir, variant, frames) if variant != args.base else (base, tm)
         if tmv:
             times.setdefault(variant, []).append(tmv)
@@ -596,5 +600,20 @@ for x in ("mse2.5", "mse15", "mse20"):
     for nm, r in ((args.base, B), (x, X)):
         gd = r["good"] & ~r["far"]
         P(f"  {nm}: good {gd.sum()}, side p1 {pct(r['side'][gd], 1):.1f} px, range p99 {pct(r['range'][gd], 99):.2f} m, max {pct(r['range'][gd], 100):.2f} m")
+for x in [v for v in args.compare.split(",") if v in R]:
+    X = R[x]
+    P(f"\n=== {args.base} vs {x}: size and range (far sightings included; good / bad by robot pose, in-frame)")
+    for nm, r, o in ((f"only {args.base}", B, ~np.isin(B["key"], X["key"])), (f"only {x}", X, ~np.isin(X["key"], B["key"]))):
+        if o.sum() == 0:
+            P(f"  {nm}: none"); continue
+        li = o & np.isfinite(r["loo"])
+        P(f"  {nm}: {o.sum()} (good {(o & r['good']).sum()}, bad {(o & r['bad']).sum()}); side px p10/p50/p90 "
+          f"{pct(r['side'][o], 10):.1f}/{pct(r['side'][o], 50):.1f}/{pct(r['side'][o], 90):.1f}, "
+          f"range m p50/p90/max {pct(r['range'][o], 50):.2f}/{pct(r['range'][o], 90):.2f}/{pct(r['range'][o], 100):.2f}; "
+          f"in-frame {li.sum()} checked, {(li & (r['loo'] > T_LOO)).sum()} bad, p50 {pct(r['loo'][li], 50):.2f} px")
+    for nm, r in ((args.base, B), (x, X)):
+        gd = r["good"]
+        P(f"  {nm}: {len(r['good'])} sightings, good {gd.sum()}, bad {r['bad'].sum()}; good side p1 {pct(r['side'][gd], 1):.1f} px, "
+          f"min {pct(r['side'][gd], 0):.1f}; range p99 {pct(r['range'][gd], 99):.2f} m, max {pct(r['range'][gd], 100):.2f} m")
 if args.json:
     json.dump({"summary": summary, "info": info, "T_TOT": T_TOT, "T_SHAPE": T_SHAPE}, open(args.json, "w"), indent=1, default=float)

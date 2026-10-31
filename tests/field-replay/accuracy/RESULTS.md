@@ -157,3 +157,44 @@ sightings. It's a gate like mse.
    recordings have only 13 usable still stretches, and odometry can't find them). A one-minute
    still capture at 2–3 distances per camera, at two exposures and two JPEG qualities, would give
    the static-jitter judge thousands of tag-stretches instead of 32.
+
+## Checkpoint 5: decimation 1.5, emulated (2026-10-31)
+
+Would a quad search at 1/1.5 resolution (instead of the detector's fixed 1/2) be worth building?
+Emulated with `detector-replay --scale 1.3333`: each frame resized 4/3 (bilinear, padded to
+1712x1072) and the calibration with it, so the detector's /2 is /1.5 of the camera frame; corners
+mapped back x3/4. The emulation also refines corners on the interpolated frame (a real dec-1.5
+detector would refine at native resolution), so `basecorners.py` makes a "_bc" copy that takes the
+base's corners wherever the base found the same tag: that isolates "finds more tags" from "moves
+corners". All 6 matches (13 sessions), `--mwbd 20 --mse 10`, replays `run_variants.sh d15s_*` with a
+fresh base and far run in the same conditions. Range from `../analyze.py --compare` (robot-pose
+good/bad; single-tag distance).
+
+| Variant (vs base, far off) | Sightings | Lost (checkable, in-frame median) | Gained (checkable, median, >20.4 px) | Common corners, in-frame p50 | Detect ms/frame |
+|---|---|---|---|---|---|
+| base (dec 2) | 38,489 | | | 1.269 | 6.03 |
+| far search on | 39,844 (+3.5%) | 0 | 1,355 (383, **0.90 px**, 9) | identical | 6.07 + 2.37 far |
+| dec 1.5 | 40,453 (+5.1%) | 802 (341, 3.11 px) | 2,766 (1,345, 1.09 px, 49) | 1.253 (CI −0.031..−0.003) | 12.80 (6.14 is the CPU resize) |
+| dec 1.5, base corners | 40,453 | same | same (1.11 px) | identical | |
+| dec 1.5 + far | 41,244 (+7.2%) | 748 (323, 3.18 px) | 3,503 (1,500, 1.10 px, 58) | 1.253 (CI −0.030..−0.002) | 14.71 + 2.30 far |
+| dec 1.5 + far, vs dec 2 + far | +1,400 net | 1,023 (431, 2.52 px) | 2,423 (1,193, 1.19 px, 51) | 1.250 → 1.234 | |
+
+Robot-pose labels: dec 1.5 has 29,668 good (base 27,869, far 28,942; +1,799 vs +1,073) and 4,314
+bad (base 4,143). Static jitter unchanged (0.084 → 0.085 px, n.s.).
+
+- **It doesn't add range.** Good side p1 18.8 px vs 18.5, range p99 7.57 m vs 7.73 m, max 9.20 vs
+  9.24 m. The gained tags are mid-size (side p10/p50/p90 21/35/53 px, median 3.5 m), not the
+  smallest; the lost ones are similar sizes (18/29/74 px) and poorer (in-frame 3.1 px). So it
+  reshuffles which quads survive segmentation, with a net +5%, rather than seeing farther.
+  The far search's finds are better (0.90 vs 1.09 px median) and it loses nothing.
+- **Corners:** −0.016 px median on common sightings, but that's the interpolated-frame
+  refinement; with the base's corners the gains are the same, so the count is the real effect.
+- **Cost.** Replay: detect minus resize is 6.66 vs 6.03 ms (+0.6 ms, +10%), but replay times are
+  dominated by CPU decode/refine. A real dec-1.5 detector runs its front end (threshold, labeling,
+  `BlobDiff`, the sorts: most of the ~1.7 ms GPU per busy TXMAN frame, docs/TECHNICAL.md
+  `detector-13`) on (2/1.5)² = 1.78x the pixels: roughly +1 ms GPU and +0.5–1 ms `Detect()` wall
+  per camera, about +50% of the ~2 ms Detect, plus bos's hard-coded /2 to rework (threshold tiles,
+  4 MP limit).
+- **Verdict: don't build it.** +5% sightings (+1,400 over far search) for ~+50% detect time and a
+  detector rework, with no range gain. The far search already gets the small/far tags more cheaply
+  and more accurately.
