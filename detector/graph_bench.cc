@@ -43,16 +43,17 @@ double Pct(std::vector<double> v, double p) {
 
 int main(int argc, char **argv) {
   if (argc < 2) {
-    std::cerr << "graph_bench CAMERA_DIR [--frames N] [--loops N] [--mwbd N] [--out FILE]\n";
+    std::cerr << "graph_bench CAMERA_DIR [--frames N] [--loops N] [--mwbd N] [--edge N] [--out FILE]\n";
     return 2;
   }
-  int max_frames = 300, loops = 3, mwbd = 20;
+  int max_frames = 300, loops = 3, mwbd = 20, edge = 0;
   std::string out_path;
   for (int i = 2; i + 1 < argc; i += 2) {
     const std::string a = argv[i];
     if (a == "--frames") max_frames = std::atoi(argv[i + 1]);
     else if (a == "--loops") loops = std::max(2, std::atoi(argv[i + 1]));
     else if (a == "--mwbd") mwbd = std::atoi(argv[i + 1]);
+    else if (a == "--edge") edge = std::atoi(argv[i + 1]);
     else if (a == "--out") out_path = argv[i + 1];
     else {
       std::cerr << "unknown option " << a << "\n";
@@ -94,6 +95,7 @@ int main(int argc, char **argv) {
   dc.num_params = 5;
   frc::apriltag::GpuDetector gpu(w, h, td, frc::apriltag::CameraMatrix{1, 1, 1, 1}, dc,
                                  vision::ImageFormat::MONO8);
+  gpu.SetEdgeBorder(edge);  // bos-12: full-resolution pixels, 0 = off
 
   std::vector<double> cpu, wall;
   FILE *out = out_path.empty() ? nullptr : std::fopen(out_path.c_str(), "w");

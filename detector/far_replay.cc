@@ -5,7 +5,7 @@
 //
 //   far_replay SESSION_DIR [--out OUT.csv] [--budget N] [--off] [--every N] [--threads N]
 //              [--calib CAMERA=fx,fy,cx,cy,k1,k2,p1,p2,k3,k4,k5,k6]... [--mwbd N] [--mse X]
-//              [--exclude ID,ID...]
+//              [--exclude ID,ID...] [--edge N]
 //
 // SESSION_DIR: a Rewind session (one folder per camera, docs/REWIND.md). --budget: full-size
 // searches a second (default 30, as live). --off: the far search switched off, for a baseline.
@@ -18,6 +18,8 @@
 // (source: normal or far). Summary on stdout: tag sightings (camera x frame x tag) by the normal
 // search and with the far search, the tags only the far search found and how small they were,
 // time starved, full-size searches and crops, and what they cost, and the slowest frames.
+// --edge N: drop tags whose blob comes within N full-frame pixels of the image edge (bos-12,
+// SPECTRUM_971_EDGE_BORDER_PX live; default 0 = off). Normal search only, not the far search's crops.
 // --trace: each frame's far-search time on stderr as it goes (to find a frame that stalls).
 #include <algorithm>
 #include <atomic>
@@ -90,6 +92,7 @@ int main(int argc, char **argv) {
   std::string out_path;
   double budget = 30;
   bool off = false, trace = false;
+  int edge = 0;
   int every = 1, threads = 5;
   double mwbd = EnvOr("SPECTRUM_971_MIN_WHITE_BLACK_DIFF", 5), mse = EnvOr("SPECTRUM_971_MAX_LINE_FIT_MSE", 10);
   std::map<std::string, std::vector<double>> calibs;
@@ -101,6 +104,7 @@ int main(int argc, char **argv) {
     else if (a == "--budget") budget = std::atof(v), ++i;
     else if (a == "--off") off = true;
     else if (a == "--trace") trace = true;
+    else if (a == "--edge") edge = std::max(0, std::atoi(v)), ++i;
     else if (a == "--every") every = std::max(1, std::atoi(v)), ++i;
     else if (a == "--threads") threads = std::max(1, std::atoi(v)), ++i;
     else if (a == "--mwbd") mwbd = std::atof(v), ++i;
@@ -169,6 +173,7 @@ int main(int argc, char **argv) {
       if (k.size() >= 12) c.dc.num_params = 8;  // PhotonVision's 8-coefficient calibrations
     }
     c.gpu = new frc::apriltag::GpuDetector(c.width, c.height, c.td, c.cm, c.dc, vision::ImageFormat::MONO8);
+    c.gpu->SetEdgeBorder(edge);
   }
 
   // All frames, merged in recording-time order.

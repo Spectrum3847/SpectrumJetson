@@ -1,0 +1,140 @@
+diff --git a/third_party/971apriltag/apriltag.cc b/third_party/971apriltag/apriltag.cc
+index dc6e545..fb2f0b4 100644
+--- a/third_party/971apriltag/apriltag.cc
++++ b/third_party/971apriltag/apriltag.cc
+@@ -654,13 +654,14 @@ class SelectBlobs {
+   SelectBlobs(const MinMaxExtents* extents_device, apriltag_size_t tag_width,
+               bool reversed_border, bool normal_border,
+               apriltag_size_t min_cluster_pixels,
+-              apriltag_size_t max_cluster_pixels)
++              apriltag_size_t max_cluster_pixels, EdgeBorder edge = EdgeBorder())
+       : extents_device_(extents_device),
+         tag_width_(tag_width),
+         reversed_border_(reversed_border),
+         normal_border_(normal_border),
+         min_cluster_pixels_(std::max<apriltag_size_t>(24u, min_cluster_pixels)),
+-        max_cluster_pixels_(max_cluster_pixels) {}
++        max_cluster_pixels_(max_cluster_pixels),
++        edge_(edge) {}
+ 
+   // Returns true if the blob passes the size and dot product checks and is
+   // worth further consideration.
+@@ -689,6 +690,14 @@ class SelectBlobs {
+       return false;
+     }
+ 
++    // SpectrumJetson (bos-12): too close to the image edge (off when px is 0).
++    if (edge_.px > 0 &&
++        (extents.min_x < edge_.px || extents.min_y < edge_.px ||
++         static_cast<int32_t>(extents.max_x) > edge_.max_x ||
++         static_cast<int32_t>(extents.max_y) > edge_.max_y)) {
++      return false;
++    }
++
+     return true;
+   }
+ 
+@@ -699,6 +708,7 @@ class SelectBlobs {
+   bool normal_border_;
+   apriltag_size_t min_cluster_pixels_;
+   apriltag_size_t max_cluster_pixels_;
++  EdgeBorder edge_;
+ };
+ 
+ // Class to zero out the count (and clear the starting offset) for each extents
+@@ -709,9 +719,10 @@ struct TransformZeroFilteredBlobSizes {
+   TransformZeroFilteredBlobSizes(apriltag_size_t tag_width,
+                                  bool reversed_border, bool normal_border,
+                                  apriltag_size_t min_cluster_pixels,
+-                                 apriltag_size_t max_cluster_pixels)
++                                 apriltag_size_t max_cluster_pixels,
++                                 EdgeBorder edge = EdgeBorder())
+       : select_blobs_(nullptr, tag_width, reversed_border, normal_border,
+-                      min_cluster_pixels, max_cluster_pixels) {}
++                      min_cluster_pixels, max_cluster_pixels, edge) {}
+ 
+   __host__ __device__ __forceinline__ cub::KeyValuePair<long, MinMaxExtents>
+   operator()(cub::KeyValuePair<long, MinMaxExtents> pt) const {
+@@ -1299,7 +1310,7 @@ absl::Status GpuDetector::EnqueueSecondStage(size_t points_bucket, cudaStream_t
+     // Over the real number of quads only (ScanSelectedExtents).
+     TransformZeroFilteredBlobSizes rewrite(min_tag_width_, reversed_border_, normal_border_,
+                                            tag_detector_->qtp.min_cluster_pixels,
+-                                           max_april_tag_perimeter);
++                                           max_april_tag_perimeter, edge_border_);
+     ScanSelectedExtents<<<1, kScanThreads, 0, stream>>>(
+         extents_device_.get(), num_quads_int_device_.get(), rewrite,
+         selected_extents_device_.get());
+@@ -1438,6 +1449,20 @@ cudaGraphExec_t GpuDetector::StageGraph(int stage, size_t points_bucket, size_t
+   return nullptr;
+ }
+ 
++void GpuDetector::SetEdgeBorder(int px) {
++  EdgeBorder edge;
++  if (px > 0) {
++    edge.px = px;
++    edge.max_x = static_cast<int32_t>(width_) - 1 - px;
++    edge.max_y = static_cast<int32_t>(height_) - 1 - px;
++  }
++  if (edge.px == edge_border_.px) return;
++  edge_border_ = edge;
++  // The blob filter's parameters are baked into the recorded stage graphs: record them again.
++  for (auto& [k, exec] : stage_graphs_) cudaGraphExecDestroy(exec);
++  stage_graphs_.clear();
++}
++
+ absl::Status GpuDetector::RecordStageGraphs() {
+   // Buckets grow ~25% a step, so a detector needs a few dozen at most; this only bounds memory.
+   if (stage_graphs_.size() + pending_stage_graphs_.size() > 256) {
+@@ -1807,7 +1832,8 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+         extents_device_.get());
+     TransformZeroFilteredBlobSizes rewrite(
+         min_tag_width_, reversed_border_, normal_border_,
+-        tag_detector_->qtp.min_cluster_pixels, max_april_tag_perimeter);
++        tag_detector_->qtp.min_cluster_pixels, max_april_tag_perimeter,
++        edge_border_);
+     cub::TransformInputIterator<cub::KeyValuePair<long, MinMaxExtents>,
+                                 TransformZeroFilteredBlobSizes,
+                                 cub::ArgIndexInputIterator<MinMaxExtents*>>
+diff --git a/third_party/971apriltag/apriltag.h b/third_party/971apriltag/apriltag.h
+index b120970..16bc1b8 100644
+--- a/third_party/971apriltag/apriltag.h
++++ b/third_party/971apriltag/apriltag.h
+@@ -87,6 +87,14 @@ struct DistCoeffs {
+ };
+ 
+ // GPU based april tag detector.
++// SpectrumJetson (bos-12): GpuDetector::SetEdgeBorder's limits, in full-resolution pixels (the
++// blob extents' coordinates: QuadBoundaryPoint::x() is 2 * decimated x + dx). px 0 = off.
++struct EdgeBorder {
++  int32_t px = 0;
++  int32_t max_x = 0;  // width - 1 - px
++  int32_t max_y = 0;  // height - 1 - px
++};
++
+ class GpuDetector {
+  public:
+   // The number of blobs we will consider when counting april tags.
+@@ -130,6 +138,14 @@ class GpuDetector {
+   // this detector's stream: keep them alive until the next Detect() returns.
+   void SetMask(const uint8_t* decimated_mask);
+ 
++  // SpectrumJetson (bos-12): drops a candidate blob in the blob filter (before line fit, quad fit,
++  // decode and refine) when its bounding box comes within px full-resolution pixels of the image
++  // edge; 0 (the default) = off, detections unchanged. The blob box is the tag's black border's
++  // outline, a pixel or two outside the final corners, so this is slightly stricter than the same
++  // px on corners. Call between frames on the detecting thread; a change re-records stage graphs.
++  void SetEdgeBorder(int px);
++  int edge_border() const { return edge_border_.px; }
++
+   const std::vector<QuadCorners>& FitQuads() const;
+ 
+   const zarray_t* Detections() const { return detections_; }
+@@ -453,6 +469,8 @@ class GpuDetector {
+ 
+   // SpectrumJetson (bos-07): SetMask's mask on the GPU, and whether it's on.
+   GpuMemory<uint8_t> mask_device_;
++  // SpectrumJetson (bos-12): SetEdgeBorder's limits.
++  EdgeBorder edge_border_;
+   bool mask_on_ = false;
+ 
+   // Cached quantities used for tag filtering.

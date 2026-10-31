@@ -90,6 +90,15 @@ float MaxLineFitMse() {
   return 10.0f;
 }
 
+// Drops candidate tags whose blob (the black border's bounding box) comes within this many
+// full-resolution pixels of the image edge, in the GPU blob filter before line fit, quad fit,
+// decode and refine (bos-12). 0 = off (the default). Set with SPECTRUM_971_EDGE_BORDER_PX
+// (08-select-detector.sh --edge N); fixed for the process (docs/TECHNICAL.md).
+int EdgeBorderPx() {
+  if (const char *v = std::getenv("SPECTRUM_971_EDGE_BORDER_PX")) return std::max(0, std::atoi(v));
+  return 0;
+}
+
 // Worker threads for each detector's CPU stage (edge refinement and tag decoding). Every camera
 // has its own detector and pool, so 4 cameras x 6 threads compete for the Jetson's 6 cores. Set
 // with SPECTRUM_971_THREADS; /tmp/spectrum-971-threads overrides it without a restart
@@ -335,6 +344,7 @@ bool Rebuild(DetectorSlot &s, size_t width, size_t height) {
   try {
     s.gpu = new frc::apriltag::GpuDetector(width, height, s.td, s.camera_matrix,
                                            s.dist_coeffs, vision::ImageFormat::MONO8);
+    s.gpu->SetEdgeBorder(EdgeBorderPx());
     s.needs_rebuild = false;
     s.mask_dirty = true;  // a new detector has no mask yet
     return true;
@@ -1119,7 +1129,8 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
   // 08-select-detector.sh sets; only reported here.
   const char *connections = std::getenv("CUDA_DEVICE_MAX_CONNECTIONS");
   std::cout << "971 library loaded (frc971/bos detector, min_white_black_diff "
-            << MinWhiteBlackDiff() << ", max_line_fit_mse " << MaxLineFitMse() << ", threads "
+            << MinWhiteBlackDiff() << ", max_line_fit_mse " << MaxLineFitMse() << ", edge border "
+            << EdgeBorderPx() << " px, threads "
             << DetectorThreads() << ", CUDA wait " << sync
             << (sync_err == cudaSuccess ? "" : std::string(" FAILED: ") + cudaGetErrorString(sync_err))
             << ", GPU connections " << (connections ? connections : "8") << ")" << std::endl;

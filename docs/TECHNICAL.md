@@ -2101,6 +2101,40 @@ For comparison, one camera alone took 1.45 ms and 7% GPU at the start.
   mostly the peak sort, which now runs CUB's multi-pass sort over the bucket instead of its
   single-tile one), 366 + ~40 µs of memsets → 384 µs with tags.
 
+#### Edge border: drop tags at the image edge early (`bos-12`)
+
+- **What:** `SPECTRUM_971_EDGE_BORDER_PX=N` (`08-select-detector.sh --edge N`; default 0 = off)
+  drops a candidate whose blob comes within N pixels of the image edge. It happens in the GPU
+  blob filter (`SelectBlobs`, next to the pixel-count, area and border-polarity checks), so an
+  edge tag never gets line fit, quad fit, decode or edge refinement. Like AOS's `pixel_border`
+  (50 px, `frc/orin/gpu_apriltag.cc`), which checks the final corners after detection.
+- **Units:** full-resolution pixels. The blob extents are already in full-resolution
+  coordinates even though this stage runs on the half-resolution image
+  (`QuadBoundaryPoint::x()` = 2 x decimated x + step), so N is compared directly: a blob is kept
+  only if `min_x, min_y >= N` and `max_x <= width - 1 - N`, `max_y <= height - 1 - N`.
+- **Stricter than AOS's N:** the blob box is the outline of the tag's black border, a pixel or
+  two outside the fitted corners, so N here drops slightly more than the same N on corners
+  (removed tags had corners 12 to N px from the edge). Rarely the other way: 6 of 3,556 kept
+  tags had a fitted corner up to 1.2 px inside N (the fitted lines reach past the blob).
+- **Fixed per process:** read once from the environment (shown in the "971 library loaded" line)
+  and set on each detector when it is built (`GpuDetector::SetEdgeBorder`). The value lives in
+  the filter functor, which is baked into the recorded stage graphs (`bos-11`); `SetEdgeBorder`
+  drops the recorded graphs when the value changes, so they are recorded again.
+- **Not covered:** the far-tag search's crops (`far_search.cc`) don't use it, so it can still
+  find an edge tag (fieldcal-synth: the far search adds 161 sightings at 25 px and 169 at 50, against 106 with it off).
+- **Tools:** `far_replay --edge N` (normal search only; with `--half`, N/2 rounded up in the small
+  frame; ignored with `--fullres`), `graph_bench --edge N`.
+- **Off = unchanged:** with 0 (and with no setting), byte-identical to the build before `bos-12`:
+  `graph_bench` `%a` output on all 10 regression cameras (3,556 detections, `--mwbd 20`), and
+  `far_replay` CSVs on the 3 corpus sessions.
+- **Effect on the regression corpus** (`graph_bench`, normal search): 25 px drops 68 of 3,556
+  detections, 50 px drops 169, all on fieldcal-synth (the ceiling and synthetic-near-far
+  sessions have no edge tags). Every other detection is byte-identical.
+- **Cost:** four integer compares in a filter that already runs per blob, no new kernels or
+  copies; per-frame CPU and wall time didn't change beyond the noise (other jobs were running).
+  The saving is the line fit, quad fit, decode and refine of each dropped tag, which only shows
+  with tags at the edge.
+
 #### Where the remaining CPU goes (4 cameras, 1.2 cores)
 
 - **`tests/cpu-profile.sh`:** the 4 camera threads (15–25% of a core each) split their samples
