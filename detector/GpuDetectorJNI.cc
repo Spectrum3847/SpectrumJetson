@@ -793,19 +793,81 @@ struct NvjpgThread {
   bool path_unavailable[2] = {};  // [0] gray, [1] colour: this camera's JPEGs can't use it
   int unsupported_in_a_row[2] = {};
   long frames = 0;
-  // GPU input: the last gray frame decoded on this thread, also on the GPU (dev, dev_w x dev_h),
-  // while dev_valid. fp: 64 of its pixels, to recognise it in processimage (PhotonVision hands
-  // the detector a copy, and a rotation would change the pixels in place).
-  uint8_t *dev = nullptr;
-  int dev_w = 0, dev_h = 0;
-  bool dev_valid = false;
-  uint8_t fp[64];
   ~NvjpgThread() {
     if (dec) LoadNvjpg()->destroy(dec);
-    if (dev) cudaFree(dev);
   }
 };
 thread_local NvjpgThread nvjpg_thread;
+
+void FingerprintGpuInput(const uint8_t *img, size_t n, uint8_t *fp);
+bool MatchesGpuInput(const uint8_t *img, size_t n, const uint8_t *fp);
+
+// GPU input across threads (2026-10-30): PhotonVision now decodes in its own thread, overlapped
+// with the pipeline, so the frame a detector gets was decoded on another thread and the
+// thread_local hand-off never matched: every frame was copied back up to the GPU ("gpu input"
+// gone from the stats line). A shared pool instead: the decoder leaves each gray frame on the GPU in
+// a free slot tagged with the host buffer it also wrote (PhotonVision shares that buffer with the
+// pipeline, photonvision-37) and its fingerprint; processimage claims the slot whose tag matches
+// the frame it was given, and frees it when Detect() is done. A decoder's previous frame that was
+// never claimed (the loop took a newer one) is freed when it decodes the next.
+struct GpuFrameSlot {
+  uint8_t *dev = nullptr;
+  int w = 0, h = 0;
+  const uint8_t *host = nullptr;
+  uint8_t fp[64];
+  int state = 0;  // 0 free, 1 decoded and waiting, 2 in use by a detector
+};
+constexpr int kGpuFrameSlots = 24;  // up to ~6 cameras x (waiting + in use + one being decoded)
+std::mutex gpu_frames_mu;
+GpuFrameSlot gpu_frames[kGpuFrameSlots];
+thread_local int my_waiting_slot = -1;  // this decoder's last frame, if not yet claimed
+
+// A free slot for a w x h frame (allocating its GPU buffer if needed), marked in use by the
+// decoder (state 2) until it's published; -1 if none.
+int TakeFreeGpuFrameSlot(int w, int h) {
+  std::lock_guard<std::mutex> lock(gpu_frames_mu);
+  if (my_waiting_slot >= 0 && gpu_frames[my_waiting_slot].state == 1) {
+    gpu_frames[my_waiting_slot].state = 0;  // never claimed: the loop took a newer frame
+  }
+  my_waiting_slot = -1;
+  int pick = -1;
+  for (int i = 0; i < kGpuFrameSlots && pick < 0; ++i) {
+    if (gpu_frames[i].state == 0 && gpu_frames[i].dev && gpu_frames[i].w == w && gpu_frames[i].h == h) pick = i;
+  }
+  for (int i = 0; i < kGpuFrameSlots && pick < 0; ++i) {
+    if (gpu_frames[i].state == 0) pick = i;
+  }
+  if (pick < 0) return -1;
+  GpuFrameSlot &g = gpu_frames[pick];
+  if (!g.dev || g.w != w || g.h != h) {
+    if (g.dev) cudaFree(g.dev);
+    g.dev = nullptr;
+    g.w = g.h = 0;
+    if (cudaMalloc(reinterpret_cast<void **>(&g.dev), static_cast<size_t>(w) * h) != cudaSuccess) {
+      cudaGetLastError();
+      g.dev = nullptr;
+      return -1;
+    }
+    g.w = w;
+    g.h = h;
+  }
+  g.state = 2;
+  return pick;
+}
+
+void PublishGpuFrameSlot(int i, const uint8_t *host, size_t n) {
+  std::lock_guard<std::mutex> lock(gpu_frames_mu);
+  gpu_frames[i].host = host;
+  FingerprintGpuInput(host, n, gpu_frames[i].fp);
+  gpu_frames[i].state = 1;
+  my_waiting_slot = i;
+}
+
+void FreeGpuFrameSlot(int i) {
+  if (i < 0) return;
+  std::lock_guard<std::mutex> lock(gpu_frames_mu);
+  gpu_frames[i].state = 0;
+}
 
 // GPU input: the hardware decoder leaves each gray frame on the GPU too, and processimage hands
 // that copy to Detect(), which otherwise copies the frame it was given back up to the GPU (48 us
@@ -874,41 +936,26 @@ int NvjpgDecode(const uint8_t *jpeg, size_t size, cv::Mat &mat, bool bgr) {
     t.unavailable = true;
     return SNJ_UNSUPPORTED;
   }
-  t.dev_valid = false;
-  bool to_dev = !bgr && api->decode_gray_dev && GpuInputOn();
-  if (to_dev && (t.dev_w != mat.cols || t.dev_h != mat.rows)) {
-    if (t.dev) cudaFree(t.dev);
-    t.dev = nullptr;
-    t.dev_w = t.dev_h = 0;
-    if (cudaMalloc(reinterpret_cast<void **>(&t.dev), static_cast<size_t>(mat.cols) * mat.rows) ==
-        cudaSuccess) {
-      t.dev_w = mat.cols;
-      t.dev_h = mat.rows;
-    } else {
-      cudaGetLastError();
-      t.dev = nullptr;
-    }
-  }
-  to_dev = to_dev && t.dev;
-  const int rc = to_dev ? api->decode_gray_dev(t.dec, jpeg, size, mat.data, mat.cols, mat.rows,
-                                               mat.step, t.dev)
-                        : (bgr ? api->decode_bgr : api->decode)(t.dec, jpeg, size, mat.data,
-                                                                mat.cols, mat.rows, mat.step);
+  const bool want_dev = !bgr && api->decode_gray_dev && GpuInputOn() && mat.isContinuous();
+  const int slot = want_dev ? TakeFreeGpuFrameSlot(mat.cols, mat.rows) : -1;
+  const int rc = slot >= 0 ? api->decode_gray_dev(t.dec, jpeg, size, mat.data, mat.cols, mat.rows,
+                                                  mat.step, gpu_frames[slot].dev)
+                           : (bgr ? api->decode_bgr : api->decode)(t.dec, jpeg, size, mat.data,
+                                                                   mat.cols, mat.rows, mat.step);
   if (rc == SNJ_OK) {
     t.unsupported_in_a_row[bgr] = 0;
-    if (to_dev) {
-      t.dev_valid = true;
-      FingerprintGpuInput(mat.data, static_cast<size_t>(mat.cols) * mat.rows, t.fp);
-    }
     if (JpegFaultActive()) {
       mat.data[0] ^= 0x80;
-      t.dev_valid = false;  // the host copy no longer matches
+      FreeGpuFrameSlot(slot);  // the host copy no longer matches
+    } else if (slot >= 0) {
+      PublishGpuFrameSlot(slot, mat.data, static_cast<size_t>(mat.cols) * mat.rows);
     }
     if (t.frames++ % kCheckEvery == 0) {
       Checker().Submit(jpeg, size, mat.data, mat.cols, mat.rows, mat.step, bgr ? 3 : 1);
     }
     return rc;
   }
+  FreeGpuFrameSlot(slot);
   if (nvjpg_errors_logged++ < 20) {
     std::cout << "971 jpeg: hardware decode failed (" << rc << ": " << api->error(t.dec)
               << "); libjpeg-turbo decodes this frame" << std::endl;
@@ -1086,7 +1133,6 @@ JNIEXPORT jint JNICALL Java_org_photonvision_jni_GpuDetectorJNI_decodeMjpegGray(
     }
   }
   int fallback = SNJ_OK;
-  nvjpg_thread.dev_valid = false;  // until a hardware decode puts this frame on the GPU
   if (WantedJpegDecoder() == JpegDecoder::kNvjpg && HardwareForThisCamera()) {
     {
       std::shared_lock<CudaCaptureLock> cuda(cuda_capture_lock);
@@ -1372,11 +1418,27 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
     }
   }
   // GPU input (GpuInputOn): the frame is already on the GPU when this is the buffer just decoded.
-  NvjpgThread &nt = nvjpg_thread;
   const uint8_t *image_device = nullptr;
-  if (nt.dev_valid && nt.dev_w == img.cols && nt.dev_h == img.rows &&
-      MatchesGpuInput(img.ptr(), static_cast<size_t>(img.cols) * img.rows, nt.fp)) {
-    image_device = nt.dev;
+  int claimed = -1;
+  if (img.isContinuous()) {
+    std::lock_guard<std::mutex> lock(gpu_frames_mu);
+    for (int i = 0; i < kGpuFrameSlots; ++i) {
+      GpuFrameSlot &g = gpu_frames[i];
+      if (g.state == 1 && g.host == img.ptr() && g.w == img.cols && g.h == img.rows &&
+          MatchesGpuInput(img.ptr(), static_cast<size_t>(img.cols) * img.rows, g.fp)) {
+        g.state = 2;
+        claimed = i;
+        image_device = g.dev;
+        break;
+      }
+    }
+  }
+  // Freed when this call returns, whichever way.
+  struct SlotRelease {
+    int i;
+    ~SlotRelease() { FreeGpuFrameSlot(i); }
+  } slot_release{claimed};
+  if (image_device) {
     s->stats.gpu_input++;
     // Safety net, every kCheckEvery such frames per camera (~2 s): the GPU copy must still match
     // the frame Java handed us.
@@ -1395,7 +1457,6 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
       }
     }
   }
-  nt.dev_valid = false;  // one frame, one use
 
   // Everything from here to the far search can throw: with bos-01, CHECK_CUDA throws instead of
   // aborting. An exception that left this function would reach the JVM and std::terminate it,
