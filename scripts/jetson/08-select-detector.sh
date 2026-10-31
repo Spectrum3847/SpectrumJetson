@@ -5,7 +5,7 @@
 #
 # Usage: 08-select-detector.sh gpu|gpu-4143 [--mwbd N] [--jpeg nvjpg|turbo] [--mse N]
 #                              [--edge N] [--gpu-connections N] [--gpu-level N] [--gpu-refine N]
-#                              [--graphs 0|1] [--chain 0|1] [--far on|off] [--no-restart]
+#                              [--graphs 0|1] [--chain 0|1] [--far on|off] [--defaults] [--no-restart]
 #        08-select-detector.sh --gpu-level list     (what each level does; changes nothing)
 #   gpu       our GPU detector: Austin Schuh's CUDA AprilTag code from frc971/bos + our patches
 #             (07-build-gpu-detector.sh). The one the robot uses.
@@ -40,7 +40,11 @@
 #   --far on|off     the far-tag search (a PhotonVision setting, Settings > Robot state; saved
 #                    there, live, no restart). Set through localhost:5800/api/robotState when
 #                    PhotonVision is up; not touched unless --far or --gpu-level is given.
-# Options not given go back to their defaults.
+# Options not given KEEP their current value from detector.conf (the old SPECTRUM_971_* names are
+# read too), so `gpu --mwbd 20` changes only min_white_black_diff. --defaults starts from the
+# defaults instead (mwbd 20, mse/edge/refine off, turbo JPEG, graphs+chain on, 32 connections),
+# then applies the other flags. --gpu-level overrides the kept values it covers; explicit flags
+# override the level. What changed is printed.
 # (Fault injection for testing: echo N > /tmp/spectrum-detector-fault-every; rm it to stop.)
 set -euo pipefail
 
@@ -94,21 +98,36 @@ for a in "$@"; do [[ $a == list ]] && { level_list; exit 0; }; done
 
 which=${1:?usage: $0 gpu|gpu-4143 [--mwbd N] [--jpeg nvjpg|turbo] [--mse N] [--edge N] [--gpu-connections N] [--gpu-refine N] [--no-restart]}
 shift
-mwbd=20  # the robot config (JetPack 7 setup ran at 5 by leaving it out: detect 2.4 vs 1.6 ms)
-jpeg=""
-mse=""
-edge=""
-connections=32
-refine=""
-level=""
-graphs=""
-chain=""
-far=""
+# Defaults (--defaults, or a fresh install). mwbd 20 is the robot config (JetPack 7 setup ran at
+# 5 by leaving it out: detect 2.4 vs 1.6 ms).
+D_mwbd=20; D_mse=""; D_edge=0; D_jpeg=turbo; D_connections=32; D_refine=0; D_graphs=1; D_chain=1
+dropin=/etc/systemd/system/photonvision.service.d/detector.conf
+old_dropin=/etc/systemd/system/photonvision.service.d/971.conf
+# Current settings: detector.conf, else 971.conf (old names). Missing keys = defaults.
+cur_get() {  # cur_get NAME -> value of Environment=SPECTRUM_DETECTOR_NAME (or the old 971 name)
+  local f
+  for f in "$dropin" "$old_dropin"; do
+    [[ -f $f ]] || continue
+    sed -n -e "s/^Environment=\(SPECTRUM_DETECTOR_\|SPECTRUM_971_\)\?$1=//p" "$f" | tail -n 1
+    return
+  done
+}
+C_mwbd=$(cur_get MIN_WHITE_BLACK_DIFF); C_mwbd=${C_mwbd:-$D_mwbd}
+C_mse=$(cur_get MAX_LINE_FIT_MSE); C_mse=${C_mse:-$D_mse}
+C_edge=$(cur_get EDGE_BORDER_PX); C_edge=${C_edge:-$D_edge}
+C_refine=$(cur_get GPU_REFINE); C_refine=${C_refine:-$D_refine}
+C_graphs=$(cur_get GRAPHS); C_graphs=${C_graphs:-$D_graphs}
+C_chain=$(cur_get CHAIN); C_chain=${C_chain:-$D_chain}
+C_jpeg=$(cur_get SPECTRUM_JPEG_DECODER); C_jpeg=${C_jpeg:-$D_jpeg}
+C_connections=$(cur_get CUDA_DEVICE_MAX_CONNECTIONS); C_connections=${C_connections:-$D_connections}
+mwbd=""; jpeg=""; mse=""; edge=""; connections=""; refine=""; level=""; graphs=""; chain=""; far=""
+defaults=0
 restart=1
 while [[ $# -gt 0 ]]; do
   case $1 in
     --mwbd) mwbd=$2; shift 2 ;;
     --mse) mse=$2; shift 2 ;;
+    --defaults) defaults=1; shift ;;
     --edge) edge=$2; shift 2
             [[ $edge =~ ^[0-9]+$ ]] || { echo "--edge must be a whole number of pixels" >&2; exit 1; } ;;
     --jpeg) jpeg=$2; shift 2
@@ -140,6 +159,13 @@ if [[ -n $level ]]; then
   fi
   refine=${refine:-$l_refine}; graphs=${graphs:-$l_graphs}; chain=${chain:-$l_chain}; far=${far:-$l_far}
 fi
+# Not given (by a flag or the level): keep the current value, or the default with --defaults.
+for k in mwbd mse edge jpeg connections refine graphs chain; do
+  if [[ -z ${!k} ]]; then
+    if ((defaults)); then src=D_$k; else src=C_$k; fi
+    printf -v "$k" '%s' "${!src}"
+  fi
+done
 if [[ $graphs == 0 && -n $refine && $refine -ge 2 ]]; then
   echo "Note: --gpu-refine $refine runs inside the stage graphs; with --graphs 0 it does nothing" >&2
 fi
@@ -175,10 +201,8 @@ if [[ $which == gpu && -f $nvjpg ]]; then
   sudo install -m 755 "$nvjpg" /usr/lib/libspectrumnvjpg.so
 fi
 
-# Rewritten whole each time, so settings under their old names (SPECTRUM_971_*, in 971.conf
-# before the 2026-10-31 rename) are replaced by the new SPECTRUM_DETECTOR_* ones.
-dropin=/etc/systemd/system/photonvision.service.d/detector.conf
-old_dropin=/etc/systemd/system/photonvision.service.d/971.conf
+# Rewritten whole each time (from the kept + changed values above), so settings under their old
+# names (SPECTRUM_971_*, in 971.conf before the 2026-10-31 rename) become SPECTRUM_DETECTOR_* ones.
 if [[ -f $old_dropin ]]; then
   echo "Replacing $old_dropin (old SPECTRUM_971_* names) with $dropin"
   sudo rm -f "$old_dropin"
@@ -198,9 +222,15 @@ env_lines="Environment=CUDA_DEVICE_MAX_CONNECTIONS=$connections"$'\n'
 [[ $graphs == 0 ]] && env_lines+="Environment=SPECTRUM_DETECTOR_GRAPHS=0"$'\n'
 [[ $chain == 0 ]] && env_lines+="Environment=SPECTRUM_DETECTOR_CHAIN=0"$'\n'
 [[ $jpeg == nvjpg ]] && env_lines+="Environment=SPECTRUM_JPEG_DECODER=nvjpg"$'\n'
+changed=""
+for k in mwbd mse edge jpeg connections refine graphs chain; do
+  c=C_$k
+  [[ ${!c} != "${!k}" ]] && changed+=" $k ${!c:-unset} -> ${!k:-unset};"
+done
 printf '[Service]\n%s' "$env_lines" | sudo tee "$dropin" >/dev/null
 sudo systemctl daemon-reload
 
+echo "Changed:${changed:- nothing (all settings kept)}"
 echo "Selected $which detector${level:+, GPU level $level}${mwbd:+, min_white_black_diff $mwbd}${mse:+, max_line_fit_mse $mse}${edge:+, edge border $edge px}${jpeg:+, JPEG decoder $jpeg}${refine:+, GPU refine $refine}${graphs:+, graphs $graphs}${chain:+, chain $chain}, $connections GPU connections"
 if [[ -n $level ]]; then
   level_list | awk -v l="$level" '/^$/ { on = 0 } $1 ~ /^[0-5]$/ { on = ($1 == l) } on' | sed 's/^/  /'

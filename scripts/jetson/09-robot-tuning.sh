@@ -59,7 +59,11 @@
 #                               between auto and teleop) and locks them again on enable. Lower
 #                               too while PhotonVision isn't running (stopped, crashed: the
 #                               service drop-in; not installed: spectrum-clocks-guard after 30 s).
-#                               `sudo spectrum-clocks mode full` keeps them full; `status`.
+#                               Deep idle (photonvision-99): no robot, web UI or stream viewer
+#                               for 5 min (or PhotonVision stopped 5 min): 5 fps, lowest clocks,
+#                               EMC dynamic, CPU idle states on, cores 2-4 offline.
+#                               `sudo spectrum-clocks mode full` keeps them full, `mode shallow`
+#                               never goes deep; `status`.
 #
 # Usage: [FAN=quiet|full|off] [RT=on|off] 09-robot-tuning.sh [--undo]   (no FAN/RT: keep the saved choice)
 set -euo pipefail
