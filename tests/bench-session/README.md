@@ -18,6 +18,7 @@ Clocks: the bench has no robot, so the session holds `spectrum-clocks mode full`
 ```
 ~/SpectrumJetson/tests/bench-session/run.sh            # everything except USB (~45-60 min)
 ~/SpectrumJetson/tests/bench-session/run.sh graphs 3d  # only these steps
+~/SpectrumJetson/tests/bench-session/run.sh gpurefine   # GPU RefineEdges A/B only
 ~/SpectrumJetson/tests/bench-session/run.sh all usb    # everything, USB recovery too
 ~/SpectrumJetson/tests/bench-session/run.sh stills     # still recordings for the accuracy judge (opt-in)
 ```
@@ -30,6 +31,7 @@ Ctrl-C at any time stops and puts everything back.
 | inventory | nothing | cameras (per camera: model VID:PID + product, serial, firmware, USB port, video node, exposure now/min/max and gain range from `v4l2-ctl --list-ctrls`, USB bandwidth reservation from `usb-bandwidth.py`; `cameras.py`, read-only), fps, every camera on NVJPG (no libjpeg-turbo frames, no fallback lines since start), clocks locked, temperatures, spectrum-rt, detector options | nothing |
 | baseline | cameras away from tags, then at tags | fps, latency median/p95/max per camera, detect times, PhotonVision CPU, perf profile per thread, GPU, power, temperature | nothing |
 | graphs | tags in view, keep still | CUDA graphs on vs off, interleaved | `/tmp/spectrum-detector-graphs` |
+| gpurefine | tags in view, keep still; calibrate every camera at its active resolution first | RefineEdges on the GPU (`detector-15`) on vs off, interleaved: PhotonVision CPU (all threads, camera threads), detect avg/max, latency median/p95/max, GPU %. Notes each camera's calibration state (config DB calibrations against the resolution it streams); only calibrated cameras gain | `/tmp/spectrum-detector-gpu-refine` (absent/0/1 put back) |
 | far | tags in view, some 5+ m away | far search on vs off, interleaved: turn it on for the robot if the live cost is near the replay's 1.7 ms/frame | `/api/robotState` farSearch |
 | 3d | tags in view, keep still | 3D (solvePNPEnabled) on vs off: CPU, latency | each camera's active pipeline setting, via PhotonVision's websocket |
 | rt | tags in view, keep still | spectrum-rt off vs on with LOAD=0 and LOAD=4 (tests/rt-ab) | spectrum-rt mode |
@@ -61,6 +63,8 @@ Copy to the laptop: `rsync -a jetson:bench-results/ logs/bench-results/`
 Notes:
 - Camera rows (fps, latency) come from PhotonVision's 10 s "Loop timing" lines; detector rows
   (`h0`, `h1`, ...) from the "detector stats" lines. The log doesn't say which detector is which camera.
+- gpurefine: in `graph_bench` it halves the process CPU per busy calibrated frame for the same wall
+  time, and costs ~+130 µs wall on uncalibrated cameras (docs/TECHNICAL.md, `detector-15`).
 - 3D changes nothing unless the camera has a calibration for its resolution.
 - The edge step is skipped if the installed detector has no `SPECTRUM_DETECTOR_EDGE_BORDER_PX`, or if
   `~/build/gpu-detector` differs from what's installed (08-select-detector.sh would swap it).

@@ -14,6 +14,9 @@
 #              (tests/perf-snapshot.sh, then a perf profile per thread: scripts/jetson/profile-cpu.sh),
 #              GPU %, power, temperature
 #   graphs     CUDA graphs on/off A/B, interleaved through /tmp/spectrum-detector-graphs (no restart)
+#   gpurefine  RefineEdges on the GPU (detector-15) on/off A/B, interleaved through
+#              /tmp/spectrum-detector-gpu-refine (no restart): PhotonVision CPU (all threads and camera
+#              threads), detect avg/max, latency, GPU %. Only calibrated cameras gain (notes which aren't)
 #   3d         PhotonVision's 3D mode (solvePNPEnabled) on vs off with tags, through PhotonVision's
 #              websocket (the same message the UI sends); CPU and latency
 #   rt         spectrum-rt A/B (tests/rt-ab/run.sh) with LOAD=0 and LOAD=4
@@ -43,11 +46,12 @@ RT_SECS=${RT_SECS:-45}
 EDGE_VALUES=${EDGE_VALUES:-"0 25 50"}
 STILL_SECS=${BENCH_STILL_SECS:-45}
 GRAPHS_FILE=/tmp/spectrum-detector-graphs
+REFINE_FILE=/tmp/spectrum-detector-gpu-refine
 DROPIN=/etc/systemd/system/photonvision.service.d/detector.conf
 # Before the 2026-10-31 rename 08-select-detector.sh wrote 971.conf (SPECTRUM_971_* names).
 [[ -f $DROPIN || ! -f ${DROPIN%/*}/971.conf ]] || DROPIN=${DROPIN%/*}/971.conf
 PVDB=/opt/photonvision/photonvision_config/photon.sqlite
-DEFAULT_STEPS=(inventory baseline graphs far 3d rt edge)
+DEFAULT_STEPS=(inventory baseline graphs gpurefine far 3d rt edge)
 
 # ---------------------------------------------------------------------------------------------
 # Measurement (run as "run.sh --measure OUT STEP COND ROUND SECS", under a timeout): perf-snapshot
@@ -145,6 +149,38 @@ def get(unique, key):
         if p.get("pipelineIndex") == d.get("currentPipelineIndex"):
             print(json.dumps(p.get(key))); return
     print("null")
+# Per streaming camera: calibrated resolutions (config DB) against the resolution it streams now
+# (v4l2-ctl --get-fmt-video on its node from cameras.tsv; read-only). Tab-separated, one per camera.
+def calib(tsv):
+    nodes = {}
+    if os.path.exists(tsv):
+        lines = [l.rstrip("\n").split("\t") for l in open(tsv)]
+        if lines:
+            h = lines[0]
+            for r in lines[1:]:
+                d = dict(zip(h, r))
+                if d.get("uniqueName"): nodes[d["uniqueName"]] = d.get("video", "")
+    with urllib.request.urlopen("http://localhost:5800/api/usb/bandwidth", timeout=3) as r:
+        cams = [c for c in json.load(r).get("cameras", []) if c.get("streaming")]
+    for c in cams:
+        u = c.get("uniqueName") or ""
+        row = subprocess.run(["sudo", "-n", "sqlite3", "-readonly", "/opt/photonvision/photonvision_config/photon.sqlite",
+                              "select contents from cameras where unique_name = '%s'" % u.replace("'", "")],
+                             capture_output=True, text=True, timeout=10).stdout
+        try: d = json.loads(row)
+        except ValueError: d = {}
+        res = sorted({"%dx%d" % (x["resolution"]["width"], x["resolution"]["height"])
+                      for x in d.get("calibrations", []) if x.get("resolution")})
+        now = "?"
+        if nodes.get(u):
+            f = subprocess.run(["v4l2-ctl", "-d", "/dev/" + nodes[u], "--get-fmt-video"],
+                               capture_output=True, text=True, timeout=10).stdout
+            m = [l.split(":", 1)[1].strip().replace("/", "x") for l in f.splitlines() if "Width/Height" in l]
+            if m: now = m[0]
+        state = ("calibrated" if now in res else "UNCALIBRATED at " + now) if now != "?" else \
+                ("calibrations " + (",".join(res) or "none") + " (active resolution unknown)")
+        if not res: state = "UNCALIBRATED (no calibrations)"
+        print("\t".join([c.get("camera") or "?", c.get("port") or "?", now, ",".join(res) or "none", state]))
 def mp(v):
     if v is True: return b"\xc3"
     if v is False: return b"\xc2"
@@ -180,6 +216,7 @@ cmd = sys.argv[1]
 if cmd == "cams": cams()
 elif cmd == "get": get(sys.argv[2], sys.argv[3])
 elif cmd == "set": set_(sys.argv[2], sys.argv[3], sys.argv[4])
+elif cmd == "calib": calib(sys.argv[2])
 PY
 }
 
@@ -193,9 +230,9 @@ STEPS=()
 for a in "$@"; do
   case $a in
     all) STEPS+=("${DEFAULT_STEPS[@]}") ;;
-    inventory | baseline | graphs | far | 3d | rt | edge | usb | stills) STEPS+=("$a") ;;
+    inventory | baseline | graphs | gpurefine | far | 3d | rt | edge | usb | stills) STEPS+=("$a") ;;
     -h | --help) sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
-    *) echo "unknown step $a (inventory baseline graphs far 3d rt edge usb stills all)" >&2; exit 2 ;;
+    *) echo "unknown step $a (inventory baseline graphs gpurefine far 3d rt edge usb stills all)" >&2; exit 2 ;;
   esac
 done
 ((${#STEPS[@]})) || STEPS=("${DEFAULT_STEPS[@]}")
@@ -273,6 +310,7 @@ restart_pv() {
 # What we change, and putting it back (EXIT trap: normal end, Ctrl-C, errors)
 RT_ORIG=$(cat /etc/spectrum-rt 2>/dev/null || echo off)
 if [[ -e $GRAPHS_FILE ]]; then GRAPHS_ORIG=$(cat "$GRAPHS_FILE"); else GRAPHS_ORIG=absent; fi
+if [[ -e $REFINE_FILE ]]; then REFINE_ORIG=$(cat "$REFINE_FILE"); else REFINE_ORIG=absent; fi
 DROPIN_BACKUP=$OUT/$(basename "$DROPIN").orig
 [[ -f $DROPIN ]] && cp "$DROPIN" "$DROPIN_BACKUP"
 PNP_CHANGED=()   # "uniqueName<TAB>original value"
@@ -286,6 +324,8 @@ restore() {
   ((${#LOAD_PIDS[@]})) && kill "${LOAD_PIDS[@]}" 2>/dev/null
   if [[ $GRAPHS_ORIG == absent ]]; then rm -f "$GRAPHS_FILE"; else echo "$GRAPHS_ORIG" > "$GRAPHS_FILE"; fi
   echo "  CUDA graphs switch: $GRAPHS_ORIG"
+  if [[ $REFINE_ORIG == absent ]]; then rm -f "$REFINE_FILE"; else echo "$REFINE_ORIG" > "$REFINE_FILE"; fi
+  echo "  GPU RefineEdges switch: $REFINE_ORIG"
   [[ $(cat /etc/spectrum-rt 2>/dev/null || echo off) == "$RT_ORIG" ]] || sudo -n spectrum-rt "$RT_ORIG" > /dev/null
   echo "  spectrum-rt: $RT_ORIG"
   if [[ -n $FAR_ORIG ]]; then far_set "$FAR_ORIG" && echo "  far search: $FAR_ORIG"; fi
@@ -387,6 +427,32 @@ step_graphs() {
     done
   done
   if [[ $GRAPHS_ORIG == absent ]]; then rm -f "$GRAPHS_FILE"; else echo "$GRAPHS_ORIG" > "$GRAPHS_FILE"; fi
+}
+
+# RefineEdges on the GPU (detector-15) on/off, live through its switch file (re-read by the
+# detector). graph_bench: about half the process CPU per busy calibrated frame, same wall time; on an
+# uncalibrated camera it costs ~+130 us wall for the extra GPU wait. So it needs each camera
+# calibrated at the resolution it streams; the per-camera check goes in the notes.
+step_gpurefine() {
+  local r v l
+  [[ -f $OUT/cameras.tsv ]] || tmo 120 python3 "$HERE/cameras.py" inventory "$OUT" "$REPO" > /dev/null
+  echo "  calibration per camera (config DB against the streaming resolution):"
+  tmo 60 python3 "$PVPY" calib "$OUT/cameras.tsv" > "$OUT/.calib" 2>&1 || echo "  calibration check failed"
+  while IFS=$'\t' read -r cam port now res state; do
+    [[ -n $state ]] || { echo "    $cam"; continue; }
+    note "$cam @$port: streaming $now, calibrations $res: $state"
+  done < "$OUT/.calib"
+  grep -q UNCALIBRATED "$OUT/.calib" && note "uncalibrated cameras above don't gain from GPU refine (they run it in the A/B anyway)"
+  note "switch $REFINE_FILE was: $REFINE_ORIG (env SPECTRUM_DETECTOR_GPU_REFINE in the drop-in: $(grep -o 'SPECTRUM_DETECTOR_GPU_REFINE=[^ "]*' "$DROPIN" 2>/dev/null || echo unset))"
+  ask "TAGS: every camera at tags; leave them still for the A/B. GPU refine only helps cameras CALIBRATED at their active resolution (PhotonVision > Cameras > Calibration); uncalibrated ones are listed in results.md." || return
+  for ((r = 1; r <= ROUNDS; r++)); do
+    for v in 1 0; do
+      echo "$v" > "$REFINE_FILE"
+      echo "  gpurefine=$v (the detector re-reads the switch)"
+      settle; measure "gpu refine $([[ $v == 1 ]] && echo on || echo off)" "$r" || return
+    done
+  done
+  if [[ $REFINE_ORIG == absent ]]; then rm -f "$REFINE_FILE"; else echo "$REFINE_ORIG" > "$REFINE_FILE"; fi
 }
 
 # Far search (photonvision-55) on/off, live through Settings > Robot state's endpoint. The TXMAN1
@@ -647,6 +713,7 @@ sudo -n true 2>/dev/null || { echo "Needs passwordless sudo (run 'sudo true' fir
 echo "Bench session: ${STEPS[*]} -> $OUT  (window ${SECS}s, ${ROUNDS} rounds; Ctrl-C puts everything back)"
 
 declare -A LIMIT=([inventory]=300 [far]=$((ROUNDS * 2 * (SECS + 90) + 600)) [baseline]=900 [graphs]=$((ROUNDS * 2 * (SECS + 90) + 600))
+                  [gpurefine]=$((ROUNDS * 2 * (SECS + 90) + 780))
                   [3d]=$((ROUNDS * 2 * (SECS + 120) + 600)) [rt]=$((4 * ROUNDS * (RT_SECS + 15) + 900))
                   [edge]=2400 [usb]=2400
                   [stills]=$((5 * 3 * 2 * (STILL_SECS + 90) + 600)))
