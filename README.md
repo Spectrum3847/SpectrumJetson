@@ -6,48 +6,67 @@ vision coprocessor: what we built, why, and how to redo it. The detailed technic
 
 > 🎓 **Vision Training Course:** Check out our interactive, 21-chapter visual guide on how the Jetson vision system works at **[spectrum3847.github.io/SpectrumJetson](https://spectrum3847.github.io/SpectrumJetson/)**.
 
-**Thank you, Austin Schuh.** The CUDA AprilTag detector at the heart of this build is Austin's work, first written for FRC 971 Spartan Robotics. He's the reason any of this works. He now develops it in [RealtimeRoboticsGroup/aos](https://github.com/RealtimeRoboticsGroup/aos) ([`frc/orin`](https://github.com/RealtimeRoboticsGroup/aos/tree/main/frc/orin)). We built from his copy in [frc971/bos](https://github.com/frc971/bos), inside [FRC-Team-4143's CUDA PhotonVision](https://github.com/FRC-Team-4143/photonvision). Full credits are at the [end](#credits-and-licenses).
+**Thank you, Austin Schuh.** The CUDA AprilTag detector at the heart of this build is Austin's work, first written for FRC 971 Spartan Robotics. He's the reason any of this works. He now develops it in [RealtimeRoboticsGroup/aos](https://github.com/RealtimeRoboticsGroup/aos) ([`frc/orin`](https://github.com/RealtimeRoboticsGroup/aos/tree/main/frc/orin)). We build from his copy in [frc971/bos](https://github.com/frc971/bos); in 2026 we started inside [FRC-Team-4143's CUDA PhotonVision](https://github.com/FRC-Team-4143/photonvision). Full credits are at the [end](#credits-and-licenses).
 
 Built by Spectrum 3847 with Claude Opus 5.5 (Anthropic) in Claude Code, which did the research, code, patches, tests and docs alongside the team.
 
-*Last updated September 24, 2026.*
+*Last updated October 31, 2026.*
+
+## Where we are now (JetPack 7, for 2027)
+
+The Jetson now runs **JetPack 7.2.1** (Jetson Linux r39.2.1, Ubuntu 24.04, CUDA 13.2), **JDK 25**, and our **PhotonVision 2027 fork** on **WPILib 2027 alpha-8**. Robot code is on WPILib 2027 alpha-8 too, with PhotonLib built from the same fork. We moved because the robot's 2027 PhotonLib can't read a 2026 PhotonVision's results, and PhotonVision 2027 can't run on JetPack 6 (its libraries need a newer Ubuntu). The story is in [docs/HANDOFF-jetpack7.md](docs/HANDOFF-jetpack7.md).
+
+Sections with a *JetPack 6* note below are history from the October 2026 event build: the lessons hold, but the versions and some numbers are from the old setup.
 
 ## Headlines
 
-Measured on the bench:
+Measured on the bench, JetPack 7 (2026-10-30/31), 2 Thriftiest Cams on AprilTags:
 
-- **2 AprilTag cameras at 120 fps each, full resolution (1280x800), about 15 ms latency, using about 25% of the CPU.** The cameras are Thrifty Bot [Thriftiest Cams](https://www.thethriftybot.com/products/thriftiest-cam): mono, global shutter, USB 2.0, $50 each. The GPU finds the tags in about 2 ms per frame and is only about 12% busy (peaks under 25%).
-- **Set up for 4 AprilTag cameras** on the USB-A ports, plus a 5th camera on a USB-C hub (tested: all 5 streaming). All of them share one USB 2.0 budget, which 5 cameras fill.
-- **Game-piece detection at 30 fps alongside the AprilTag cameras,** with no measurable slowdown to them (76 fps if uncapped). It found FUEL surprisingly well even on our mono camera.
-- **Rewind:** robot code can record every camera at 30 fps, for 3% of one core, and you can download the recordings from the web UI.
+| What | Number |
+| --- | --- |
+| Frame rate | **122 fps per camera** at full resolution (1280x800) |
+| Latency, capture to result | **~15 ms median**, p95 ~16–19 ms |
+| PhotonVision's camera threads | **~25% of one CPU core for 2 cameras** (was ~50% before CUDA graphs) |
+| Detection on the GPU | about 1.3–1.6 ms a frame |
+| JPEG decode | on the Jetson's JPEG hardware (NVJPG), **both engines, every camera** |
+| Power while idle | **7.7 W, 71 °C** with clocks lowered, against ~12 W at full clocks |
+
+- **CUDA graphs** (`detector-11`): the GPU detector now launches each frame's work as 3 pre-recorded "graphs" instead of ~67 separate calls. That **halved the camera threads' CPU** and cut **median latency by 1.4 ms**, with byte-identical detections.
+- **Both NVJPG engines on JetPack 7:** a library mismatch in r39 left the second JPEG engine unused; our decoder fixes it in memory, only inside PhotonVision's process (342 instead of 194 frames/s in a test). Every camera now decodes on the hardware.
+- **Lower clocks when idle** (`spectrum-clocks`, step 16): 20 s after the robot disables (or with no robot), the Jetson lowers its CPU and GPU clocks; any enable puts them back to full at once.
+- **Camera firmware from the browser:** Settings has a **Thriftiest Cam firmware** card and a **Swyft camera firmware** card (see [Camera firmware](#camera-firmware-thriftiest-cam-and-swyft)).
+- **Better calibrations:** a full-screen calibration view that keeps partial boards at the image edges, and a study of why our old calibrations were weak at the edges (see [Calibrating well](#calibrating-well)).
+- **Checked against real matches:** 6 recorded TXMAN1 matches (54,000 frames) replayed through the detector with each setting (see [Field replay](#field-replay-what-6-real-matches-say)).
+- **Mount check:** robot code now flags a camera whose mount is wrong (see [Mount check](#mount-check-robot-vision)).
+
+From the 2026 event build (JetPack 6), still true in spirit:
+- **Set up for 4 AprilTag cameras** on the USB-A ports, plus a 5th on a USB-C hub (tested: all 5 streaming). They share one USB 2.0 budget, which 5 cameras fill.
+- **Rewind:** robot code can record every camera at 30 fps for 3% of one core.
 - **Accurate timing:** frames are timestamped at mid-exposure and synced to the robot's clock.
-- **Match-ready:**
-  - detecting tags about 20 s after power-on
-  - an unplugged camera is back in about 1 s
-  - built for power cuts: the system partition is only written by updates, settings and recordings live on their own partitions, and a damaged one never stops a match (see [Storage](#storage-and-power-cuts); the power-cut test on this layout is still to be repeated)
-  - restarts itself after errors
-- **Works with stock PhotonLib** on a SystemCore (2027 alpha-2).
+- **Match-ready:** detecting tags about 20 s after power-on, an unplugged camera back in about 1 s, built for power cuts (see [Storage](#storage-and-power-cuts)), restarts itself after errors.
+- **Game pieces** at 30 fps beside the AprilTag cameras (TensorRT). Not yet redone on JetPack 7.
 
 ## Quick Start
 
-For a new Jetson, or a spare SSD. You need an Orin Nano (Super) devkit, an NVMe SSD of at least 80 GB, 128 GB or more for Rewind recordings (**not** a DRAM-less budget drive: see [Storage](#storage-and-power-cuts)), a USB-C cable, Wi-Fi for the Jetson, and an **Ubuntu 22.04** laptop. The 80 GB is the 64 GiB system partition, the 2 GiB settings partition and at least 8 GiB of scratch.
+For a new Jetson, or a spare SSD. You need an Orin Nano (Super) devkit, an NVMe SSD of at least 80 GB, 128 GB or more for Rewind recordings (**not** a DRAM-less budget drive: see [Storage](#storage-and-power-cuts)), a USB-C cable, Wi-Fi for the Jetson, and an **Ubuntu 22.04** laptop (NVIDIA's flashing tools need 22.04 or 20.04, even for JetPack 7). The 80 GB is the 64 GiB system partition, the 2 GiB settings partition and at least 8 GiB of scratch.
 
-1. **Once per laptop:** first edit `config.env` for your team (team number, Wi-Fi connection name, fan mode): the next step bakes the Jetson's user and hostname into the image. Then `scripts/host/01-prepare-bsp.sh` downloads and unpacks NVIDIA's flashing tools and creates the Jetson's account (about 15 minutes). After `01-prepare-bsp.sh --force` (a fresh unpack), run step 2 again.
+1. **Once per laptop:** first edit `config.env` for your team (team number, Wi-Fi connection name, fan mode; `L4T_VERSION=39.2.1` is the default). The next step bakes the Jetson's user and hostname into the image. Then `scripts/host/01-prepare-bsp.sh` downloads and unpacks NVIDIA's r39.2.1 flashing tools (about 3.3 GB) and creates the Jetson's account. After `01-prepare-bsp.sh --force` (a fresh unpack), run step 2 again.
 2. **Prepare the image:** `scripts/host/prestage-rootfs.sh` puts passwordless sudo, the laptop's saved Wi-Fi connection and its SSH key into the image, so nobody has to touch the Jetson after the flash.
-3. **Flash** (about 7 minutes): put the Jetson in Force Recovery Mode (jumper FC REC to GND on the button header, pins 9-10, then power on; or `sudo reboot forced-recovery` on a running Jetson), then `scripts/host/02-flash-nvme.sh`. It erases the whole SSD, settings and recordings included, so it asks you to type `ERASE` first.
-4. **Set up** (unattended): `scripts/host/setup-jetson.sh --prebuilt` (about 35 minutes: it installs our newest release's prebuilt libraries and PhotonVision build), or without `--prebuilt` to build everything from source (about an hour). Optionally add `--settings photon.sqlite` to restore a saved setup and `--model model.onnx` for game pieces. It waits for the Jetson to boot, copies everything over and runs `scripts/jetson/install.sh` there. If a step fails, fix it and run the same command again: it carries on from that step.
+3. **Flash** (about 7 minutes): put the Jetson in Force Recovery Mode (jumper FC REC to GND on the button header, pins 9-10, then power on; or `sudo reboot forced-recovery` on a running Jetson), then `scripts/host/02-flash-nvme.sh`. It erases the whole SSD, settings and recordings included, so it asks you to type `ERASE` first. **If the flash fails with the SSD missing** ("EMEM address decode error", no `/dev/nvme0n1`): unplug the power for 10 s, recovery mode again, and re-run. That's what fixed it for us.
+4. **Set up** (unattended, about an hour): `scripts/host/setup-jetson.sh`. It waits for the Jetson to boot, copies everything over and runs `scripts/jetson/install.sh` there, which builds the GPU detector, installs PhotonVision and our fork's jar, and runs the robot tuning (`09-robot-tuning.sh`, steps 1–16). Optionally add `--settings photon.sqlite` to restore a saved setup. If a step fails, fix it and run the same command again: it carries on from that step. (`--prebuilt` installs a release's prebuilt libraries instead of building; there's no JetPack 7 bundle yet, and the installer refuses one built for another L4T or CUDA.)
 5. **Check:** open PhotonVision at `http://192.168.55.1:5800` and its **Match Ready** page, or run `scripts/jetson/health-check.sh` on the Jetson.
 6. **Before competition, once it's tuned:** `scripts/jetson/ro-root.sh on` makes the system partition read-only (and saves the current settings as the fallback copy). To update anything later: `ro-root.sh off`, update, `ro-root.sh on`.
 
-**Prebuilt releases.** A release's `spectrum-jetson-prebuilt-<version>.tar.gz` holds what the slow steps compile: the three allwpilib libraries the detector needs at runtime (the full allwpilib build is 17 minutes), the CUDA detector, the TensorRT and JPEG-hardware libraries, the field-calibration tool, and our PhotonVision jar. Its `MANIFEST` names the repo commit it was built from, the L4T and CUDA versions, every patch, and each file's SHA-256; `install.sh --prebuilt` checks all of it, and refuses a bundle built for another L4T or CUDA. The camera driver is still compiled on the Jetson (41 s), for its exact kernel. To make a bundle after a from-source install: `scripts/jetson/make-prebuilt-bundle.sh` on that Jetson.
+**Prebuilt releases.** A release's `spectrum-jetson-prebuilt-<version>.tar.gz` holds what the slow steps compile: the GPU detector, the TensorRT and JPEG-hardware libraries, the field-calibration tool, and our PhotonVision jar. Its `MANIFEST` names the repo commit it was built from, the L4T and CUDA versions, every patch, and each file's SHA-256; `install.sh --prebuilt` checks all of it. The latest, v2026.10.02, is a JetPack 6 bundle. To make a bundle after a from-source install: `scripts/jetson/make-prebuilt-bundle.sh` on that Jetson.
 
 The rest of this README explains what each step does and why.
 
 ## What's in this repo, and what the names mean
 
 **The pieces:**
-- **PhotonVision fork** ([Spectrum3847/photonvision](https://github.com/Spectrum3847/photonvision), branch `spectrum-2027`): the vision app that runs on the Jetson. Upstream PhotonVision plus our features; [SPECTRUM.md](https://github.com/Spectrum3847/photonvision/blob/spectrum-2027/SPECTRUM.md) there lists them. The code lives in that repo, not this one.
-- **GPU AprilTag detector:** finds tags on the Jetson's GPU in ~1.5 ms a frame. Austin Schuh's CUDA detector, plus our changes, wrapped so PhotonVision can call it.
+- **PhotonVision fork** ([Spectrum3847/photonvision](https://github.com/Spectrum3847/photonvision), branch `spectrum-2027`): the vision app that runs on the Jetson. Upstream PhotonVision 2027 plus our features; [SPECTRUM.md](https://github.com/Spectrum3847/photonvision/blob/spectrum-2027/SPECTRUM.md) there lists them. The code lives in that repo, not this one.
+- **GPU AprilTag detector** (`libspectrum-gpu-apriltag.so`): finds tags on the Jetson's GPU in ~1.5 ms a frame. Austin Schuh's CUDA detector, plus our changes (`patches/detector-NN`), wrapped so PhotonVision can call it (`detector/`).
+- **SpectrumVision** (`robot-vision/`): the robot-side Java library that reads the Jetson's results, checks them and fuses them into the robot's pose.
 - **This repo:** everything else to turn a blank Jetson into a robot coprocessor, and to check it.
 
 **The folders:**
@@ -55,120 +74,122 @@ The rest of this README explains what each step does and why.
 | Folder | What's in it |
 |---|---|
 | `scripts/host/` | Run on the laptop: flash the Jetson, back up and restore its SSD, set it up |
-| `scripts/jetson/` | Run on the Jetson, in number order (`01-…16`), plus its helpers (`spectrum-clocks`, `spectrum-rt`, the fan, health check, camera firmware tools) |
-| `detector/` | Our wrapper around the GPU detector (`GpuDetectorJNI.cc`), the hardware JPEG decoder, and replay tools that run recordings through the detector |
-| `patches/` | Our changes to the GPU detector (`bos-01…`) and the 2026 PhotonVision patches (`photonvision-NN`, kept for history) |
+| `scripts/jetson/` | Run on the Jetson, in number order (`01-…14`), plus its helpers (`spectrum-clocks`, `spectrum-rt`, the fan, health check, camera firmware tools) |
+| `detector/` | Our wrapper around the GPU detector (`GpuDetectorJNI.cc`), the hardware JPEG decoder, and replay tools that run recordings through the detector (`detector-replay`, `fieldcal_detect`) |
+| `patches/` | Our changes to the GPU detector (`detector-01…12`) and the 2026 PhotonVision patches (`photonvision-NN`, kept for history: the 2027 fork carries them as commits) |
 | `kernel/` | Our changes to Linux's USB camera driver (`uvcvideo`) |
 | `robot-vision/` | The **robot-side** Java library: reads the Jetson's results, checks and fuses them into the robot's pose |
-| `calibrations/` | Lens calibrations for our cameras |
+| `calibrations/` | Lens calibrations for our cameras, by camera serial |
 | `tests/` | Bench and field tests, one folder each, with a `run.sh` |
 | `tools/` | Bigger helpers: fake cameras, field calibration, the field model |
 | `docs/` | The details: [TECHNICAL.md](docs/TECHNICAL.md) (every measurement and decision), REWIND.md, research notes, reviews |
 | `training/` | The student course website |
 
 **Names you'll see:**
-- **971 / AOS / bos:** FRC 971 Spartan Robotics, their robot framework (AOS, now kept by Realtime Robotics Group), and `frc971/bos`, the repo we took the GPU detector from. In our files, "971" and "bos" just mean **the GPU detector**: `08-select-detector.sh bos`, `SPECTRUM_971_*` settings, `971 stats` log lines. (These are being renamed to plain "detector" names.)
-- **4143:** FRC 4143's CUDA PhotonVision, where the 2026 version of this started.
+- **The GPU detector:** `07-build-gpu-detector.sh` builds it, `08-select-detector.sh gpu` installs it, `SPECTRUM_DETECTOR_*` are its settings, and its log lines start `detector stats` and `jpeg decoder`.
+- **971 / AOS / bos (old names):** FRC 971 Spartan Robotics, their robot framework (AOS, now kept by Realtime Robotics Group), and `frc971/bos`, the repo the detector's code comes from. Until 2026-10-31 our files named the detector after them (`lib971apriltag.so`, `bos`, `SPECTRUM_971_*`, `971 stats`); the old names still work, and older docs and logs use them. The full list is at the top of [TECHNICAL.md](docs/TECHNICAL.md).
+- **4143:** FRC 4143's CUDA PhotonVision, where the 2026 version of this started. `08-select-detector.sh gpu-4143` still installs their older detector build.
 - **Rewind:** recording every camera during a match, to replay later.
 - **Match Ready:** PhotonVision's page that says whether the Jetson is ready for a match.
 - **Quiet mode / idle mode:** after a match or while disabled, the Jetson saves less to disk and runs the cameras slower; after 20 s disabled (or with no robot) it also lowers its clocks (`spectrum-clocks`).
 - **Far search:** a slower second look for small, far-away tags.
 - **NVJPG:** the Jetson's hardware JPEG decoder; camera frames are decoded there instead of on the CPU.
+- **CUDA graph:** a batch of GPU work recorded once and replayed every frame with one call, which saves CPU.
 - **Thriftiest Cam / Swyft:** the USB cameras we use.
-- **JetPack / L4T r39:** NVIDIA's Jetson software (JetPack 7 = L4T r39, Ubuntu 24.04).
+- **JetPack / L4T r39:** NVIDIA's Jetson software (JetPack 7.2.1 = Jetson Linux r39.2.1, Ubuntu 24.04).
 
 ## Overview
 
-We turned an NVIDIA Jetson Orin Nano Super into a vision coprocessor that finds AprilTags on its GPU, for team 8515's robot at the October 2026 off-season event.
+We turned an NVIDIA Jetson Orin Nano Super into a vision coprocessor that finds AprilTags on its GPU. It ran on team 8515's robot at the October 2026 off-season event (on JetPack 6), and is now set up for the 2027 season.
 
-The robot controller is a SystemCore running 2027 alpha-6 robot code. The Jetson runs PhotonVision, the same software many FRC teams use on an Orange Pi. Ours is a special version that sends the AprilTag math to the GPU using a detector written by FRC team 971. The robot code talks to it through PhotonLib over NetworkTables, like any other PhotonVision camera.
+The robot controller is a SystemCore running WPILib 2027 robot code. The Jetson runs PhotonVision, the same software many FRC teams use on an Orange Pi. Ours is a special version that sends the AprilTag math to the GPU using a detector written by FRC team 971. The robot code talks to it through PhotonLib over NetworkTables, like any other PhotonVision camera.
 
 Everything we did is scripted in this repo, so another Jetson can be set up the same way. These notes explain what we did and why, including the mistakes, so you can understand the system and not just copy commands.
 
 ## How the pieces fit
 
-A camera frame goes over USB into PhotonVision on the Jetson. PhotonVision finds tags with the CUDA detector on the GPU, then sends results to the robot over NetworkTables.
+A camera frame goes over USB into PhotonVision on the Jetson. The JPEG hardware decodes it, the GPU detector finds the tags, and PhotonVision sends the results to the robot over NetworkTables.
 
 ```mermaid
 flowchart LR
-  CAM["2-4x Thriftiest Cam<br/>USB 2.0, MJPEG 1280x800"] --> PV["PhotonVision 2026 fork<br/>(4143 CUDA version + our patches)"]
-  PV --> DET["971 CUDA AprilTag<br/>detector on the GPU"]
+  CAM["2-5x Thriftiest Cam<br/>USB 2.0, MJPEG 1280x800"] --> PV["PhotonVision 2027 fork<br/>(spectrum-2027)"]
+  PV --> DET["GPU AprilTag detector<br/>libspectrum-gpu-apriltag.so"]
   DET --> PV
-  PV -->|NetworkTables| SC["SystemCore<br/>2027 alpha-6 robot code"]
+  PV -->|NetworkTables| SC["SystemCore<br/>WPILib 2027 robot code"]
   SC -->|time sync| PV
 ```
 
 | Piece | What we use |
 | --- | --- |
 | Computer | Jetson Orin Nano Super devkit (8 GB), booting from a 256 GB NVMe SSD, no SD card |
-| Operating system | JetPack 6.2.3 (Jetson Linux 36.5.2, Ubuntu 22.04) with CUDA 12.6 |
+| Operating system | **JetPack 7.2.1** (Jetson Linux r39.2.1, Ubuntu 24.04, kernel 6.8) with CUDA 13.2, cuDNN 9.20, TensorRT 10.16 |
+| Java | JDK 25 |
 | Power mode | MAXN SUPER (the fastest mode, which gives the board its "Super" name) |
-| Cameras | 2 Thrifty Bot [Thriftiest Cams](https://www.thethriftybot.com/products/thriftiest-cam) ([docs](https://docs.thethriftybot.com/electrical/thriftiest-cam/latest/overview)) for AprilTags: OV9281, mono, global shutter, 1280x800, USB 2.0. On the bench also: 2 "Global Shutter Camera" (32e4:0144) and a colour USB camera (32e4:62f0) for game pieces |
+| Cameras | 2 Thrifty Bot [Thriftiest Cams](https://www.thethriftybot.com/products/thriftiest-cam) ([docs](https://docs.thethriftybot.com/electrical/thriftiest-cam/latest/overview)) for AprilTags: OV9281, mono, global shutter, 1280x800, USB 2.0. Also a Swyft USB Camera. |
 | Power | From the robot through a 15 V boost regulator board, which kept the Jetson running down to a 5 V input (tested 2026-09-25) |
-| Vision software | FRC-Team-4143's PhotonVision fork (2026 version), merged with upstream PhotonVision v2026.3.4, plus our patches |
-| Tag detector | Austin Schuh's current CUDA detector (from 971 / RealtimeRoboticsGroup), built from frc971/bos |
-| Game pieces | YOLO models on the GPU through TensorRT 10.3 (our backend), FUEL model by Team 2826 |
-| Robot side | Stock PhotonLib v2027.0.0-alpha-2 in `2026-FM-SystemCore`, team 8515 |
+| Vision software | Our PhotonVision fork, branch `spectrum-2027`: upstream PhotonVision 2027 on **WPILib 2027 alpha-8**, plus our features |
+| Tag detector | Austin Schuh's current CUDA detector (from 971 / RealtimeRoboticsGroup), built from frc971/bos with our `detector-NN` patches. No WPILib inside it any more. |
+| Game pieces | YOLO models on the GPU through TensorRT (our backend); deferred on JetPack 7 until we need it |
+| Robot side | WPILib 2027 alpha-8, PhotonLib built from our fork, and SpectrumVision (`robot-vision/`) |
 
-**Why a 2026 PhotonVision works with 2027 robot code:** the CUDA version of PhotonVision only exists for 2026. We checked the source to confirm the two versions speak the same language:
-
-- the messages have the same format (PhotonLib compares a hash of the message layout, and it matches exactly),
-- the NetworkTables protocol is the same,
-- time sync is the same.
-
-The one rule: **don't upgrade the robot's PhotonLib past alpha-6.** Newer versions changed the message format, and the robot code would crash when it reads from this Jetson.
+**Versions must match.** PhotonLib checks a hash of the message layout and refuses results from a PhotonVision with a different one. Robot code and the Jetson must both be on our alpha-8 fork. (In 2026 the rule was the opposite: stay on PhotonLib alpha-2, because the Jetson ran a 2026 PhotonVision. See [docs/MAINTENANCE-2027.md](docs/MAINTENANCE-2027.md).)
 
 ## Step 1: Flash JetPack onto the SSD
 
 Flashing writes NVIDIA's operating system onto the Jetson's NVMe SSD and updates the bootloader stored on the board. It's done from an Ubuntu 22.04 laptop over a USB-C cable. The whole flash took about 7 minutes.
 
-**Why JetPack 6.2.3 and not 7:** JetPack 7 now supports this board, but it moves to Ubuntu 24.04 and CUDA 13. The CUDA detector and PhotonVision fork were built for JetPack 6. 6.2.3 was the newest 6.x release, with bug fixes over the 6.2 in our original plan.
+**Why JetPack 7.2.1:** PhotonVision 2027 needs a newer system library (glibc 2.38+) than JetPack 6's Ubuntu 22.04 has. JetPack 7.2.1 is the first to support the Orin Nano, with Ubuntu 24.04 and CUDA 13. (In 2026 we used JetPack 6.2.3, because the 4143 CUDA fork was built for it.)
 
-1. **Download** the two NVIDIA files, the "BSP" (flashing tools) and the "sample root filesystem" (Ubuntu itself), about 2.6 GB.
-2. **Prepare** them on the laptop: `scripts/host/01-prepare-bsp.sh`. It unpacks everything and installs NVIDIA's flashing prerequisites. It also creates the Jetson's user account (`spectrum3847`, hostname `photonvision-3847`), so the first boot doesn't need a monitor and keyboard.
-3. **Put the Jetson in recovery mode:**
+1. **Download and prepare** NVIDIA's two files, the "BSP" (flashing tools) and the "sample root filesystem" (Ubuntu itself): `scripts/host/01-prepare-bsp.sh` downloads them into `~/nvidia/r39.2.1`, unpacks everything and installs NVIDIA's flashing prerequisites. It also creates the Jetson's user account (`spectrum3847`, hostname `photonvision-3847`), so the first boot doesn't need a monitor and keyboard.
+2. **Put the Jetson in recovery mode:**
    - Unplug power.
    - Jumper the **FC REC** and **GND** pins (pins 9 and 10) on the small 12-pin button header under the module. It's *not* the big 40-pin header.
    - Plug power back in, then remove the jumper.
    - Check with `lsusb`: the Jetson should show up as `0955:7523 NVIDIA Corp. APX`.
-4. **Flash:** `scripts/host/02-flash-nvme.sh`. The script temporarily stops Ubuntu's network manager from grabbing the Jetson's USB network connection, and temporarily opens the firewall for it. Both are common causes of failed flashes, and both are put back afterward. It erases the whole SSD (back up first: `04-backup-ssd.sh`, `rewind-pull.sh`), so it asks you to type `ERASE`; `YES=1` skips that.
+3. **Flash:** `scripts/host/02-flash-nvme.sh`. The script temporarily stops Ubuntu's network manager from grabbing the Jetson's USB network connection, and temporarily opens the firewall for it. Both are common causes of failed flashes, and both are put back afterward. It erases the whole SSD (back up first: `04-backup-ssd.sh`, `rewind-pull.sh`), so it asks you to type `ERASE`; `YES=1` skips that. It also checks that r39 still keeps our 64 GiB system partition from growing.
 
-**Reading the flash log:** "Waiting for target to boot-up" repeating for about 30 s is normal, and so are warnings like "backup GPT table is corrupt" and missing `mmcblk0boot0`. The flash is only finished at **"Flash is successful"**. "Successfully flashed the external device" comes a couple of minutes earlier, and the bootloader is still being written at that point, so **don't unplug the board then.**
+**Reading the flash log:** "Waiting for target to boot-up" repeating for about 30 s is normal, and so are warnings like "backup GPT table is corrupt". The flash is only finished at **"Flash is successful"**, so **don't unplug the board before then.** Our first JetPack 7 flash failed with the SSD missing ("EMEM address decode error"); a 10 s power cut and a re-run flashed cleanly. If it fails like that: power cycle, don't debug.
 
 ## Step 2: First boot and verification
 
 After flashing, the Jetson boots from the SSD and shows up on the laptop as a USB network device. The Jetson is `192.168.55.1`, and the laptop gets `192.168.55.100`.
 
 1. **Set up SSH keys** so scripts can log in without a password: `ssh-copy-id -i ~/.ssh/jetson_ed25519.pub spectrum3847@192.168.55.1`.
-2. **Verify and enable MAXN SUPER:** `scripts/jetson/01-verify.sh` checks three things. The root filesystem must be on the NVMe (`/dev/nvme0n1p1`), the software version must be R36.5.2, and the MAXN SUPER power mode must exist. It then switches to that mode (`nvpmodel -m 2`). Afterward, all 6 CPU cores run at 1728 MHz, and the setting survives reboots.
+2. **Verify and enable MAXN SUPER:** `scripts/jetson/01-verify.sh` checks three things. The root filesystem must be on the NVMe (`/dev/nvme0n1p1`), the software version must be R39.2.1, and the MAXN SUPER power mode must exist. It then switches to that mode (it may reboot to do it) and makes it the boot default. Afterward, all 6 CPU cores run at 1728 MHz.
 3. **Get it online.** Over USB it has no internet, and its clock is wrong until it syncs, which makes package downloads fail. Wi-Fi is easiest: `sudo nmcli --ask dev wifi connect <SSID>`.
-4. **Install CUDA** with `scripts/jetson/02-jetpack.sh`, which runs `apt install nvidia-jetpack`. Flashing only installs the base OS, so CUDA 12.6, cuDNN and TensorRT come from this step.
+4. **Install CUDA and Java** with `scripts/jetson/02-jetpack.sh`, which runs `apt install nvidia-jetpack` and installs JDK 25. Flashing only installs the base OS, so CUDA, cuDNN and TensorRT come from this step.
 
 **Tip:** never put a password in a script or a chat. On our Jetson the team account has passwordless sudo (`/etc/sudoers.d/90-spectrum3847-nopasswd`, added by the team so setup scripts can run over SSH); on a fresh Jetson, run `sudo` steps in a terminal where you type the password yourself.
 
 ## Step 3: Build and install the vision software
 
-The vision stack has four parts. Two are built on the Jetson, one on the laptop, and one is installed from PhotonVision's installer.
+`install.sh` runs all of these in order; here's what each does.
 
 | # | Part | Built where | Script | Notes |
 | --- | --- | --- | --- | --- |
 | 1 | PhotonVision service | Jetson (installer) | `jetson/03-photonvision.sh` | Installs the systemd service that starts PhotonVision at boot. We then replace its jar with the fork. |
-| 2 | allwpilib `v2026.2.1` | Jetson | `jetson/04-build-allwpilib.sh` | Libraries the CUDA detector links against. Must be the **v2026.2.1 tag**: its `main` branch has moved on and won't compile with the detector. Took 17 minutes. |
-| 3 | CUDA detector `lib971apriltag.so` | Jetson | `jetson/07-build-bos-detector.sh`, then `08-select-detector.sh bos --mwbd 20 --jpeg nvjpg` | Austin Schuh's current code (see below) plus our JNI wrapper in `detector/`. `--jpeg nvjpg` decodes the camera JPEGs on the Jetson's JPEG hardware (`libspectrumnvjpg.so`, see Performance), gray and colour; it uses ~180 MB of memory per camera. Leave it out to decode on the CPU. |
-| 4 | PhotonVision fork jar | Laptop | `host/03-build-photonvision-fork.sh`, then `jetson/06-install-fork-jar.sh` | The 4143 fork, upstream v2026.3.4 (patch 00) and our patches 01–87. It builds on the laptop in about 30 s instead of taxing the Jetson. The Jetson runs it on Java 17. The build also bundles the training site (`training/`) as the sidebar's Documentation page, so the course works on the robot with no internet. |
-| 5 | Camera driver with a bandwidth cap | Jetson | `jetson/11-uvcvideo-payload-cap.sh --install` | Needed for 3–4 cameras on the USB-A ports (see Performance). |
-| 6 | TensorRT backend `libspectrumtrt.so` | Jetson | built by `07-build-bos-detector.sh`; install to `/usr/lib` | Game-piece detection. Models go in with `jetson/12-install-yolo-model.sh`. |
-| 7 | USB controller watchdog | Jetson | `jetson/14-usb-watchdog.sh --install` | Resets the USB controller if the kernel says it died, so the cameras come back without a person. It never reboots (see Known issues). |
+| 2 | GPU detector `libspectrum-gpu-apriltag.so` | Jetson | `jetson/07-build-gpu-detector.sh`, then `08-select-detector.sh gpu` | Austin Schuh's current code (see below), our `patches/detector-NN`, and our JNI wrapper in `detector/`. It also builds the JPEG-hardware decoder (`libspectrumnvjpg.so`, gray and colour, both engines). `08` installs both and writes the detector's settings: `--mwbd 20` and `--mse 10` are the defaults we run. |
+| 3 | PhotonVision fork jar | Laptop | `host/03-build-photonvision-fork.sh`, then `jetson/06-install-fork-jar.sh` | Branch `spectrum-2027` of our fork. It builds on the laptop instead of taxing the Jetson; the Jetson runs it on Java 25. The build also bundles the training site (`training/`) as the sidebar's Documentation page, so the course works on the robot with no internet. |
+| 4 | Camera driver with a bandwidth cap | Jetson | `jetson/11-uvcvideo-payload-cap.sh --install` | Needed for 3–4 cameras on the USB-A ports (see Performance). Built from NVIDIA's own r39 kernel source. |
+| 5 | Robot tuning | Jetson | `jetson/09-robot-tuning.sh` | Steps 1–16, below. Step 15 (`spectrum-rt`, low-jitter camera threads) is installed but **off**; step 16 (`spectrum-clocks`, lower clocks when idle) is on. |
+| 6 | USB controller watchdog | Jetson | `jetson/14-usb-watchdog.sh --install` | Resets the USB controller if the kernel says it died, so the cameras come back without a person. It never reboots (see Known issues). |
+| 7 | TensorRT backend `libspectrumtrt.so` | Jetson | built by `07-build-gpu-detector.sh`; install to `/usr/lib` | Game-piece detection. Models go in with `jetson/12-install-yolo-model.sh`. Deferred on JetPack 7. |
 
-**Where the detector code comes from.** FRC 971 (Spartan Robotics) wrote the CUDA AprilTag detector. Austin Schuh, its author, now maintains it in the [**RealtimeRoboticsGroup/aos**](https://github.com/RealtimeRoboticsGroup/aos) repo and works with team 1868. We started with FRC-Team-4143's copy (`GpuDetectorJNI`), which dates from about August 2024. We switched to **frc971/bos**, which has Austin's current code with a CMake build that works on our exact CUDA version. In a side-by-side test, the new detector found tags exactly as well as the old one, and **30–40% faster** (1.7 ms per frame instead of 2.4–3.0 ms).
+`04-build-allwpilib.sh` and `05-build-gpudetector.sh` build the 2026 setup's WPILib and 4143 detector (`08-select-detector.sh gpu-4143`). The current detector doesn't need WPILib.
 
-**Why build on the laptop sometimes?** The fork's jar is Java plus a web UI, with no native code, so it builds the same anywhere. The detector and allwpilib are native ARM and CUDA code, so they have to be built on the Jetson itself (or cross-compiled, which is more work).
+**Where the detector code comes from.** FRC 971 (Spartan Robotics) wrote the CUDA AprilTag detector. Austin Schuh, its author, now maintains it in the [**RealtimeRoboticsGroup/aos**](https://github.com/RealtimeRoboticsGroup/aos) repo and works with team 1868. We started with FRC-Team-4143's copy (`GpuDetectorJNI`), which dates from about August 2024. We switched to **frc971/bos**, which has Austin's current code with a CMake build. In a side-by-side test, the new detector found tags exactly as well as the old one, and **30–40% faster**. On JetPack 7 we made it independent of WPILib (it builds the AprilTag C library in) and ported it to CUDA 13.
+
+**Why build on the laptop sometimes?** The fork's jar is Java plus a web UI, with no native code, so it builds the same anywhere. The detector is native ARM and CUDA code, so it has to be built on the Jetson itself (or cross-compiled, which is more work).
 
 **Safe deploys.** `06-install-fork-jar.sh` refuses to install a jar that isn't a valid zip, and it keeps the previous working jar as `photonvision.jar.prev`. We added that after a truncated jar took PhotonVision down (see the bugs section).
 
-**Robot readiness.** `jetson/09-robot-tuning.sh` prepares the Jetson for the robot: no automatic updates, headless boot, snapd off (it was adding 45 s to every boot), clocks locked at max on boot, USB autosuspend off for cameras, power-cut safety (data on the SSD within 3 s, the system log kept across power cuts), the cooling (the stock fan on NVIDIA's quiet profile, full speed, or none for a fanless heatsink plate: Settings > Robot state > Cooling, or `FAN=` here; see [Fanless](#fanless-heatsink-plate)), the Wi-Fi reconnecting when NetworkManager gives up on it (only while its radio is on), a 30 s hardware watchdog (also while rebooting, where it was 10 minutes), reboot on kernel panic, PhotonVision restarted on any exit, OpenCV's worker threads sleeping instead of spinning, 1 s USB retries (a stuck camera held up the others on its hub for ~65 s each), and dropping a network connection whose other end has vanished after ~13 s instead of ~15 minutes (a dashboard laptop that left without closing kept its camera streams encoding for nobody). The system log keeps up to 2 GB. After it, the Jetson boots in 16.5 s instead of 57 s, and both cameras are detecting about 20 s after power-on. `jetson/health-check.sh` prints a PASS / WARN / FAIL readiness report you can run over SSH before a match.
+**Robot readiness.** `jetson/09-robot-tuning.sh` prepares the Jetson for the robot: no automatic updates, headless boot, snapd off (it was adding 45 s to every boot), clocks locked at max on boot (and lowered while idle, step 16), USB autosuspend off for cameras, power-cut safety (data on the SSD within 3 s, the system log kept across power cuts), the cooling (the stock fan on NVIDIA's quiet profile, full speed, or none for a fanless heatsink plate: Settings > Robot state > Cooling, or `FAN=` here; see [Fanless](#fanless-heatsink-plate)), the Wi-Fi reconnecting when NetworkManager gives up on it (only while its radio is on), a 30 s hardware watchdog (also while rebooting, where it was 10 minutes), reboot on kernel panic, PhotonVision restarted on any exit, OpenCV's worker threads sleeping instead of spinning, 1 s USB retries (a stuck camera held up the others on its hub for ~65 s each), and dropping a network connection whose other end has vanished after ~13 s instead of ~15 minutes (a dashboard laptop that left without closing kept its camera streams encoding for nobody). The system log keeps up to 2 GB. On JetPack 6 the Jetson then booted in 16.5 s instead of 57 s, with both cameras detecting about 20 s after power-on (to re-measure on JetPack 7). `jetson/health-check.sh` prints a PASS / WARN / FAIL readiness report you can run over SSH before a match.
+
+**Lower clocks when idle** (step 16, `spectrum-clocks`; `photonvision-90` in the fork). The clocks are locked at maximum so frame times stay steady. But between matches that's wasted heat: 20 s after the robot disables (or with no robot connected), PhotonVision runs `spectrum-clocks throttle`, and any enable runs `spectrum-clocks full` at once. Measured idle: **7.7 W and 71 °C, against ~12 W** at full clocks. If PhotonVision isn't running for 30 s, a guard lowers them too. `spectrum-clocks mode full` (or the setting on Settings > Robot state) keeps full clocks always.
 
 ## Fanless (heatsink plate)
+
+*Measured on JetPack 6 (2026-10-01); idle is now cooler with the clocks lowered (7.7 W, 71 °C).*
 
 With the stock heatsink's fan sealed under an aluminium plate and thermal tape (so it can't move air), **Cooling: No fan** (Settings > Robot state, `photonvision-71`; or `FAN=off 09-robot-tuning.sh`) keeps the fan stopped and takes it away from the kernel, which would otherwise switch it on at 74 °C. **A Jetson with the stock heatsink and fan should be on a Fan setting:** on No fan its fan stays stopped, the chip runs hot, and the cameras get capped (below). The choice applies at once and at every boot, and is kept on the settings partition, so a reinstall without `FAN=` keeps it (`tests/fan-mode/run.sh` checks each mode). This repo's `config.env` leaves `FAN` empty, and a fresh install with it empty is fanless, like ours. If the chip reaches **95 °C**, `spectrum-fan-guard` sets a flag and PhotonVision caps every camera at **60 fps** until it's under 88 °C (`photonvision-57`; Match Ready and Settings > Robot state show it). The chip itself throttles at 99 °C and shuts down at 104 °C.
 
@@ -210,6 +231,8 @@ So the SSD is now split three ways (`02-flash-nvme.sh` and `scripts/jetson/10-da
 
 ## Bugs we found and fixed
 
+*Most of these were found on the 2026 (JetPack 6) build; the fixes carried over to 2027. The `detector-NN` patches were called `bos-NN` then.*
+
 None of this code was written for our exact setup, so we found and fixed several real bugs. Each fix is a small patch file in `patches/`, applied automatically by the build scripts. They're good examples of how real systems fail.
 
 | Bug | What went wrong | Fix |
@@ -217,9 +240,9 @@ None of this code was written for our exact setup, so we found and fixed several
 | Memory leak | The detector leaked two small matrices every time it decoded a tag. Over a long event it could run the Jetson out of memory. | Applied Austin's upstream fix (`3e570d5a`). |
 | Detector slots | The C++ code had 10 detector slots and never reused them. The 11th pipeline change got handle `-1` and then read past the start of an array, which is undefined behavior. | Reuse slots, check every handle, free detectors properly (`gpudetector-03`). A stress test creates and destroys 300 detectors. |
 | Stale CUDA error | CUDA's error flag stays set until someone reads it. Newer CUDA libraries (CUB) fail on *any* leftover error, so one unchecked call broke a later, unrelated call on every frame. | Clear leftover errors before each frame, and check the calls that weren't checked. |
-| One GPU error crashed everything | Austin's code aborts the whole program on any CUDA error, which takes PhotonVision down with it. | A CUDA error now skips one frame. PhotonVision restarts only if the whole GPU context is broken (`cudaDeviceSynchronize` fails for 1 s); a failure on one camera never takes the others down (`bos-01` + `detector/`). Until the 2026-10-01 audit that held only for `Detect()` itself: a CUDA error in the mask upload, the graph recording or the far search escaped into Java and aborted the JVM. All of it is guarded now; a far-search failure only turns the far search off for 10 s. |
-| Blank frames failed every time | With nothing to detect (covered lens, dark pit, plain wall), the detector launched a GPU kernel with 0 blocks, an invalid launch that broke the next step on every frame. Combined with the old watchdog, that restarted PhotonVision in a loop. | Return "no detections" early when there are no candidate blobs (`bos-02`). Reproduced and verified with `tests/detector-frame-sizes`: blank frames failed at 5 resolutions before, pass at all of them now. |
-| Debug timing on every frame | With 4 cameras, PhotonVision used 2.2 CPU cores, over half of it inside the Linux kernel, and detection took 4.4 ms instead of 1.5. At the end of every frame, the detector asked the GPU for 22 timestamps to build a timing report that's only printed in debug mode, which is always off. All 4 cameras share one CUDA lock, so ~60 of these pointless calls per frame per camera had the cameras taking turns on that lock tens of thousands of times a second. | Record and read the timestamps only when the report is on (`bos-03`): detection 3.1 → 2.2 ms and 0.36 fewer cores with 4 cameras. Found by tracing which threads woke which (Linux `ftrace`) and pausing PhotonVision in `gdb` to see where they waited. **Lesson: code that does nothing visible can still cost a lot, especially when it holds a shared lock.** |
+| One GPU error crashed everything | Austin's code aborts the whole program on any CUDA error, which takes PhotonVision down with it. | A CUDA error now skips one frame. PhotonVision restarts only if the whole GPU context is broken (`cudaDeviceSynchronize` fails for 1 s); a failure on one camera never takes the others down (`detector-01` + `detector/`). Until the 2026-10-01 audit that held only for `Detect()` itself: a CUDA error in the mask upload, the graph recording or the far search escaped into Java and aborted the JVM. All of it is guarded now; a far-search failure only turns the far search off for 10 s. |
+| Blank frames failed every time | With nothing to detect (covered lens, dark pit, plain wall), the detector launched a GPU kernel with 0 blocks, an invalid launch that broke the next step on every frame. Combined with the old watchdog, that restarted PhotonVision in a loop. | Return "no detections" early when there are no candidate blobs (`detector-02`). Reproduced and verified with `tests/detector-frame-sizes`: blank frames failed at 5 resolutions before, pass at all of them now. |
+| Debug timing on every frame | With 4 cameras, PhotonVision used 2.2 CPU cores, over half of it inside the Linux kernel, and detection took 4.4 ms instead of 1.5. At the end of every frame, the detector asked the GPU for 22 timestamps to build a timing report that's only printed in debug mode, which is always off. All 4 cameras share one CUDA lock, so ~60 of these pointless calls per frame per camera had the cameras taking turns on that lock tens of thousands of times a second. | Record and read the timestamps only when the report is on (`detector-03`): detection 3.1 → 2.2 ms and 0.36 fewer cores with 4 cameras. Found by tracing which threads woke which (Linux `ftrace`) and pausing PhotonVision in `gdb` to see where they waited. **Lesson: code that does nothing visible can still cost a lot, especially when it holds a shared lock.** |
 | 62-second restart | Aborting triggered Ubuntu's crash reporter, which spent 28 s writing a 156 MB crash file before the restart could begin. | Exit cleanly instead, and turn off JVM core dumps. Worst-case vision outage went from about 62 s to about 8 s. |
 | Blank AprilCudaTag tab | The fork's settings tab was written for an older version of the web framework (Vue 2) and couldn't render in Vue 3. | Ported it to Vue 3, showing only settings that actually do something (`photonvision-01`). |
 | Missing Device Control card | PhotonVision used a brand-new browser feature (`Intl.DurationFormat`) to format the uptime. Firefox 130 doesn't have it, so the whole card, including the Restart button, disappeared. | Check for the feature and fall back (`photonvision-03`). Also: keep your browser updated. |
@@ -237,6 +260,20 @@ None of this code was written for our exact setup, so we found and fixed several
 **Lesson:** check results by *measuring*, not by assuming. The truncated-jar bug happened partly because we trusted a log line from the *old* process. Now every check looks at the running process's own ID.
 
 ## Performance: what actually limits the frame rate
+
+**Now, on JetPack 7 (2026-10-30/31), 2 Thriftiest Cams at 1280x800:**
+
+| Change | Result |
+| --- | --- |
+| Starting point after the move | 122 fps each; `min_white_black_diff` was left at 5 by mistake: detect 2.2–2.6 ms, GPU ~45%, 4–11 ms spikes |
+| `--mwbd 20`, the robot setting (now 08's default) | detect ~1.6 ms, GPU ~27%, ~1 ms lower median latency |
+| Both NVJPG engines (`libspectrumnvjpg.so` fixes an r39 library mismatch in memory) | every camera on the JPEG hardware; 342 instead of 194 frames/s in a test |
+| The rest of each frame's GPU work as CUDA graphs (`detector-11`) | CPU per frame ~4x lower in the detector; camera threads **~50% → ~25% of a core** for 2 cameras; median latency **−1.4 ms**; detections byte-identical |
+| Today | **122 fps each, ~15 ms median latency (p95 ~16–19 ms)** |
+
+PhotonVision's log prints each camera's latency (median, p95, max) every 10 s ("Loop timing"), and `tests/perf-snapshot.sh` and `tests/bench-session/run.sh` collect it.
+
+**The rest of this section is the 2026 story (JetPack 6).** The lessons still hold.
 
 We went from 33 fps to the cameras' full **122 fps**, on two cameras at once. The GPU was never the bottleneck: the detector takes under 2 ms per frame, fast enough for 500+ fps. The real limits were the camera exposure, how PhotonVision reads frames, and how it decodes them.
 
@@ -259,7 +296,7 @@ We went from 33 fps to the cameras' full **122 fps**, on two cameras at once. Th
 
 **Lights flicker.** Mains lighting flickers 120 times per second (every 8.3 ms). At exposures that aren't a multiple of 8.3 ms, each frame can catch a different part of the flicker and pulse in brightness. In our shop at 5 ms we measured no flicker (0.6% brightness change frame to frame) with `tests/flicker-check/run.sh`. **Run it again under the event's lights; if frames pulse by several percent, go back to 83 (8.3 ms).**
 
-**Measure before optimizing.** We added a once-per-second stats line to the detector (calls per second, milliseconds per frame, tags per frame, decision margin). It showed right away that the GPU was idle and the camera pipeline was the problem, which saved us from optimizing the wrong thing.
+**Measure before optimizing.** We added a once-per-second stats line ("detector stats") to the detector (calls per second, milliseconds per frame, tags per frame, decision margin). It showed right away that the GPU was idle and the camera pipeline was the problem, which saved us from optimizing the wrong thing.
 
 **Four cameras share one GPU.** With 4 cameras the GPU was only about a third busy (before the CUDA graph; now about a quarter), yet the slowest frames take 6–12 ms instead of ~3. That's queueing: a camera's GPU work sometimes waits behind another camera's, like a short line at a busy store. We tried two settings to shorten the wait: 32 hardware work queues for CUDA instead of 8, and letting the CPU sleep while the GPU works instead of spinning. The first test made the queues look like a big win, but repeating it showed the same settings vary by 2 ms from one restart to the next. Over 11 runs the queues were worth maybe 0.5 ms, and sleeping made no difference. Both are on anyway because neither costs anything (`08-select-detector.sh` sets the queues; details in [TECHNICAL.md](docs/TECHNICAL.md)). **Lesson: measure more than once before believing a speed-up.** Also close the dashboard before measuring: 4 open camera streams added about half a CPU core and 1–2 ms to the slowest frames.
 
@@ -268,15 +305,15 @@ We went from 33 fps to the cameras' full **122 fps**, on two cameras at once. Th
 | Change | Detect time | CPU | GPU |
 | --- | --- | --- | --- |
 | Starting point, 4 cameras | 4.4 ms | 2.2 cores | 40–43% |
-| Stop debug timing on every frame (`bos-03`, see the bugs table) | 2.2 ms | 1.5 | 35% |
-| Find blob edges and drop the empty ones in one GPU step, not two (`bos-04`; the original author's own to-do) | 1.9 ms | 1.4 | 28% |
+| Stop debug timing on every frame (`detector-03`, see the bugs table) | 2.2 ms | 1.5 | 35% |
+| Find blob edges and drop the empty ones in one GPU step, not two (`detector-04`; the original author's own to-do) | 1.9 ms | 1.4 | 28% |
 | Keep each frame on the GPU after the JPEG hardware decodes it, instead of copying it down and back up | 1.3 ms | 1.26 | 27% |
-| Launch the first 13 GPU steps as one pre-recorded CUDA graph (`bos-05`) | 1.2 ms | 1.23 | 25.6% |
+| Launch the first 13 GPU steps as one pre-recorded CUDA graph (`detector-05`) | 1.2 ms | 1.23 | 25.6% |
 | Stop copying every gray frame in PhotonVision (`photonvision-37`) | **1.2 ms** | **1.14** | **25.7%** |
 
 Each frame now takes less time with four cameras than one camera did before. **Five cameras** also run at 122 fps each: 2.1 ms detection, 44% GPU, 1.9 cores, 11.1 W (facing bright ceiling lights, the hard case). The limit is now USB bandwidth: five capped Thrifties use 6,400 of the ~6,720 bytes the Jetson's USB 2.0 ports share, so a 6th won't fit. What's left of the CPU is mostly inside NVIDIA's own libraries: how CUDA waits for the GPU, and the JPEG hardware's driver, which reopens the graphics device for every frame.
 
-**Where the latency goes.** A result reaches the robot about 14.5 ms after the middle of the exposure. We timed each step with the camera driver's own log: half the 5 ms exposure (2.5 ms), then **8.1 ms for the camera to send the frame**, then 0.15 ms until our decoder starts, 2.8 ms of JPEG decode, and 1.2 ms of detection. The camera streams each frame out over about one frame period while its sensor reads out, so neither USB nor PhotonVision is what's slow. The `bos-04` change was checked by replaying ~5,000 recorded frames: every one of 3,567 tag detections came out byte-for-byte identical.
+**Where the latency goes.** A result reaches the robot about 14.5 ms after the middle of the exposure. We timed each step with the camera driver's own log: half the 5 ms exposure (2.5 ms), then **8.1 ms for the camera to send the frame**, then 0.15 ms until our decoder starts, 2.8 ms of JPEG decode, and 1.2 ms of detection. The camera streams each frame out over about one frame period while its sensor reads out, so neither USB nor PhotonVision is what's slow. The `detector-04` change was checked by replaying ~5,000 recorded frames: every one of 3,567 tag detections came out byte-for-byte identical.
 
 **More cameras.** Each camera at its full 122 fps now costs about 0.6 of a CPU core (it was 1.4 before the decode fix), and less with the JPEG hardware, so 4 cameras should fit. The limit was **USB bandwidth**. With the stock driver each camera reserves ~196 Mbps whatever mode it runs, and the Jetson's whole USB 2.0 side holds two of those (see below).
 
@@ -449,10 +486,7 @@ The board is labeled "9x12", but **PhotonVision needs width 12, height 9**. With
 
 - **The board settings start at our board:** ChArUco, 5x5 markers, 30 mm squares, 22 mm markers, width 12, height 9. Sizes are in millimetres (`photonvision-23`).
 - After clicking Start, set **Auto Exposure off and Exposure about 150**. Calibration uses its own settings, and its default was nearly black. A long exposure is fine here because the board is held still; don't copy it into the vision pipelines.
-- **Take at least 100 snapshots.** PhotonVision now requires 100 (upstream #2437); mrcal's docs show the returns diminish around there.
-  - Click **Auto Snapshots (1 per second)** and keep moving the board slowly. It keeps a snapshot only when it finds the board.
-  - **Take Snapshot** still takes one by hand, for a specific shot.
-  - Cover every corner of the image, tilt the board up to about 45°, and vary the distance.
+- **Use the full-screen view and cover the edges and corners:** see [Calibrating well](#calibrating-well) for targets. Partial boards at the edge are good, not bad.
 - Aim for a mean reprojection error under about 0.5 px (under 1 px is fine for FRC).
 - If a calibration fails and gets stuck, restart PhotonVision (Settings → Restart Software) to clear the bad snapshots.
 - **A camera that cuts out only while the board is in view:** its frames are too big for the USB bandwidth each camera gets (`11-uvcvideo-payload-cap.sh`: ~85 KB a frame at 120 fps, so four cameras fit). A board filling the view is 85-105 KB a frame; an ordinary scene is 45-67 KB. Calibration now runs at the slowest frame rate the chosen resolution offers (`photonvision-70`, ~340 KB a frame at 30 fps), and the camera goes back to its pipeline's mode afterwards. On an older build, the long exposure above does the same: it lowers the frame rate. Reported by another team, 2026-10-01.
@@ -465,7 +499,55 @@ The board is labeled "9x12", but **PhotonVision needs width 12, height 9**. With
 | TopLeft (port 2.1) | 43 | 97% | 0.87 px | 737.8 | 650.5, 362.4 |
 | TopRight (port 2.3) | 41 | 96% | 0.97 px | 737.0 | 597.9, 371.6 |
 
-We couldn't get the error below 0.5 px handheld, and that's okay. With so few outliers, the data is clean, and the remaining ~0.8–0.9 px is noise from MJPEG compression. The focal length came out at about 737 px in all three of camera 1's calibrations. **Outliers are the better warning sign.** Our second try had 42% outliers because many snapshots had the board mostly outside the frame. For edge coverage, keep most of the board in the image and just touch the edge.
+*(2026 bench results.)* We couldn't get the error below 0.5 px handheld. The focal length came out at about 737 px in all three of camera 1's calibrations. **We later found these calibrations never covered the image edges**, and the "42% outliers" of our second try were good edge corners, not bad snapshots: see [Calibrating well](#calibrating-well).
+
+## Camera firmware (Thriftiest Cam and Swyft)
+
+Both camera makes can be flashed from PhotonVision's **Settings** page, with the cameras still plugged into the Jetson. A flash is refused while the robot is enabled.
+
+| | Thriftiest Cam firmware card | Swyft camera firmware card |
+| --- | --- | --- |
+| Shows | each Thriftiest Cam once: its port, PhotonVision name, serial and firmware version, and a warning for firmware that won't recover from a USB drop | each Swyft on USB, by port and PhotonVision name, and the stored firmware images |
+| Does | flashes firmware from the browser (we run the unofficial "usbrecov" 5.13, which comes back after a USB hub reset) | uploads, checks and flashes `.rfw` images (we run Swyft's low-exposure firmware, 0.2 ms), with an optional new serial |
+| Serial | stored once from the laptop: `scripts/host/thriftiest-flash.sh rename 2.1 SJ-TC01` | set on the card while flashing (`SJ-SW01`) |
+| Backs up | — | into `swyft-firmware/backups` on the settings partition |
+| After | the camera comes back by itself | **power-cycle the robot**: a Swyft's video only comes back after its power is cut (a Jetson reboot isn't enough) |
+| Command line | `scripts/jetson/thriftiest-fw.py`, `scripts/host/thriftiest-flash.sh` | `scripts/jetson/swyft-fw.py` |
+| Details | [docs/THRIFTIEST-CAM-FIRMWARE.md](docs/THRIFTIEST-CAM-FIRMWARE.md) | [docs/SWYFT-CAMERA-FIRMWARE.md](docs/SWYFT-CAMERA-FIRMWARE.md) |
+
+**Why a serial matters:** every Thriftiest Cam ships with the same serial (`01.00.00`) and every Swyft with `200901010001`, so PhotonVision can only tell them apart by USB port. With a serial of its own, a camera keeps its name and calibration in any port (see below).
+
+## Calibrating well
+
+**The short version:** cover the *whole* image, especially the edges and the four corners; keep partial boards; tilt the board; vary the distance. Our old calibrations were fine in the middle and weak at the edges, and it showed on the field.
+
+**What we found** (`tests/calibration-analysis/RESULTS.md`, 2026-10-31). We checked our two robot cameras' calibrations against the 6 recorded TXMAN1 matches:
+- Inside the area the snapshots covered, the calibrations fit to about 0.1 px. But **no snapshot reached the outer ring of the image**: the image-corner areas had 3–54 board corners each, where they need 150+.
+- Just past the data, the 8-coefficient lens model **folds over** (its curve turns back), so a tag near the edge is projected to the wrong place. On the field, the error grew with distance from the centre exactly where coverage ended.
+- Refitting the **same snapshots** with every corner kept and a model that doesn't fold cut the match error from **median 1.21 → 0.97 px and p90 8.2 → 4.9 px**. Those refits are in `calibrations/*-refit.json`, ready to import.
+- The old advice "our second try had 42% outliers, so keep the board inside the image" was wrong: those "outliers" were good edge corners the centre-fitted model couldn't explain.
+
+**The full-screen calibration view** (fork, `photonvision-91`; open it from the calibration card while calibrating). Built from that study, not yet tried on a real camera:
+- The image at full size, live corners (green when still), and a **coverage grid** (10x8 cells, with the outer ring and the four corner blocks outlined) so you can see what still needs corners.
+- **"Move the board here" guidance:** a ghost board where the next snapshot should go, plus quotas for far (≥1.2 m) and tilted (20–45°) shots.
+- **Quality readout** after each solve: error, outliers and where they are, coverage, fx with its spread, and a **red banner if the lens model folds**. **Save** only works when the checks pass (or "save anyway" is ticked). Snapshots can be listed and deleted, and the result exported as JSON.
+- **Partial boards count:** a ChArUco board hanging off the edge is kept when it shows 6+ corners across 2+ rows and columns. That's the *only* way to get corners into the extreme corners.
+- **Auto-capture:** when the board is held still and adds new coverage (or fills a quota). Near-copies of earlier snapshots are skipped; Space takes one by hand.
+- **8 lens coefficients** are kept from the solve.
+- An "edge-corner refit" option exists but is **off** until it's checked on the bench.
+
+**How to calibrate well:**
+
+| Do | Target |
+| --- | --- |
+| Number of snapshots | about 60–100 |
+| Where | ~40% centre and middle, ~60% aimed at the edges and corners. Every part of the image gets corners; get corners within ~10 px of the border |
+| Tilt | 20–45° about both axes in at least 30% of snapshots |
+| Distance | 0.4–1.5 m (far shots fill the corners with small, dense corners) |
+| Exposure | Auto Exposure off, Exposure ~150 (the board is still, so blur isn't a problem; don't copy it into the vision pipelines) |
+| Accept when | inlier error ≤0.25 px rms, no empty area, and the model doesn't fold |
+
+Keep the board flat and rigid (ours is a printed commercial panel). After any recalibration, check a tag at a measured 2.00 m reads 2.00 ±0.01 m.
 
 ## Rewind: recording what the cameras saw
 
@@ -488,7 +570,7 @@ A page in PhotonVision's web UI (**Field Calibration** in the sidebar, `photonvi
    - Set any setting by hand with its slider: it saves to the pipeline in use, like the Camera page. Tick a setting's lock to keep it while the rest are tuned.
    - **Apply recommended** saves that camera's results. Each camera keeps its results until it's tuned again, so the robot can be turned between cameras.
 2. **Record the spots.** Push the robot to 10–20 spots and hold it still at each until the page says the spot counts (about 2 s, and it beeps). A field map shows which tags need more views, where each camera is, and a suggested next spot. It can also be shown in 3D, using *FIRST*'s own field CAD. Each element is placed by its tags, so it matches the AndyMark or welded layout in use, and after a calibration it shows where things really are. The mouse works like Onshape's: right-drag turns, middle-drag or Ctrl + right-drag moves, the wheel zooms.
-3. **Solve.** The Jetson replays the recording through the same 971 GPU detector it uses in matches, then solves every tag's real pose and every camera's mount. It takes about a minute.
+3. **Solve.** The Jetson replays the recording through the same GPU detector it uses in matches, then solves every tag's real pose and every camera's mount. It takes about a minute.
 4. **Results:**
    - **Tags:** each tag marked as drawn or moved, with its offset.
    - **Cameras:** each mount compared with robot code's, plus a Java snippet.
@@ -498,7 +580,43 @@ Robot code has to publish each camera's `robotToCamera` (a `Transform3d` struct)
 
 How it works, the tests and the command-line version are in [tools/fieldcal](tools/fieldcal/README.md). The plan and the shop-test checklist are in [docs/FIELD-CALIBRATION-PLAN.md](docs/FIELD-CALIBRATION-PLAN.md).
 
+## Field replay: what 6 real matches say
+
+We recorded 6 matches at TXMAN1 with Rewind (team 8515, 54,000 frames from two cameras, plus each match's robot log), then replayed them through the GPU detector on the Jetson with different settings (`detector-replay`, `tests/field-replay/run.sh`). Each tag sighting is checked against the other tags in the same frame (its "in-frame" error: median 1.3 px). Full results: [tests/field-replay/RESULTS.md](tests/field-replay/RESULTS.md) and [tests/field-replay/accuracy/RESULTS.md](tests/field-replay/accuracy/RESULTS.md).
+
+**Detector settings:**
+
+| Setting | Verdict |
+| --- | --- |
+| `max_line_fit_mse` 10 (`--mse`) | **Keep 10.** 2.5 drops only 0.28% of sightings; 15–20 add almost nothing. It never moves a corner, only accepts or rejects. |
+| `min_white_black_diff` 20 (`--mwbd`) | **Keep 20.** Doesn't change accuracy, and it's 30–40% faster than 5. |
+| `min_cluster_pixels` 24 | **Keep 24.** |
+| Resolution 1280x800 | **Keep.** 640x400 loses 42% of sightings and range (farthest tag 7.2 m vs 9.2 m). |
+| Far search | **Worth it:** +4.5% sightings, and its finds are the most accurate (0.95 px median), for ~1.7 ms a frame. But on JetPack 7 each full-size search takes 5.9 ms (2.7 on JetPack 6), which made 1 frame in 10 late, so it's **off by default until it's faster**. |
+| Edge filter (`--edge`, AOS-style) | **Don't.** At 10–50 px it removes 5–11% of sightings, 85–90% of them good. |
+| Extra corner refinement (cornerSubPix, edge-line fit) | **Don't.** Both make corners *worse* than the detector's own edge refinement, which is worth 0.73 px and must stay on. |
+
+**Where the error really is:** a corner jitters only ~0.08 px when still, but the in-frame error is 1.3 px median and 9 px p90. That's systematic: the **lens calibration** at the image edges (see [Calibrating well](#calibrating-well)) and the **field layout**, not detector settings.
+
+**Robot side:** no single filter separates bad detections from good ones. The 1.6 rad/s turn-rate gate our 2026 code used throws away more good sightings than bad (detections don't get worse when turning; the robot's *pose* does). Raise it to 3.5 rad/s or drop it. Frames also looked ~5–9 ms early against odometry: a bench spin test should confirm that before anyone compensates for it.
+
+**Camera mounts:** solving each camera's mount from the matches showed the left camera's yaw ~3–6° off from robot code, and the right camera re-aimed between days (pitch −19° → −25°). Nothing noticed at the event, which is why we built the mount check.
+
+## Mount check (robot-vision)
+
+A bumped or mis-measured camera moves every pose from that camera, while each detection still looks fine, so no filter catches it. **`MountCheck`** in SpectrumVision (`robot-vision/`, on by default) does:
+
+- For each frame, it works out where the camera must be from the tags alone, and so where it must be mounted on the robot.
+- **Height, roll and pitch** are checked directly (the robot is flat on the floor). **x, y and yaw** are checked against the other cameras (with 3+, the odd one out is the bad one) or the pose estimator.
+- It only samples while the robot is slow, and uses the median of the last 400 samples. **SUSPECT** past 2° or 4 cm, **BAD** past twice that.
+- It raises an alert (Elastic, AdvantageScope), publishes `/SpectrumVision/mountCheck/…`, and `vision.health().mountCheck()` is a pre-match check: disabled, robot still, each camera seeing tags for ~2 s.
+- Replaying TXMAN1, it flagged 8515's left camera in 6 of 6 matches and the right in 5 of 6.
+
+Details: [robot-vision/README.md](robot-vision/README.md#mount-check). To *measure* a mount precisely, use [Field calibration](#field-calibration-the-event-fields-real-tags-and-every-cameras-mount).
+
 ## Game-piece detection (TensorRT)
+
+*Measured on JetPack 6 (2026). On JetPack 7 it's deferred until we need it (TensorRT 10.16).*
 
 PhotonVision's Object Detection pipeline runs YOLO models on the Jetson's GPU through TensorRT. That's our backend: `photonvision-14` plus `libspectrumtrt.so`, built from `detector/TensorRtYoloJNI.cu`. Robot code gets normal PhotonLib targets, with class and confidence.
 
@@ -581,7 +699,7 @@ PhotonVision's Object Detection pipeline runs YOLO models on the Jetson's GPU th
 | A camera's stream won't show | The browser's connection limit (each open stream holds one) | Close extra PhotonVision tabs, then Ctrl+Shift+R. |
 | PhotonVision never shows up on NT after a boot; restarting robot code fixes it | PhotonVision started before robot code and its NT client got stuck (see Known issues) | Restart robot code, or press Save on PhotonVision's Settings page. Save the PhotonVision log first. |
 | PhotonVision won't start ("corrupt jarfile") | A bad jar was installed | Reinstall a good jar with `06-install-fork-jar.sh`, or copy back `photonvision.jar.prev`. |
-| Robot code throws about a PhotonLib version or message mismatch | Robot PhotonLib upgraded past alpha-6 | Keep `photonlib v2027.0.0-alpha-2`. |
+| Robot code throws about a PhotonLib version or message mismatch | Robot PhotonLib and the Jetson's PhotonVision differ | Build robot code's PhotonLib from the same fork commit the Jetson runs (WPILib 2027 alpha-8). |
 | Gradle build fails with a PKIX/SSL error | A network filter is blocking `frcmaven.wpi.edu` (it works from the shop as of 2026-10-30) | Check with `curl -I https://frcmaven.wpi.edu`; use another network if it's blocked. |
 
 **How the tags look** (`photonvision-54`): whenever a camera sees a tag big enough (24 px or more), PhotonVision measures the tag's white margin and black border, a few times a second. The **Input tab** shows it above the camera controls ("white 205, black 38 (contrast 167), 0% clipped: good"), with what to change when it isn't good: whites clipping (shorten exposure, or lower brightness or gamma), low contrast (lengthen exposure, watching motion blur), or blacks lifted (brightness too high). Match Ready's camera tiles and `health-check.sh` show it too. It explains what the Field Calibration tuner's scores can't. The **Camera Gain** slider is gone for cameras that have no gain control: the Thriftiest Cam is listed upstream as having gain, but ours has none, so the slider did nothing.
@@ -590,13 +708,13 @@ PhotonVision's Object Detection pipeline runs YOLO models on the Jetson's GPU th
 
 **Match Ready page** (`photonvision-52`, in the sidebar): one screen before a match. A big READY / NOT READY from the same checks as `health-check.sh` (run by PhotonVision every 30 s while the page is open, or with **Check again**), anything that needs attention listed first, and a live tile per camera: pipeline number and name, fps, latency, targets in view, and whether it's calibrated at its resolution. Every check is underneath, by section.
 
-**Checking on it:** run `scripts/jetson/health-check.sh` for a readiness report. `journalctl -u photonvision -f` shows PhotonVision's live log on the Jetson. The `971 stats` lines show frames per second, detection time and decision margin for each camera. The `971 jpeg` lines (every 10 s) show which JPEG decoder is running and how its checks went.
+**Checking on it:** run `scripts/jetson/health-check.sh` for a readiness report. `journalctl -u photonvision -f` shows PhotonVision's live log on the Jetson. The `detector stats` lines show frames per second, detection time and decision margin for each camera. The `jpeg decoder` lines (every 10 s) show which JPEG decoder is running and how its checks went. (Before 2026-10-31 these were `971 stats` and `971 jpeg`.)
 
-**Far-tag search** (`detector/far_search.cc`, switch in `photonvision-55`): the GPU detector normally looks for tags on a half-size image, so it misses tags under about 18–20 px (far away). When **no camera has had a good view for 0.25 s** (a good view = at least 2 near tags, 40 px or more with a decision margin of 30), the cameras start also searching their full-size images, one camera at a time and at most 30 a second across all of them. Far tags they find are then followed with small full-size crops. **As soon as any camera has a good view again, it all stops**, so while the pose is good it costs nothing.
+**Far-tag search** (`detector/far_search.cc`, switch in `photonvision-55`; **off by default on JetPack 7** until it's faster, see [Field replay](#field-replay-what-6-real-matches-say)): the GPU detector normally looks for tags on a half-size image, so it misses tags under about 18–20 px (far away). When **no camera has had a good view for 0.25 s** (a good view = at least 2 near tags, 40 px or more with a decision margin of 30), the cameras start also searching their full-size images, one camera at a time and at most 30 a second across all of them. Far tags they find are then followed with small full-size crops. **As soon as any camera has a good view again, it all stops**, so while the pose is good it costs nothing.
 - **Range:** in the bench test it finds tags down to 10 px instead of 18 px, **1.8× the distance** (about 7 m → 12 m for a 6.5 in tag face-on, by the pinhole rule with fx 737; blur makes real ranges a bit shorter).
 - **Cost while searching** (5 cameras, no tags in view, searching the whole time): GPU 16.5% → 19.4%, 9.7 → 10.1 W, average latency +0.2 ms. All cameras stay at 122 fps. Each full-size search is ~2.7 ms.
 - **Switch it off** in Settings > Robot state (**Far-tag search when the pose is weak**), which also shows whether it's searching and what it has found. `health-check.sh` says whether it's on.
-- **Replay a recording** with it: `tests/far-search/replay.sh SESSION_DIR` (on the Jetson) replays every camera of a Rewind session together, far search on and off, and reports the tags only the far search found. Replaying the bench recordings found a detector bug that could freeze a camera during a full-size search of a busy scene (fixed in `bos-08`).
+- **Replay a recording** with it: `tests/far-search/replay.sh SESSION_DIR` (on the Jetson) replays every camera of a Rewind session together, far search on and off, and reports the tags only the far search found. Replaying the bench recordings found a detector bug that could freeze a camera during a full-size search of a busy scene (fixed in `detector-08`).
 - **Tests:** `tests/far-search/run.sh` on the Jetson renders real tags into frames and checks the range, that its corners match the normal search's (within 0.02 px), the policy, tracking a moving far tag (92 of 92 frames) and the budget. `tests/ui` checks the switch.
 
 **Idle while disabled** (`photonvision-49`): while the Jetson is connected to a robot that's disabled, each camera processes 30 frames a second instead of 122. It's back to full rate within 5 ms of enable. With 5 cameras: **7.8 W disabled against 9.7 W enabled**, less heat in the queue and between matches, and 30 results a second is still plenty to set the robot's starting pose. Off the robot (no NetworkTables connection) nothing changes, so tuning on the bench sees every frame. When the robot disables, PhotonVision also runs a garbage collection (27 ms), so the memory is cleaned up before the next match rather than during it. **To test at full speed with the robot attached** (`photonvision-50`): press **Full speed** on the dashboard's "Robot disabled: cameras idle at 30 fps" notice, or switch off **Idle while the robot is disabled** in Settings > Robot state. The same card sets the idle rate and shows what PhotonVision sees of the robot (connected, enabled, auto, FMS). It's saved across restarts, so `health-check.sh` warns while it's off.
@@ -610,7 +728,7 @@ PhotonVision's Object Detection pipeline runs YOLO models on the Jetson's GPU th
 **After installing a new build:** run `tests/ui/run.sh` on the laptop. It drives the dashboard in Chrome and checks that every slider, switch and menu changes the page, PhotonVision and a second dashboard, and puts each one back. It also tests the mask editor, Start from, Create on every camera, Switch all and hidden-tab streams. It takes about a minute and a half and works on a temporary copy of a pipeline, so your settings aren't touched. See [tests/ui](tests/ui/README.md).
 
 **Detector regression check** (`tests/regression/run.sh`, on the Jetson): replays a fixed corpus of recordings through the detector as built now, far-tag search on as live, and compares every detection with the last accepted output (`tests/regression/golden/`). It runs before every prebuilt bundle (`make-prebuilt-bundle.sh` refuses on a change; `SKIP_REGRESSION=1` to override).
-- **What it catches:** any detection lost, gained or moved by more than 0.001 px, in any change to the detector: bos, our `bos-*` patches, the JNI build, far search, or new detector settings. Replays are bit-for-bit repeatable.
+- **What it catches:** any detection lost, gained or moved by more than 0.001 px, in any change to the detector: bos, our `detector-*` patches, the JNI build, far search, or new detector settings. Replays are bit-for-bit repeatable.
 - **The corpus** (`tests/regression/corpus.json`, checksummed, so a damaged recording reports as that and not as a detector change):
   - `fieldcal-synth`: a rendered 4-camera drive with a real lens model (2,628 frames, 3,314 detections);
   - `synthetic-near-far`: near tags and a 14 px far tag (361 detections);
@@ -645,10 +763,10 @@ PhotonVision's Object Detection pipeline runs YOLO models on the Jetson's GPU th
 - **Don't turn on "Publish protobuf"** in the networking settings: it sends every result a second time.
 - **Robot loop time:** NetworkTables' sending and receiving run on its own C++ thread, not in the robot loop. What does run in the loop is PhotonLib decoding results and `addVisionMeasurement`; if that shows up in loop time, read the cameras on a separate thread and hand the loop finished measurements.
 
-**Robot code: use [SpectrumVision](robot-vision/README.md)** (`robot-vision/`), our robot-side library on top of PhotonLib, for WPILib 2026 (roboRIO) and 2027 alpha-6 (SystemCore). It reads every camera's frames, solves them (multi-tag, or one tag's position plus the gyro), gates out bad ones with named, tunable gates, gives each a standard deviation, and sends them to WPILib's or CTRE's estimator in capture-time order. It uses this Jetson's per-tag quality, health topics and excluded tags, and works with stock PhotonVision too. `robot-vision/install.sh <robot project> 2026|2027` copies it in.
+**Robot code: use [SpectrumVision](robot-vision/README.md)** (`robot-vision/`), our robot-side library on top of PhotonLib, for WPILib 2026 (roboRIO) and 2027 (SystemCore). It includes the [mount check](#mount-check-robot-vision). It reads every camera's frames, solves them (multi-tag, or one tag's position plus the gyro), gates out bad ones with named, tunable gates, gives each a standard deviation, and sends them to WPILib's or CTRE's estimator in capture-time order. It uses this Jetson's per-tag quality, health topics and excluded tags, and works with stock PhotonVision too. `robot-vision/install.sh <robot project> 2026|2027` copies it in.
 
 **What robot code must do** (from the 2026-10-01 audit, [docs/AUDIT-2026-10.md](docs/AUDIT-2026-10.md); SpectrumVision handles the ones marked *):
-- **Stay on PhotonLib v2027.0.0-alpha-2 and WPILib 2027 alpha-6** for October. Later PhotonLib changes the message format (PhotonLib then refuses our results). WPILib alpha-7 changes time-sync units without an error. Log `PhotonPipelineResult.photonStruct.getInterfaceUUID()` at startup and alert if it isn't `4b2ff16a…` (* SpectrumVision alerts on any mismatch with the coprocessor's format). ([docs/MAINTENANCE-2027.md](docs/MAINTENANCE-2027.md))
+- **Match the Jetson's PhotonVision.** Now: WPILib 2027 alpha-8, with PhotonLib built from our `spectrum-2027` fork. (For the October 2026 event it was PhotonLib alpha-2 and WPILib alpha-6, against the 2026 PhotonVision.) PhotonLib refuses results whose message format differs: log `PhotonPipelineResult.photonStruct.getInterfaceUUID()` at startup and alert on a mismatch (* SpectrumVision alerts on any mismatch with the coprocessor's format). ([docs/MAINTENANCE-2027.md](docs/MAINTENANCE-2027.md))
 - **Use the Jetson's camera names** (`TopLeft`, `TopRight`, …), exactly as the dashboard shows them.
 - **Call `setEnabled(true)` on every camera at robot init** (*). A camera robot code disabled stays disabled if robot code restarts (PhotonVision keeps it in memory), and returns empty results.
 - **Drop the tags in `/photonvision/excludedTagsActive`** (*). They're left out of multi-tag, but still sent as single-tag targets.
@@ -677,17 +795,36 @@ The detailed technical reference, with exact versions, commits and measurements,
 | Folder | What's in it |
 | --- | --- |
 | `scripts/host/` | Run on the laptop: prepare and flash the Jetson (01, 02), build the PhotonVision fork jar (03), back up and restore the SSD (04, 05), copy and export Rewind recordings (`rewind-pull.sh`, `rewind-export.py`) |
-| `scripts/jetson/` | Run on the Jetson, in order: verify (01), CUDA (02), PhotonVision service (03), allwpilib (04), 4143 detector (05), install jar (06), current detector (07), pick detector (08), robot tuning (09), camera driver bandwidth cap (11), install a YOLO model (12), field-calibration replay tool (13), USB controller watchdog (14), plus `health-check.sh` and `usb-bandwidth.py` (what each camera reserves on USB, and the fix) |
+| `scripts/jetson/` | Run on the Jetson, in order: verify (01), CUDA and Java (02), PhotonVision service (03), allwpilib for the old 4143 detector (04), 4143 detector (05), install jar (06), GPU detector (07), pick detector (08), robot tuning (09, steps 1–16), data partitions (10), camera driver bandwidth cap (11), install a YOLO model (12), field-calibration replay tool (13), USB controller watchdog (14), plus `health-check.sh`, `usb-bandwidth.py` (what each camera reserves on USB, and the fix), `spectrum-clocks`, `spectrum-rt`, and the camera firmware tools |
 | `patches/` | Our fixes to other people's code, applied by the build scripts |
 | `robot-vision/` | SpectrumVision, the robot-side library (PhotonLib wrapper: solvers, gates, trust, alerts, testing), WPILib 2026 and 2027 builds; [robot-vision/README.md](robot-vision/README.md) |
-| `detector/` | Our JNI wrapper and CMake build for Austin's current CUDA detector (and the MJPEG decoders, CPU and hardware, the TensorRT object detector, and `fieldcal_detect`, which replays Rewind recordings through the detector) |
+| `detector/` | Our JNI wrapper and CMake build for Austin's current CUDA detector (and the MJPEG decoders, CPU and hardware, the TensorRT object detector, and the replay tools `detector-replay` and `fieldcal_detect`, which run Rewind recordings through the detector) |
 | `tools/fieldcal/` | Field calibration: tag positions and camera mounts from a recording of the robot pushed to still spots ([README](tools/fieldcal/README.md)) |
 | `tools/fieldmodel/`, `assets/field-models/` | The 3D field model for the Field Calibration page, converted from *FIRST*'s field CAD ([README](tools/fieldmodel/README.md)) |
 | `kernel/` | Our patch to Linux's USB camera driver (bandwidth cap), built by `11-uvcvideo-payload-cap.sh` |
 | `tests/` | `tests/run-all.sh` runs every test that needs no one at the bench (about 30 min, a table at the end). Dashboard browser tests (`tests/ui`), a fake robot for robot-state features (`tests/fake-robot`), quiet mode (`tests/quiet-mode`: a match, a restart, a date jump, a failed remount), Rewind's numbering, delete and NetworkTables reconnects (`tests/rewind-sessions`), a SystemCore rehearsal (`tests/systemcore-rehearsal`: the real WPILib 2027 robot runtime on the laptop, the Jetson connected to it), garbage-collection measurement (`tests/jvm-gc`), frame timestamps (`tests/uvc-timestamps`, `tests/fake-robot/timestamps.sh`), far-tag search (`tests/far-search`), detector stress test, live A/B and fault-injection test, ChArUco board checker, calibration checker, JVM memory check, Rewind on/off test, power-cut test, camera unplug test, USB hub reset test, robot clock test, flicker check, CPU profiler, performance snapshot, telemetry and mount-estimate check |
 | `docs/` | The technical reference, Rewind, the Limelight 4 comparison, vision research, the upstream PhotonVision port, the game-piece models, and the original handoff document that started the project |
 
-**Still to do before the October event:**
+**What's left (2027):**
+
+- [ ] **TensorRT game pieces on JetPack 7** (TensorRT 10.16): deferred until we need it.
+- [ ] **Recalibrate both cameras** with the full-screen view, covering the edges and corners ([Calibrating well](#calibrating-well)); until then, import the refits in `calibrations/*-refit.json`.
+- [ ] **Field calibration** on a real field: the event's tag positions and every camera's mount ([Field calibration](#field-calibration-the-event-fields-real-tags-and-every-cameras-mount)). The field layout is the other half of the remaining error.
+- [ ] **Replay the robot side:** the pose estimator (EKF) and the multi-camera solver (`MultiCameraSolver` in `robot-vision/`, one pose from every corner of every camera; 0.2 cm median in sim) against the TXMAN1 recordings and logs.
+- [ ] **Timing spin test:** a still tag, the robot turning with the gyro logged, to settle the ~5–9 ms the match replays hint at and to measure the camera's own delay (`SPECTRUM_CAMERA_DELAY_US`).
+- [ ] **Faster far search** on JetPack 7 (5.9 ms a search, against 2.7 on JetPack 6), then turn it back on.
+- [ ] The rest of the fork's 2027 port ([SPECTRUM.md](https://github.com/Spectrum3847/photonvision/blob/spectrum-2027/SPECTRUM.md)).
+
+**Still to measure at the bench (JetPack 7):** `tests/bench-session/run.sh` walks through these with prompts, a time limit on every step, and puts every setting back.
+- 4 and 5 cameras at 122 fps: CPU, GPU, latency, temperature (only 2 measured so far).
+- CUDA graphs on/off and far search on/off, interleaved, with tags in view.
+- PhotonVision's 3D mode on vs off: CPU and latency.
+- `spectrum-rt` (low-jitter camera threads, off by default) on vs off, with and without CPU load.
+- USB recovery timing with the usbrecov firmware (opt-in step: it cuts camera links).
+- Boot time and first detection after power-on, and a software reboot that doesn't hang.
+- The full calibration view on a real camera, then the regression corpus with real tag footage.
+
+**History: the October 2026 event checklist (JetPack 6).** Kept as a record; versions and some numbers are from the 2026 setup.
 
 - [x] Calibrate both cameras at 1280x800 (done on the bench; redo on the robot)
 - [x] Deploy the jar with the Device Control and 8-coefficient fixes
@@ -746,7 +883,7 @@ The detailed technical reference, with exact versions, commits and measurements,
 - [ ] Measure whether contrast, gamma or sharpness help (decision margin, far-tag range, corner jitter): the field-calibration settings sweep
 - [x] A stuck camera recovers by itself (`photonvision-29`): reconnect, then USB reset. Tested on the bench with its test hook
 - [x] Bad tags left out of multi-tag, calibration with 100 auto snapshots and our board as the default, camera settings in the robot log, copy settings between cameras (patches 22–25)
-- [ ] Test the detector's `max_line_fit_mse` at 2.5 (upstream #2138: rejects tags cut off at the image edge) against the default 10 with tags in view: range and edge behaviour. Then set it with `08-select-detector.sh bos --mwbd 20 --jpeg nvjpg --mse 2.5`
+- [ ] Test the detector's `max_line_fit_mse` at 2.5 (upstream #2138: rejects tags cut off at the image edge) against the default 10 with tags in view: range and edge behaviour. Then set it with `08-select-detector.sh gpu --mwbd 20 --jpeg nvjpg --mse 2.5`
 - [ ] Test whether the Camera Gain slider does anything on our cameras (`photonvision-21`)
 - [ ] Re-test the detector's thread count with several tags per camera, the field case (`tests/detector-threads/run.sh`, switches live; with one tag it made no difference)
 - [ ] Robot code, in progress: Rewind starting itself on FMS matches, named by match ([issue #10](https://github.com/Spectrum3847/2026-FM-SystemCore/issues/10) 8a)
@@ -769,10 +906,10 @@ This setup stands on other people's work. We link to or patch their code rather 
 | Project | What we use | License |
 | --- | --- | --- |
 | [PhotonVision](https://github.com/PhotonVision/photonvision) | The vision software itself. We merged release v2026.3.4 (patch 00) and ported the server side of `setEnabled` ([#2484](https://github.com/PhotonVision/photonvision/pull/2484), [#2499](https://github.com/PhotonVision/photonvision/pull/2499)) and OpenCV leak fixes ([#2511](https://github.com/PhotonVision/photonvision/pull/2511)). | GPL-3.0 |
-| [FRC-Team-4143/photonvision](https://github.com/FRC-Team-4143/photonvision) | The CUDA version of PhotonVision our build starts from (commit `d8c9e8e`). Also their earlier `GpuDetectorJNI` detector build. | GPL-3.0 |
-| Austin Schuh and FRC 971's CUDA AprilTag detector | The GPU detector, from [RealtimeRoboticsGroup/aos](https://github.com/RealtimeRoboticsGroup/aos) (Apache-2.0), built from [frc971/bos](https://github.com/frc971/bos) `third_party/971apriltag`. Our `bos-*` patches change it. | Apache-2.0 (aos); bos has no license file |
-| [WPILib allwpilib](https://github.com/wpilibsuite/allwpilib) | Built on the Jetson (v2026.2.1) for the detector; cscore and ntcore run inside PhotonVision. | BSD-3-Clause |
-| [Linux kernel](https://www.kernel.org/) `uvcvideo` | Our `kernel/uvcvideo-payload-cap.patch` modifies the stock v5.15.199 USB camera driver, fetched from the stable kernel's [GitHub mirror](https://github.com/gregkh/linux). | GPL-2.0 |
+| [FRC-Team-4143/photonvision](https://github.com/FRC-Team-4143/photonvision) | The CUDA version of PhotonVision our 2026 build started from (commit `d8c9e8e`); its CUDA pipeline is ported into our 2027 fork. Also their earlier `GpuDetectorJNI` detector build. | GPL-3.0 |
+| Austin Schuh and FRC 971's CUDA AprilTag detector | The GPU detector, from [RealtimeRoboticsGroup/aos](https://github.com/RealtimeRoboticsGroup/aos) (Apache-2.0), built from [frc971/bos](https://github.com/frc971/bos) `third_party/971apriltag`. Our `detector-*` patches (called `bos-*` before 2026-10-31) change it. | Apache-2.0 (aos); bos has no license file |
+| [WPILib allwpilib](https://github.com/wpilibsuite/allwpilib) | cscore and ntcore run inside PhotonVision. In 2026 we built v2026.2.1 on the Jetson for the detector; the current detector doesn't link it. | BSD-3-Clause |
+| [Linux kernel](https://www.kernel.org/) `uvcvideo` | Our `kernel/uvcvideo-payload-cap.patch` modifies the USB camera driver: on JetPack 7 from NVIDIA's own kernel 6.8 source (on JetPack 6, the stock v5.15.199 from the stable kernel's [GitHub mirror](https://github.com/gregkh/linux)). | GPL-2.0 |
 | [libjpeg-turbo](https://libjpeg-turbo.org/) | Grayscale MJPEG decode in `detector/GpuDetectorJNI.cc` (the system library). | IJG / BSD-style |
 | NVIDIA JetPack, CUDA, TensorRT | The OS, GPU toolkit and inference engine. Hardware JPEG decode uses JetPack's `libnvjpeg` and the Jetson Multimedia API headers. Not redistributed. | NVIDIA licenses |
 | [Ultralytics](https://github.com/ultralytics/ultralytics) | Exporting YOLO models to ONNX on the laptop. Not redistributed. | AGPL-3.0 |
