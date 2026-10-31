@@ -62,6 +62,7 @@ In order, smallest unknowns first:
    and that robot code on alpha-8 PhotonLib reads results (match the hashes above).
 4. The CUDA detector (`detector/`, frc971 bos) on CUDA 13, made independent of WPILib as
    MAINTENANCE-2027.md plans (plain JNI, its own `WPI_RawFrame`, static AprilTag, explicit units).
-5. NVJPG decoder (Jetson Multimedia API on JetPack 7), TensorRT 10.16 for object detection.
+5. NVJPG decoder (Jetson Multimedia API on JetPack 7). TensorRT 10.16 for object detection: deferred
+   (2026-10-30), not needed yet.
 6. The rest of `spectrum-2027` (Spectrum3847/photonvision, see its SPECTRUM.md): features 2-5 and
    7-14; watch the nine patches that assume microseconds.

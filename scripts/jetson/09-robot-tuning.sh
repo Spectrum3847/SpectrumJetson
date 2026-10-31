@@ -294,7 +294,7 @@ Environment=OPENCV_THREAD_POOL_ACTIVE_WAIT_WORKER=0
 Environment=OPENCV_THREAD_POOL_ACTIVE_WAIT_MAIN=0
 CONF
 sudo systemctl daemon-reload
-if [[ $(cat "$PV_OPENCV_CONF") != "$opencv_before" ]]; then
+if [[ $(cat "$PV_OPENCV_CONF") != "$opencv_before" ]] && systemctl cat photonvision.service &>/dev/null; then
   echo "    restarting PhotonVision to apply"
   sudo systemctl restart photonvision
 fi
