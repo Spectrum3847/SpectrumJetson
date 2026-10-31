@@ -45,3 +45,33 @@ Validation (degraded variants, paired against the base, 95% bootstrap CIs over f
   detection noise. Settings that only change noise can't move it much; ones that change the
   corner *bias* (refinement) can.
 - The old study's "640x400 corners move 0.27 px" is real accuracy loss: +0.26 px in-frame median.
+
+## Checkpoint 2: the existing variants, re-scored
+
+Paired against the base (mse 10, mwbd 20, half-res quad search, far off). "Lost" and "gained" are
+sightings only one side has, with their own in-frame error (all of that variant's tags in the
+frame). The base's in-frame error over all checkable sightings is median 1.28 px, p90 9.14.
+
+| Variant | Sightings | Common: in-frame p50 / p90 change | Lost: n (checkable, median px, >20.4 px) | Gained: n (checkable, median, >20.4) |
+|---|---|---|---|---|
+| mse 2.5 | 38,383 | **0.000 / 0.000** (identical corners) | 107 (32, 6.2, 2) | 1 (1, 10.8, 0) |
+| mse 15 | 38,493 | 0.000 / 0.000 | 0 | 4 (0 checkable) |
+| mse 20 | 38,496 | 0.000 / 0.000 | 0 | 7 (1, 10.6, 0) |
+| mwbd 5 / 10 | 38,483 | 0.000 / 0.000 | 7 (4, 6.1, 0) | 1 (1, 14.5, 0) |
+| mwbd 30 | 38,482 | +0.002 / 0.000 | 11 (2, 6.1, 0) | 4 (1, 7.7, 0) |
+| mcp 50 | 38,489 | identical output | 0 | 0 |
+| mcp 100 | 35,130 | 0.000 / 0.000 | 3,359 (1,250, **1.9**, 112) | 0 |
+| fullres | 41,711 | **+0.032 (CI +0.019..+0.050)** / −0.06 (n.s.) | 1,278 (495, 3.3, 24) | 4,500 (2,220, **1.18**, 66) |
+| far | 40,217 | 0.000 / 0.000 | 0 | 1,728 (540, **0.95**, 22) |
+| half (640x400) | 22,384 | **+0.26 (CI +0.21..+0.30)** / +2.4 | 16,369 | 264 |
+
+- **mse, mwbd and min_cluster_pixels never move a corner.** On every common sighting the
+  corners are bit-identical (static jitter identical too). They only decide which quads survive,
+  so they can't improve accuracy. "Already optimal" was the right answer for them, and now it's
+  measured, not inferred.
+- What they gate: mse 2.5 drops 107 sightings with median in-frame error 6.2 px (5x typical), so
+  they are poor but mostly not wild (2 of 32 checkable > 20.4 px). mse 15/20 add 4/7 sightings,
+  too few to matter. mcp 100 drops 3,359 sightings that are as good as average (median 1.9 px).
+- **Full-res search:** corners on common tags are very slightly *worse* (+0.03 px median), and
+  its extra finds are good (median 1.18 px). Far search's finds are better still (0.95 px).
+- Static jitter is the same for everything here (0.084 px), the far search included.
