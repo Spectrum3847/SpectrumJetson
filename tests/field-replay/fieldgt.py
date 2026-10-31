@@ -7,7 +7,7 @@ Conventions:
 - Tag frame (WPILib layouts): x out of the tag's face, z up; seen from the front, +y is the
   viewer's right. Corners in the detector's order: bottom-left, bottom-right, top-right, top-left
   (as seen in the image), which is what PhotonVision assumes; check_corner_order() verifies it.
-- Pixels: OpenCV's convention (pixel centres at whole numbers). The 971 detector (and far_replay)
+- Pixels: OpenCV's convention (pixel centres at whole numbers). The 971 detector (and detector-replay)
   reports corners with pixel edges at whole numbers, so OpenCV = detector - 0.5 (`half_px`).
 """
 import json

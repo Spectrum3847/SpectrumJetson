@@ -11,7 +11,7 @@
 #   baseline   no tags, then tags: fps, latency median/p95/max per camera, detect times, CPU
 #              (tests/perf-snapshot.sh, then a perf profile per thread: scripts/jetson/profile-cpu.sh),
 #              GPU %, power, temperature
-#   graphs     CUDA graphs on/off A/B, interleaved through /tmp/spectrum-971-graphs (no restart)
+#   graphs     CUDA graphs on/off A/B, interleaved through /tmp/spectrum-detector-graphs (no restart)
 #   3d         PhotonVision's 3D mode (solvePNPEnabled) on vs off with tags, through PhotonVision's
 #              websocket (the same message the UI sends); CPU and latency
 #   rt         spectrum-rt A/B (tests/rt-ab/run.sh) with LOAD=0 and LOAD=4
@@ -34,15 +34,17 @@ SECS=${BENCH_SECS:-30}
 ROUNDS=${BENCH_ROUNDS:-2}
 RT_SECS=${RT_SECS:-45}
 EDGE_VALUES=${EDGE_VALUES:-"0 25 50"}
-GRAPHS_FILE=/tmp/spectrum-971-graphs
-DROPIN=/etc/systemd/system/photonvision.service.d/971.conf
+GRAPHS_FILE=/tmp/spectrum-detector-graphs
+DROPIN=/etc/systemd/system/photonvision.service.d/detector.conf
+# Before the 2026-10-31 rename 08-select-detector.sh wrote 971.conf (SPECTRUM_971_* names).
+[[ -f $DROPIN || ! -f ${DROPIN%/*}/971.conf ]] || DROPIN=${DROPIN%/*}/971.conf
 PVDB=/opt/photonvision/photonvision_config/photon.sqlite
 DEFAULT_STEPS=(inventory baseline graphs far 3d rt edge)
 
 # ---------------------------------------------------------------------------------------------
 # Measurement (run as "run.sh --measure OUT STEP COND ROUND SECS", under a timeout): perf-snapshot
 # for PhotonVision's CPU, tegrastats for GPU/power/temperature/NVJPG, and PhotonVision's own log
-# lines for per-camera fps/latency ("Loop timing", 10 s windows) and per-detector stats ("971
+# lines for per-camera fps/latency ("Loop timing", 10 s windows) and per-detector stats ("detector
 # stats", 1 s windows). Appends rows to OUT/cams.tsv and OUT/sys.tsv.
 measure_main() {
   local out=$1 step=$2 cond=$3 round=$4 secs=$5
@@ -64,10 +66,10 @@ for line in open(jl, errors="replace"):
                   r'.*latency median ([\d.]+) p95 ([\d.]+) max ([\d.]+) ms', line)
     if m:
         loop[m.group(1)].append(tuple(float(x) for x in m.groups()[1:])); continue
-    m = re.match(r'971 stats (h\d+) \S+: ([\d.]+) calls/s, detect avg ([\d.]+) ms max ([\d.]+) ms.*?tags/frame ([\d.]+)', line)
+    m = re.match(r'(?:971|detector) stats (h\d+) \S+: ([\d.]+) calls/s, detect avg ([\d.]+) ms max ([\d.]+) ms.*?tags/frame ([\d.]+)', line)
     if m:
         det[m.group(1)].append(tuple(float(x) for x in m.groups()[1:])); continue
-    m = re.match(r'971 jpeg \d+ s: nvjpg ([\d.]+) frames/s.*?libjpeg-turbo ([\d.]+) frames/s', line)
+    m = re.match(r'(?:971 jpeg|jpeg decoder) \d+ s: nvjpg ([\d.]+) frames/s.*?libjpeg-turbo ([\d.]+) frames/s', line)
     if m:
         jpeg.append((float(m.group(1)), float(m.group(2))))
 f = lambda x: "" if x is None else f"{x:.2f}"
@@ -261,7 +263,7 @@ restart_pv() {
 # What we change, and putting it back (EXIT trap: normal end, Ctrl-C, errors)
 RT_ORIG=$(cat /etc/spectrum-rt 2>/dev/null || echo off)
 if [[ -e $GRAPHS_FILE ]]; then GRAPHS_ORIG=$(cat "$GRAPHS_FILE"); else GRAPHS_ORIG=absent; fi
-DROPIN_BACKUP=$OUT/971.conf.orig
+DROPIN_BACKUP=$OUT/$(basename "$DROPIN").orig
 [[ -f $DROPIN ]] && cp "$DROPIN" "$DROPIN_BACKUP"
 PNP_CHANGED=()   # "uniqueName<TAB>original value"
 DROPIN_CHANGED=0
@@ -281,9 +283,13 @@ restore() {
     timeout 15 python3 "$PVPY" set "$u" solvePNPEnabled "$v" && echo "  3D (solvePNPEnabled) $v: $u"
   done
   if ((DROPIN_CHANGED)); then
-    if [[ -f $DROPIN_BACKUP ]]; then sudo -n install -m 644 "$DROPIN_BACKUP" "$DROPIN"; else sudo -n rm -f "$DROPIN"; fi
+    # Put back under the new name (08 replaced an old 971.conf), with SPECTRUM_971_* renamed.
+    sudo -n rm -f "${DROPIN%/*}/971.conf" "${DROPIN%/*}/detector.conf"
+    if [[ -f $DROPIN_BACKUP ]]; then
+      sed 's/SPECTRUM_971_/SPECTRUM_DETECTOR_/g' "$DROPIN_BACKUP" | sudo -n tee "${DROPIN%/*}/detector.conf" >/dev/null
+    fi
     sudo -n systemctl daemon-reload
-    echo "  detector options: $DROPIN put back; restarting PhotonVision"
+    echo "  detector options: ${DROPIN%/*}/detector.conf put back; restarting PhotonVision"
     ((${#PNP_CHANGED[@]})) && sleep 5   # let PhotonVision save the 3D setting first
     restart_pv
   fi
@@ -321,7 +327,7 @@ step_inventory() {
   # NVJPG: libjpeg-turbo frames/s must be 0, and no camera may have fallen back since PhotonVision started
   pvstart=$(systemctl show photonvision -p ActiveEnterTimestamp --value)
   bad=$(sudo -n journalctl -u photonvision --since "$pvstart" -o cat --no-pager 2>/dev/null |
-    grep -E "^971 jpeg: .*(can't use the hardware|no hardware decoder|hardware decode failed|CUDA failed|DIFFERS|already decode on NVJPG|can't load|missing functions)|hardware decoder OFF" |
+    grep -E "^(971 jpeg|jpeg decoder): .*(can't use the hardware|no hardware decoder|hardware decode failed|CUDA failed|DIFFERS|already decode on NVJPG|can't load|missing functions)|hardware decoder OFF" |
     sort | uniq -c | sort -rn | head -5)
   local turbo
   turbo=$(awk -F'\t' '$1 == "inventory" { print $NF }' "$OUT/sys.tsv")
@@ -431,19 +437,19 @@ step_rt() {
 
 step_edge() {
   local lib nvlib args mwbd mse jpeg conn v
-  lib=$HOME/build/bos-detector/lib971apriltag.so
-  nvlib=$HOME/build/bos-detector/libspectrumnvjpg.so
-  if ! grep -q -- '--edge' "$REPO/scripts/jetson/08-select-detector.sh" || ! grep -qa SPECTRUM_971_EDGE_BORDER_PX /usr/lib/lib971apriltag.so; then
-    note "skipped: the installed detector has no edge filter (SPECTRUM_971_EDGE_BORDER_PX; bos-12) yet"; return 0
+  lib=$HOME/build/gpu-detector/libspectrum-gpu-apriltag.so
+  nvlib=$HOME/build/gpu-detector/libspectrumnvjpg.so
+  if ! grep -q -- '--edge' "$REPO/scripts/jetson/08-select-detector.sh" || ! grep -qa SPECTRUM_DETECTOR_EDGE_BORDER_PX /usr/lib/libspectrum-gpu-apriltag.so; then
+    note "skipped: the installed detector has no edge filter (SPECTRUM_DETECTOR_EDGE_BORDER_PX; detector-12) yet"; return 0
   fi
   # 08-select-detector.sh reinstalls the library from ~/build: only if that's what's installed now
-  if ! cmp -s "$lib" /usr/lib/lib971apriltag.so || { [[ -f $nvlib ]] && ! cmp -s "$nvlib" /usr/lib/libspectrumnvjpg.so; }; then
-    note "skipped: ~/build/bos-detector differs from the installed detector; 08-select-detector.sh would swap it"; return 0
+  if ! cmp -s "$lib" /usr/lib/libspectrum-gpu-apriltag.so || { [[ -f $nvlib ]] && ! cmp -s "$nvlib" /usr/lib/libspectrumnvjpg.so; }; then
+    note "skipped: ~/build/gpu-detector differs from the installed detector; 08-select-detector.sh would swap it"; return 0
   fi
   [[ $(findmnt -n -o FSTYPE /) != overlay ]] || { note "skipped: ro-root is on"; return 0; }
   # keep every other option as it is now
-  mwbd=$(sed -n 's/^Environment=SPECTRUM_971_MIN_WHITE_BLACK_DIFF=//p' "$DROPIN" 2>/dev/null)
-  mse=$(sed -n 's/^Environment=SPECTRUM_971_MAX_LINE_FIT_MSE=//p' "$DROPIN" 2>/dev/null)
+  mwbd=$(sed -En 's/^Environment=SPECTRUM_(DETECTOR|971)_MIN_WHITE_BLACK_DIFF=//p' "$DROPIN" 2>/dev/null)
+  mse=$(sed -En 's/^Environment=SPECTRUM_(DETECTOR|971)_MAX_LINE_FIT_MSE=//p' "$DROPIN" 2>/dev/null)
   jpeg=$(sed -n 's/^Environment=SPECTRUM_JPEG_DECODER=//p' "$DROPIN" 2>/dev/null)
   conn=$(sed -n 's/^Environment=CUDA_DEVICE_MAX_CONNECTIONS=//p' "$DROPIN" 2>/dev/null)
   args=()
@@ -454,7 +460,7 @@ step_edge() {
   ask "EDGE FILTER: ${EDGE_VALUES// /, } px, one PhotonVision restart each (~1 min). Have one tag on a stick ready." || return
   for v in $EDGE_VALUES; do
     DROPIN_CHANGED=1
-    tmo 60 "$REPO/scripts/jetson/08-select-detector.sh" bos "${args[@]}" --edge "$v" --no-restart || return 1
+    tmo 60 "$REPO/scripts/jetson/08-select-detector.sh" gpu "${args[@]}" --edge "$v" --no-restart || return 1
     echo "  restarting PhotonVision with edge border $v px"
     restart_pv || note "edge $v: not every camera came back after the restart"
     ask "EDGE $v px: for 40 s, slide the tag slowly off the edge of each camera's image, then walk it away from one camera for range. Press Enter, then start." || return

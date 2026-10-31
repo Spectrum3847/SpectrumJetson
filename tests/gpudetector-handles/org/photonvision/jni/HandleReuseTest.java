@@ -1,6 +1,6 @@
 package org.photonvision.jni;
 
-// Create/destroy lib971apriltag detectors far more times than there are slots (10),
+// Create/destroy libspectrum-gpu-apriltag detectors far more times than there are slots (10),
 // checking handles are reused and never go negative. The unpatched 4143 library
 // returns -1 on the 11th create and then indexes detectors[-1].
 // Run on the Jetson: tests/gpudetector-handles/run.sh

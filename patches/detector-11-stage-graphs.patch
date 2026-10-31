@@ -31,7 +31,7 @@ index beecf25..dc6e545 100644
        compressed_peaks_device_(line_fit_points_device_.size()),
        sorted_compressed_peaks_device_(line_fit_points_device_.size()),
 -      peak_extents_device_(kMaxBlobs),
-+      // bos-11: +1 for the pad run a graph's reduce-by-key can add.
++      // detector-11: +1 for the pad run a graph's reduce-by-key can add.
 +      peak_extents_device_(kMaxBlobs + 1),
        camera_matrix_(camera_matrix),
        distortion_coefficients_(distortion_coefficients),
@@ -50,7 +50,7 @@ index beecf25..dc6e545 100644
  };
  
 +
-+// SpectrumJetson (bos-11): the pieces that let the stages after the first run as CUDA graphs.
++// SpectrumJetson (detector-11): the pieces that let the stages after the first run as CUDA graphs.
 +// A graph's sizes are fixed, so each step runs over a size bucket (StageBucket) at least as large
 +// as the real count, which stays on the GPU. The entries past the real count are made harmless:
 +// sort keys that sort after every real one (a stable radix sort then leaves the real entries
@@ -59,10 +59,10 @@ index beecf25..dc6e545 100644
 +// only on the entries before it).
 +bool SpectrumStageGraphs() {
 +  static const bool on = [] {
-+    const char* v = std::getenv("SPECTRUM_971_GRAPHS");
++    const char* v = std::getenv("SPECTRUM_DETECTOR_GRAPHS") ? std::getenv("SPECTRUM_DETECTOR_GRAPHS") : std::getenv("SPECTRUM_971_GRAPHS");
 +    return !(v && std::string(v) == "0");
 +  }();
-+  static SpectrumKnob knob("/tmp/spectrum-971-graphs", 1);
++  static SpectrumKnob knob("/tmp/spectrum-detector-graphs", 1);
 +  return on && knob.Get() != 0;
 +}
 +
@@ -366,7 +366,7 @@ index beecf25..dc6e545 100644
      return absl::UnknownError(std::string("recording the first-stage graph failed: ") +
                                cudaGetErrorString(e));
    }
-+  // bos-11: its 2 memsets and the count's copy back as kernels too (SpectrumStageGraphs).
++  // detector-11: its 2 memsets and the count's copy back as kernels too (SpectrumStageGraphs).
 +  if (SpectrumStageGraphs() && !CopiesAsKernels(graph)) {
 +    cudaGraphDestroy(graph);
 +    cudaGetLastError();
@@ -379,7 +379,7 @@ index beecf25..dc6e545 100644
    return absl::OkStatus();
  }
  
-+// SpectrumJetson (bos-11): see SpectrumStageGraphs. Only after the first-stage graph (a gray image,
++// SpectrumJetson (detector-11): see SpectrumStageGraphs. Only after the first-stage graph (a gray image,
 +// the fused BlobDiff, no event timing), and not once recording a graph has failed.
 +bool GpuDetector::SecondStageGraphs() {
 +  return !stage_graphs_failed_ && SpectrumStageGraphs();
@@ -680,7 +680,7 @@ index beecf25..dc6e545 100644
 +  int num_selected_blobs_host = 0;
 +  int num_compressed_peaks_host = 0;
 +  int num_quad_peaked_quads_host = 0;
-+  // bos-11: the rest as two CUDA graphs, when the first stage was one.
++  // detector-11: the rest as two CUDA graphs, when the first stage was one.
 +  bool staged = false;
 +  if (graph && SecondStageGraphs()) {
 +    bool done = false;
@@ -735,7 +735,7 @@ index beecf25..dc6e545 100644
      MaybeCheckAndSynchronize("FitQuads");
    }
    if (timing) after_quad_fit_.Record(&stream_);
-+  // bos-11: a frame that ran step by step because its stage 2 graph wasn't recorded yet also
++  // detector-11: a frame that ran step by step because its stage 2 graph wasn't recorded yet also
 +  // asks for the stage 3 graph it will need.
 +  if (graph && SecondStageGraphs()) {
 +    StageGraph(3, StageBucket(num_selected_blobs_host, sorted_union_marker_pair_device_.size()),
@@ -745,7 +745,7 @@ index beecf25..dc6e545 100644
  
 -  {
 +  if (staged) {
-+    // bos-11: the stage 3 graph already copied them to pinned memory.
++    // detector-11: the stage 3 graph already copied them to pinned memory.
 +    fit_quads_host_.resize(num_quad_peaked_quads_host);
 +    std::memcpy(fit_quads_host_.data(), fit_quads_pinned_.get(),
 +                num_quad_peaked_quads_host * sizeof(FitQuad));
@@ -773,19 +773,19 @@ index c2a9b5a..b120970 100644
    // other thread uses CUDA. image_device: what Detect() will get (nullptr: a host image).
    bool FirstStageGraphWanted(const uint8_t* image_device);
    absl::Status RecordFirstStageGraph(const uint8_t* image_device);
-+  // SpectrumJetson (bos-11): the later stages' graphs (one per size bucket) that Detect() needed
++  // SpectrumJetson (detector-11): the later stages' graphs (one per size bucket) that Detect() needed
 +  // and didn't have; it ran those frames step by step. Record them like the first-stage graph:
-+  // when no other thread uses CUDA (recording breaks other threads' CUDA calls, see bos-05).
++  // when no other thread uses CUDA (recording breaks other threads' CUDA calls, see detector-05).
 +  bool StageGraphsWanted();
 +  absl::Status RecordStageGraphs();
  
-   // SpectrumJetson (bos-07): a detection mask at the decimated size ((width/2) x (height/2), 1 =
+   // SpectrumJetson (detector-07): a detection mask at the decimated size ((width/2) x (height/2), 1 =
    // search here, 0 = ignore), or nullptr for none. Ignored pixels become "no contrast" (127)
 @@ -419,6 +429,28 @@ class GpuDetector {
    bool first_stage_failed_ = false;  // recording failed: don't try again (this detector)
    bool first_stage_mask_ = false;    // whether the recorded graph masks
  
-+  // SpectrumJetson (bos-11): everything after the first stage as two CUDA graphs (SecondStage:
++  // SpectrumJetson (detector-11): everything after the first stage as two CUDA graphs (SecondStage:
 +  // sort, blob extents, filter; ThirdStage: line fits, peaks, quad fits), each recorded once per
 +  // size bucket with the counts kept on the GPU, instead of ~50 launches and 5 host round trips.
 +  // Recorded by RecordStageGraphs (the caller makes sure no other thread uses CUDA meanwhile) on
@@ -807,7 +807,7 @@ index c2a9b5a..b120970 100644
 +  GpuMemory<int> num_quads_int_device_{1};
 +  HostMemory<FitQuad> fit_quads_pinned_{kMaxBlobs};  // stage 3's fit quads, for the host
 +
-   // SpectrumJetson (bos-07): SetMask's mask on the GPU, and whether it's on.
+   // SpectrumJetson (detector-07): SetMask's mask on the GPU, and whether it's on.
    GpuMemory<uint8_t> mask_device_;
    bool mask_on_ = false;
 diff --git a/third_party/971apriltag/line_fit_filter.cc b/third_party/971apriltag/line_fit_filter.cc
@@ -821,7 +821,7 @@ index 46e6935..b14f3f1 100644
 -    double* errs_device, double* filtered_errs_device, Peak* peaks_device) {
 +    double* errs_device, double* filtered_errs_device, Peak* peaks_device,
 +    const int* points_device = nullptr) {
-+  // SpectrumJetson (bos-11): in a CUDA graph the grid is for a worst-case
++  // SpectrumJetson (detector-11): in a CUDA graph the grid is for a worst-case
 +  // count; the real count is on the GPU, and blocks past it do nothing (the
 +  // whole block returns, before any __syncthreads).
 +  if (points_device) {
@@ -837,7 +837,7 @@ index 46e6935..b14f3f1 100644
      float max_line_fit_mse, double cos_critical_rad,
 -    FitQuad* fit_quads_device) {
 +    FitQuad* fit_quads_device, const int* num_extents_device = nullptr) {
-+  // SpectrumJetson (bos-11): a worst-case grid in a CUDA graph; blocks past
++  // SpectrumJetson (detector-11): a worst-case grid in a CUDA graph; blocks past
 +  // the real count (on the GPU) do nothing.
 +  if (num_extents_device && blockIdx.x >= static_cast<unsigned>(*num_extents_device)) return;
    __shared__ QuadFitStorage storage;
@@ -847,7 +847,7 @@ index 46e6935..b14f3f1 100644
        fit_quads_device);
  }
  
-+// SpectrumJetson (bos-11): FitLines and FitQuads with their counts on the GPU, for a CUDA graph:
++// SpectrumJetson (detector-11): FitLines and FitQuads with their counts on the GPU, for a CUDA graph:
 +// the grid covers max_points / max_extents, and blocks past the real count return at once.
 +void FitLinesDeviceCount(
 +    const LineFitPoint* line_fit_points_device, const int* points_device, size_t max_points,
@@ -890,7 +890,7 @@ index d1670a7..caa5563 100644
      float max_line_fit_mse, double cos_critical_rad, FitQuad* fit_quads_device,
      CudaStream* stream);
  
-+// SpectrumJetson (bos-11): the same with the count on the GPU (for a CUDA graph); the grid covers
++// SpectrumJetson (detector-11): the same with the count on the GPU (for a CUDA graph); the grid covers
 +// the max_ count and blocks past the real one do nothing.
 +void FitLinesDeviceCount(
 +    const LineFitPoint* line_fit_points_device, const int* points_device, size_t max_points,

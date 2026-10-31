@@ -3,7 +3,7 @@ logged pose. See RESULTS.md for what it answers and run.sh for how it's run.
 
   analyze.py REPLAY_DIR [--matches M1,M2..] > report.txt
 
-REPLAY_DIR/<match>/ holds prep.py's output and out/<variant>/<session>.{csv,log} from far_replay.
+REPLAY_DIR/<match>/ holds prep.py's output and out/<variant>/<session>.{csv,log} from detector-replay.
 """
 import argparse
 import glob
@@ -493,7 +493,7 @@ def tsum(v):
     return f"detect {np.average(t[:, 0], weights=t[:, 2]):.2f} ms/frame, far search {np.average(t[:, 1], weights=t[:, 2]):.2f} ms/frame"
 
 
-P("\n=== Detect time per variant (far_replay's own timing; the Jetson GPU, nice 10, one replay at a time)")
+P("\n=== Detect time per variant (detector-replay's own timing; the Jetson GPU, nice 10, one replay at a time)")
 for v in sorted(times):
     P(f"  {v:12s} {tsum(v)}")
 

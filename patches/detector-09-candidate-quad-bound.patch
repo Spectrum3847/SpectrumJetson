@@ -6,7 +6,7 @@ index 7ef0780..beecf25 100644
  
      after_bounds_memcpy_.Synchronize();
  
-+    // bos-09: everything below writes one entry per candidate quad into kMaxBlobs-sized buffers.
++    // detector-09: everything below writes one entry per candidate quad into kMaxBlobs-sized buffers.
 +    if (*num_quads_host_.get() > kMaxBlobs) {
 +      return absl::ResourceExhaustedError(
 +          "more candidate quads (" + std::to_string(*num_quads_host_.get()) +
@@ -26,7 +26,7 @@ index c189f13..c2a9b5a 100644
   public:
    // The number of blobs we will consider when counting april tags.
 -  static constexpr size_t kMaxBlobs = 2048;  // TODO Charlie
-+  // SpectrumJetson (bos-09): the most blob pairs ("candidate quads") one frame may have. These
++  // SpectrumJetson (detector-09): the most blob pairs ("candidate quads") one frame may have. These
 +  // buffers (selected_extents_device_, peak_extents_device_, fit_quads_device_ and the scan's
 +  // scratch space) hold kMaxBlobs entries, but the count comes from the image: upstream's 2048
 +  // had no check, so a busy scene (textured carpet, the far search's full-size image) could write
@@ -40,7 +40,7 @@ index c189f13..c2a9b5a 100644
    }
  
    int NumQuads() const { return num_quads_device_.Copy()[0]; }
-+  // bos-09: the last frame's candidate-quad count, from the host copy (no GPU copy), to see how
++  // detector-09: the last frame's candidate-quad count, from the host copy (no GPU copy), to see how
 +  // close real scenes get to kMaxBlobs.
 +  size_t LastNumCandidateQuads() const { return *num_quads_host_.get(); }
  

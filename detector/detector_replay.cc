@@ -1,9 +1,9 @@
-// far_replay: replays a whole Rewind session (every camera, merged in recording-time order) through
-// the 971 detector, as PhotonVision runs it, with the far-tag search (far_search.h) deciding on each
-// frame exactly as it does live: its good-view / starved policy spans all cameras, so this replays
+// detector-replay (was far_replay): replays a whole Rewind session (every camera, merged in
+// recording-time order) through the 971 detector, as PhotonVision runs it, with the far-tag
+// search (far_search.h) deciding on each frame exactly as it does live: its good-view / starved policy spans all cameras, so this replays
 // them together, on the recording's own clock.
 //
-//   far_replay SESSION_DIR [--out OUT.csv] [--budget N] [--off] [--every N] [--threads N]
+//   detector-replay SESSION_DIR [--out OUT.csv] [--budget N] [--off] [--every N] [--threads N]
 //              [--calib CAMERA=fx,fy,cx,cy,k1,k2,p1,p2,k3,k4,k5,k6]... [--mwbd N] [--mse X]
 //              [--exclude ID,ID...] [--mcp N] [--fullres | --half] [--edge N]
 //
@@ -22,8 +22,8 @@
 // (source: normal or far). Summary on stdout: tag sightings (camera x frame x tag) by the normal
 // search and with the far search, the tags only the far search found and how small they were,
 // time starved, full-size searches and crops, and what they cost, and the slowest frames.
-// --edge N: drop tags whose blob comes within N full-frame pixels of the image edge (bos-12,
-// SPECTRUM_971_EDGE_BORDER_PX live; default 0 = off). Normal search only, not the far search's crops.
+// --edge N: drop tags whose blob comes within N full-frame pixels of the image edge (detector-12,
+// SPECTRUM_DETECTOR_EDGE_BORDER_PX live; default 0 = off). Normal search only, not the far search's crops.
 // With --half, N/2 rounded up in the small frame; ignored with --fullres.
 // --trace: each frame's far-search time on stderr as it goes (to find a frame that stalls).
 // Accuracy knobs (tests/field-replay/accuracy/; all off by default, output unchanged without them):
@@ -245,8 +245,10 @@ void EdgeFit(const cv::Mat &img, far_search::Det &d, const Lens *lens) {
   for (int i = 0; i < 4; ++i) d.p[2 * i] = out[i][0] + 0.5, d.p[2 * i + 1] = out[i][1] + 0.5;
 }
 
+// SPECTRUM_DETECTOR_X, or the pre-rename SPECTRUM_971_X.
 double EnvOr(const char *name, double fallback) {
-  const char *v = std::getenv(name);
+  const char *v = std::getenv((std::string("SPECTRUM_DETECTOR_") + name).c_str());
+  if (!v || !*v) v = std::getenv((std::string("SPECTRUM_971_") + name).c_str());
   return v && *v ? std::atof(v) : fallback;
 }
 
@@ -255,7 +257,7 @@ double EnvOr(const char *name, double fallback) {
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   if (argc < 2) {
-    std::cerr << "usage: far_replay SESSION_DIR [--out OUT.csv] [--budget N] [--off] [--every N] [--threads N]"
+    std::cerr << "usage: detector-replay SESSION_DIR [--out OUT.csv] [--budget N] [--off] [--every N] [--threads N]"
                  " [--calib CAMERA=fx,fy,cx,cy,k1,k2,p1,p2,k3,k4,k5,k6]... [--mwbd N] [--mse X]"
                  " [--exclude ID,ID...]\n";
     return 2;
@@ -272,7 +274,7 @@ int main(int argc, char **argv) {
   int subpix = 0, nmaxima = -1;
   bool edgefit = false, edgefit_undist = false, no_refine_edges = false;
   double cos_crit = -1;
-  double mwbd = EnvOr("SPECTRUM_971_MIN_WHITE_BLACK_DIFF", 5), mse = EnvOr("SPECTRUM_971_MAX_LINE_FIT_MSE", 10);
+  double mwbd = EnvOr("MIN_WHITE_BLACK_DIFF", 5), mse = EnvOr("MAX_LINE_FIT_MSE", 10);
   std::map<std::string, std::vector<double>> calibs;
   std::vector<int> excluded;
   for (int i = 2; i < argc; ++i) {

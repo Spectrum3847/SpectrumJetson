@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Accuracy-knob replays (far_replay's --subpix/--edgefit/--cos/... options) of the TXMAN1 matches,
+# Accuracy-knob replays (detector-replay's --subpix/--edgefit/--cos/... options) of the TXMAN1 matches,
 # for judge.py. Run ON THE JETSON after tests/field-replay/run.sh has prepared DATA/replay:
 #   tests/field-replay/accuracy/run_variants.sh [DATA [VARIANT...]]   DATA default /data/scratch/txman1
-# Writes DATA/replay/<match>/out/<variant>/<session>.{csv,log}; resumes. Only one far_replay on the
+# Writes DATA/replay/<match>/out/<variant>/<session>.{csv,log}; resumes. Only one detector-replay on the
 # Jetson at a time, ANYONE's: before each replay it waits (10 s polls, 2 h deadline) until no
-# far_replay runs and tj < 85 C; nice 19; paused (SIGSTOP) above 92 C until under 85 C.
-# Whole run under an 8 h deadline. Doesn't rebuild: build far_replay first.
+# detector-replay runs and tj < 85 C; nice 19; paused (SIGSTOP) above 92 C until under 85 C.
+# Whole run under an 8 h deadline. Doesn't rebuild: build detector-replay first.
 set -uo pipefail
-BUILD=$HOME/build/bos-detector
+BUILD=$HOME/build/gpu-detector
 DATA=${1:-/data/scratch/txman1}
 shift || true
 if [[ -z ${ACC_UNDER_TIMEOUT:-} ]]; then
@@ -40,17 +40,17 @@ ORDER=(a_base a_mse5 a_mse7.5 a_sub1 a_sub2 a_sub3 a_edgefit a_edgefitu a_edgefi
 (($#)) && ORDER=("$@")
 
 tj() { timeout 5 tegrastats --interval 1000 2>/dev/null | head -1 | grep -o 'tj@[0-9.]*' | cut -d@ -f2; }
-wait_turn() {  # no far_replay running and tj < 85 C, polled every 10 s, 2 h deadline
+wait_turn() {  # no detector-replay running and tj < 85 C, polled every 10 s, 2 h deadline
   local t
   for _ in $(seq 720); do
-    if ! pgrep -f "$BUILD/far_replay" >/dev/null; then
+    if ! pgrep -f "$BUILD/detector-replay" >/dev/null; then
       t=$(tj)
       [[ -z $t ]] && return 0
       awk -v t="$t" 'BEGIN{exit !(t < 85)}' && return 0
     fi
     sleep 10
   done
-  echo "TIMEOUT: no turn on the Jetson in 2 h (far_replay busy or tj ${t:-?} C)" >&2
+  echo "TIMEOUT: no turn on the Jetson in 2 h (detector-replay busy or tj ${t:-?} C)" >&2
   return 1
 }
 hot_pause() {
@@ -75,7 +75,7 @@ for v in "${ORDER[@]}"; do
     mkdir -p "$dst"
     wait_turn || exit 3
     # shellcheck disable=SC2046
-    nice -n 19 timeout --kill-after=10 1800 "$BUILD/far_replay" "$sdir" --out "$dst/$s.csv" ${OPTS[$v]} \
+    nice -n 19 timeout --kill-after=10 1800 "$BUILD/detector-replay" "$sdir" --out "$dst/$s.csv" ${OPTS[$v]} \
         $(cat "$sdir/calib.args") >"$dst/$s.log" 2>&1 &
     pid=$!
     hot_pause "$pid"

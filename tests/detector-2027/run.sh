@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# lib971apriltag.so inside a JVM holding WPILib 2027's natives, as PhotonVision 2027 runs it: loads
+# libspectrum-gpu-apriltag.so inside a JVM holding WPILib 2027's natives, as PhotonVision 2027 runs it: loads
 # beside WPILib's libapriltag/libwpiutil (no symbol clash), finds the 2027 AprilTagDetection, and
 # reports corners in OpenCV's pixel convention: 0.5 px up-left of WPILib's CPU detector on the same
 # synthetic tag. Run ON THE JETSON. No camera; PhotonVision can keep running.
 # Usage: tests/detector-2027/run.sh [photonvision jar]   (LIBDIR: the detector to test,
-#   default ~/build/bos-detector; the jar supplies WPILib 2027, OpenCV and their natives)
+#   default ~/build/gpu-detector; the jar supplies WPILib 2027, OpenCV and their natives)
 set -euo pipefail
 cd "$(dirname "$0")"
 JAR=${1:-/opt/photonvision/photonvision.jar}
-LIBDIR=${LIBDIR:-$HOME/build/bos-detector}
+LIBDIR=${LIBDIR:-$HOME/build/gpu-detector}
 JAVA=/usr/lib/jvm/java-25-openjdk-arm64/bin/java
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # The jar's linux/arm64 natives, as PhotonVision extracts them. (Python: Ubuntu 24.04's unzip
@@ -25,7 +25,10 @@ cat > "$tmp/src/org/photonvision/jni/GpuDetectorJNI.java" <<'J'
 package org.photonvision.jni;
 import org.wpilib.vision.apriltag.AprilTagDetection;
 public class GpuDetectorJNI {
-  static { System.loadLibrary("971apriltag"); }
+  static {  // the old name (lib971apriltag) for builds from before 2026-10-31
+    try { System.loadLibrary("spectrum-gpu-apriltag"); }
+    catch (UnsatisfiedLinkError e) { System.loadLibrary("971apriltag"); }
+  }
   public static native long createGpuDetector(int width, int height);
   public static native void destroyGpuDetector(long handle);
   public static native void setparams(long handle, double fx, double cx, double fy, double cy,

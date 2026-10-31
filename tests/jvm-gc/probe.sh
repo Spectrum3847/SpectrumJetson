@@ -13,5 +13,5 @@ sleep ${1:-120}
 sudo timeout 20 $J $P VM.log output=file=$OUT what=disable >/dev/null || true
 end=$(date +%s)
 sudo cp $OUT /tmp/pv-gc-copy.log; sudo chown $USER /tmp/pv-gc-copy.log
-journalctl -u photonvision --since "@$start" --until "@$end" --no-pager -o short-unix | grep "971 stats" > /tmp/pv-stats.log
+journalctl -u photonvision --since "@$start" --until "@$end" --no-pager -o short-unix | grep -E "(971|detector) stats" > /tmp/pv-stats.log
 echo "window $((end-start)) s"

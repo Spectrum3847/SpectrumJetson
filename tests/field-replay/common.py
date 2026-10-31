@@ -18,7 +18,7 @@ def load_frames(match_dir):
 
 
 def load_dets(path, session, frames):
-    """far_replay's CSV, with robot_us joined from the frame table. Returns a dict of arrays."""
+    """detector-replay's CSV, with robot_us joined from the frame table. Returns a dict of arrays."""
     import csv
     rows = []
     with open(path) as f:

@@ -6,13 +6,13 @@
 #
 #   tests/jpeg-hw/run.sh [file.mjpeg...]   (default: every camera of the 3 newest sessions, plus
 #                                          colour recordings from make-colour-recordings.py)
-#   LIB=<path> tests an uninstalled build (default ~/build/bos-detector/libspectrumnvjpg.so,
+#   LIB=<path> tests an uninstalled build (default ~/build/gpu-detector/libspectrumnvjpg.so,
 #   else /usr/lib/libspectrumnvjpg.so).
 set -uo pipefail
 cd "$(dirname "$0")" || exit
-lib=${LIB:-$HOME/build/bos-detector/libspectrumnvjpg.so}
+lib=${LIB:-$HOME/build/gpu-detector/libspectrumnvjpg.so}
 [[ -f $lib ]] || lib=/usr/lib/libspectrumnvjpg.so
-[[ -f $lib ]] || { echo "No libspectrumnvjpg.so; build it with scripts/jetson/07-build-bos-detector.sh" >&2; exit 1; }
+[[ -f $lib ]] || { echo "No libspectrumnvjpg.so; build it with scripts/jetson/07-build-gpu-detector.sh" >&2; exit 1; }
 
 files=("$@")
 if [[ ${#files[@]} -eq 0 ]]; then

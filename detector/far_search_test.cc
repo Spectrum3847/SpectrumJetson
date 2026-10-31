@@ -101,7 +101,7 @@ apriltag_detector_t *MakeTd(apriltag_family_t *fam) {
   apriltag_detector_add_family_bits(td, fam, 1);
   td->nthreads = 4;
   td->wp = workerpool_create(td->nthreads);
-  td->qtp.min_white_black_diff = 5;  // the live default (SPECTRUM_971_MIN_WHITE_BLACK_DIFF)
+  td->qtp.min_white_black_diff = 5;  // the live default (SPECTRUM_DETECTOR_MIN_WHITE_BLACK_DIFF)
   td->qtp.max_line_fit_mse = 10;
   td->debug = false;
   return td;
@@ -157,9 +157,9 @@ std::vector<unsigned char> EncodeJpeg(const cv::Mat &img) {
   return out;
 }
 
-// --write-session DIR: a synthetic Rewind session for far_replay, with a known answer. Two
+// --write-session DIR: a synthetic Rewind session for detector-replay, with a known answer. Two
 // cameras, 3 s at 60 fps. CamA: near tags 1 and 2 (70 px) for the first and last second, and a
-// far tag 7 (14 px, moving) all along; CamB: no tags. Expected from far_replay: the far search
+// far tag 7 (14 px, moving) all along; CamB: no tags. Expected from detector-replay: the far search
 // finds tag 7 on CamA frames the normal search misses, only in the middle second (after the
 // 250 ms wait); with --off, nothing extra.
 int WriteSession(const std::string &dir) {

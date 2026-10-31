@@ -6,10 +6,10 @@
  
 +// SpectrumJetson: the first stage as one CUDA graph (GpuDetector::RecordFirstStageGraph): 13 CUDA calls
 +// a frame become one, and each of those calls took libcuda's lock that all cameras share. Only
-+// with the fused BlobDiff, a gray image and no event timing. "0" in /tmp/spectrum-971-graph
++// with the fused BlobDiff, a gray image and no event timing. "0" in /tmp/spectrum-detector-graph
 +// launches the steps one by one again (re-read every 2 s).
 +bool SpectrumGraphFirstStage() {
-+  static SpectrumKnob knob("/tmp/spectrum-971-graph", 1);
++  static SpectrumKnob knob("/tmp/spectrum-detector-graph", 1);
 +  return knob.Get() != 0;
 +}
 +

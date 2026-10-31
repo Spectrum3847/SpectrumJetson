@@ -9,7 +9,7 @@
 #   rsync -a JETSON:SpectrumJetson/tests/regression/{corpus.json,golden} tests/regression/
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-BUILD=$HOME/build/bos-detector
+BUILD=$HOME/build/gpu-detector
 JAVA=/usr/lib/jvm/java-17-openjdk-arm64/bin/java
 if [[ -z ${REGRESSION_UNDER_TIMEOUT:-} ]]; then
   rc=0
@@ -19,12 +19,12 @@ if [[ -z ${REGRESSION_UNDER_TIMEOUT:-} ]]; then
 fi
 
 # The detector as built now (incremental: seconds when nothing changed).
-if ! nice cmake --build "$BUILD" --target far_replay --parallel 3 >/tmp/regression-build.log 2>&1; then
-  tail -20 /tmp/regression-build.log; echo "FAIL: far_replay didn't build" >&2; exit 2
+if ! nice cmake --build "$BUILD" --target detector-replay --parallel 3 >/tmp/regression-build.log 2>&1; then
+  tail -20 /tmp/regression-build.log; echo "FAIL: detector-replay didn't build" >&2; exit 2
 fi
 # Same detector as PhotonVision runs? (Warn only: the check is about the code being built.)
-if ! cmp -s "$BUILD/lib971apriltag.so" /usr/lib/lib971apriltag.so; then
-  echo "NOTE: /usr/lib/lib971apriltag.so isn't this build's; PhotonVision runs a different detector than the one checked here"
+if ! cmp -s "$BUILD/libspectrum-gpu-apriltag.so" /usr/lib/libspectrum-gpu-apriltag.so; then
+  echo "NOTE: /usr/lib/libspectrum-gpu-apriltag.so isn't this build's; PhotonVision runs a different detector than the one checked here"
 fi
 
 case ${1:-} in

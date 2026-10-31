@@ -10,7 +10,7 @@ P=$(systemctl show photonvision -p MainPID --value)
 t0=$(date +%s.%N)
 
 countdown() { for ((i = $1; i > 0; i--)); do printf "\r  %s in %2d s " "$2" "$i"; sleep 1; done; printf "\r%-40s\n" "  $2 NOW"; }
-echo "Detection before: $(journalctl _PID="$P" --no-pager -o cat --since "-2 s" | grep -c '^971 stats') stats lines in 2 s"
+echo "Detection before: $(journalctl _PID="$P" --no-pager -o cat --since "-2 s" | grep -cE '^(971|detector) stats') stats lines in 2 s"
 countdown 5 "UNPLUG one camera"
 sleep "$AWAY"
 countdown 1 "PLUG IT BACK IN (same port)"
@@ -35,7 +35,7 @@ unplug = next((t for t, msg in kern if "USB disconnect" in msg), None)
 replug = next((t for t, msg in kern if unplug and t > unplug
                and re.search(r"new \S+-speed USB device|New USB device found", msg)), None)
 pv = list(log([f"_PID={pid}"]))
-stats = [(t, re.match(r"971 stats (h\d+)", m).group(1)) for t, m in pv if m.startswith("971 stats")]
+stats = [(t, re.match(r"(?:971|detector) stats (h\d+)", m).group(1)) for t, m in pv if m.startswith(("971 stats", "detector stats"))]
 
 def rel(t):
     return f"{t - t0:6.1f} s" if t else "   never"

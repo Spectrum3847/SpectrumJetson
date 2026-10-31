@@ -4,9 +4,9 @@
 
 MATCH_DIR: robotlog's download (NNNN_<label>_<date>_{session.json,<cam>_NNNN.{mjpeg,csv}} and the
 robot's .wpilog). Writes into OUT_DIR:
-  sessions/<NNNN_...>/<cam>/  symlinks, the folder-per-camera layout far_replay reads
+  sessions/<NNNN_...>/<cam>/  symlinks, the folder-per-camera layout detector-replay reads
   sessions/<NNNN_...>/calib.args  "--calib cam=fx,fy,cx,cy,k1..k8 ..." from session.json
-  frames.csv   session,camera,frame,jetson_us,robot_us (frame = far_replay's frame index)
+  frames.csv   session,camera,frame,jetson_us,robot_us (frame = detector-replay's frame index)
   cameras.json per camera: calibration, resolution, exposure setting
   robot.npz    from the wpilog: fused pose (t_us,x,y,theta), gyro yaw rate, odometry pose,
                the Jetson's own logged outputs if any

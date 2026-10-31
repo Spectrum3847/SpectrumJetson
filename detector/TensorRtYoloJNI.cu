@@ -182,7 +182,7 @@ std::vector<Det> Decode(Detector &d, double box_thresh, double nms_thresh, int n
   return dets;
 }
 
-// Holds lib971apriltag.so's CUDA capture lock shared for a scope (GpuDetectorJNI.cc,
+// Holds libspectrum-gpu-apriltag.so's CUDA capture lock shared for a scope (GpuDetectorJNI.cc,
 // CudaCaptureLock): that library records CUDA graphs, and while it does, some CUDA calls here
 // (cudaFree, cudaMalloc, engine loading) would break. Does nothing until that library is loaded.
 class CudaShared {
@@ -206,7 +206,7 @@ class CudaShared {
       static std::mutex mu;
       std::lock_guard<std::mutex> l(mu);
       if (!found.load(std::memory_order_relaxed)) {
-        if (void *h = dlopen("lib971apriltag.so", RTLD_NOLOAD | RTLD_LAZY)) {
+        if (void *h = dlopen("libspectrum-gpu-apriltag.so", RTLD_NOLOAD | RTLD_LAZY)) {
           fns.lock = reinterpret_cast<Fn>(dlsym(h, "spectrum_cuda_lock_shared"));
           fns.unlock = reinterpret_cast<Fn>(dlsym(h, "spectrum_cuda_unlock_shared"));
           if (fns.lock && fns.unlock) found.store(true, std::memory_order_release);

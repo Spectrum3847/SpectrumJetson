@@ -1,8 +1,8 @@
 --- b/third_party/971apriltag/apriltag.cc
 +++ c/third_party/971apriltag/apriltag.cc
-@@ -40,22 +40,46 @@
+@@ -40,22 +40,51 @@
  // context lock, which every camera shares; with 4 cameras at 120 fps the threads convoyed on it
- // (2026-09-29, docs/TECHNICAL.md). On with VLOG(1), or "1" in /tmp/spectrum-971-event-timing
+ // (2026-09-29, docs/TECHNICAL.md). On with VLOG(1), or "1" in /tmp/spectrum-detector-event-timing
  // (re-read every 2 s, for A/B tests).
 -bool SpectrumEventTiming() {
 -  static std::mutex mu;
@@ -13,7 +13,7 @@
 -  if (now >= next) {
 -    next = now + std::chrono::seconds(2);
 -    int v = 0;
--    if (FILE* f = std::fopen("/tmp/spectrum-971-event-timing", "r")) {
+-    if (FILE* f = std::fopen("/tmp/spectrum-detector-event-timing", "r")) {
 -      if (std::fscanf(f, "%d", &v) != 1) v = 0;
 -      std::fclose(f);
 +// An integer switch in a /tmp file, re-read at most every 2 s; `def` when the file is missing.
@@ -26,7 +26,12 @@
 +    if (now >= next_) {
 +      next_ = now + std::chrono::seconds(2);
 +      int v = def_;
-+      if (FILE* f = std::fopen(path_, "r")) {
++      // The old /tmp/spectrum-971-* names (before the 2026-10-31 rename) still work.
++      FILE* f = std::fopen(path_, "r");
++      const std::string p(path_), prefix("/tmp/spectrum-detector-");
++      if (!f && p.compare(0, prefix.size(), prefix) == 0)
++        f = std::fopen(("/tmp/spectrum-971-" + p.substr(prefix.size())).c_str(), "r");
++      if (f) {
 +        if (std::fscanf(f, "%d", &v) != 1) v = def_;
 +        std::fclose(f);
 +      }
@@ -46,7 +51,7 @@
 +};
 +
 +bool SpectrumEventTiming() {
-+  static SpectrumKnob knob("/tmp/spectrum-971-event-timing", 0);
++  static SpectrumKnob knob("/tmp/spectrum-detector-event-timing", 0);
 +  return knob.Get() != 0 || VLOG_IS_ON(1);
 +}
 +
@@ -54,14 +59,14 @@
 +// compacted array, instead of BlobDiff writing all 4 slots of every pixel (~1M points, 8 MB at
 +// 1280x800) and cub::DeviceSelect::If reading them all back to drop the empty ones. Those two
 +// were 42% of the detector's GPU time (nsys, 2026-09-29). 971's own TODO asked for this. "0" in
-+// /tmp/spectrum-971-fused-blobdiff goes back to BlobDiff + DeviceSelect (re-read every 2 s).
++// /tmp/spectrum-detector-fused-blobdiff goes back to BlobDiff + DeviceSelect (re-read every 2 s).
 +bool SpectrumFusedBlobDiff() {
-+  static SpectrumKnob knob("/tmp/spectrum-971-fused-blobdiff", 1);
++  static SpectrumKnob knob("/tmp/spectrum-detector-fused-blobdiff", 1);
 +  return knob.Get() != 0;
  }
  
  typedef std::chrono::duration<float, std::milli> float_milli;
-@@ -381,6 +405,98 @@
+@@ -381,6 +410,98 @@
  
    DO_CONN(-1, 1, 3);
  }
@@ -160,7 +165,7 @@
  
  // Masks out just the blob ID pair, rep01.
  struct MaskRep01 {
-@@ -705,6 +821,7 @@
+@@ -705,6 +826,7 @@
    //     aos::monotonic_clock::now();
  
    const bool timing = SpectrumEventTiming();
@@ -168,7 +173,7 @@
  
    union_markers_size_device_.MemsetAsync(0u, &memset_stream_);
    after_memset_.Record(&memset_stream_);
-@@ -780,10 +897,22 @@
+@@ -780,10 +902,22 @@
            " rows: " + std::to_string(height_));
      }
  
@@ -195,7 +200,7 @@
      MaybeCheckAndSynchronize("BlobDiff");
    }
  
-@@ -792,7 +921,7 @@
+@@ -792,7 +926,7 @@
  
    if (timing) after_diff_.Record(&stream_);
  
@@ -204,7 +209,7 @@
      // Remove empty points which aren't to be considered before sorting to speed
      // things up.
      size_t temp_storage_bytes =
-@@ -997,8 +1126,10 @@
+@@ -997,8 +1131,10 @@
      CHECK_CUDA(cub::DeviceRadixSort::SortKeys(
          radix_sort_tmpstorage_device_.get(), temp_storage_bytes,
          selected_blobs_device_.get(), sorted_selected_blobs_device_.get(),

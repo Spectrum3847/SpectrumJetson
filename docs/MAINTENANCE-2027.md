@@ -42,7 +42,7 @@ Bundling a newer `libstdc++` alone doesn't fix a glibc requirement.
 
 ## Make our native code independent of WPILib (do this first, either way)
 
-`lib971apriltag.so` links WPILib 2026.2.1's `libwpiutil` (`wpi::Now()`, `jni_util`) and uses WPILib's `libapriltag`, OpenCV's `cv::Mat*` and the Java class path `edu.wpi.first.apriltag.AprilTagDetection`. Inside a 2027 JVM, the 2027 libraries with the same names load instead, and the symbols won't match. Plan:
+`libspectrum-gpu-apriltag.so` links WPILib 2026.2.1's `libwpiutil` (`wpi::Now()`, `jni_util`) and uses WPILib's `libapriltag`, OpenCV's `cv::Mat*` and the Java class path `edu.wpi.first.apriltag.AprilTagDetection`. Inside a 2027 JVM, the 2027 libraries with the same names load instead, and the symbols won't match. Plan:
 - **Plain JNI:** no `wpi::java` helpers, and our own copy of the `WPI_RawFrame` struct, whose layout is unchanged in 2027.
 - **Plain buffers:** a pointer and a stride instead of a `cv::Mat*`, and flat arrays back to Java instead of `AprilTagDetection` objects. The class moves to `org.wpilib…` in 2027; `GpuDetectorJNI.cc:72` hard-codes the old name.
 - **Self-contained:** link the AprilTag C library statically, with hidden symbols.

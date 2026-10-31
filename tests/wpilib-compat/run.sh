@@ -2,7 +2,7 @@
 # Does a WPILib release still match what the detector assumes? Run ON THE LAPTOP before building a
 # Jetson release on a new WPILib (beta, release, ...). Reads allwpilib's source on GitHub; no Jetson.
 #
-# lib971apriltag.so links nothing of WPILib (detector/wpi_compat.h). It reads cscore's frames by
+# libspectrum-gpu-apriltag.so links nothing of WPILib (detector/wpi_compat.h). It reads cscore's frames by
 # address and creates WPILib's Java AprilTagDetection objects, so these must not change unnoticed:
 #   1. WPI_RawFrame's fields (order, types): a change reads garbage frames, with no error at all
 #   2. WPI_PIXFMT_MJPEG == 1

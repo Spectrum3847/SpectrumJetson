@@ -36,35 +36,36 @@ else
 fi
 
 echo "== CUDA detector"
-if grep -q "971 library loaded" <<<"$LOG"; then
-  loaded=$(grep -m1 -o '971 library loaded.*' <<<"$LOG")
+if grep -qE "(971 library|detector) loaded" <<<"$LOG"; then
+  loaded=$(grep -m1 -oE '(971 library|detector) loaded.*' <<<"$LOG")
   pass "$loaded"
   # The robot settings (2026-09-24): the CPU sleeps while the GPU works, and 32 GPU work queues.
   # An older library doesn't print these.
   if grep -q "GPU connections" <<<"$loaded"; then
     grep -q "CUDA wait block" <<<"$loaded" ||
-      warn "CUDA wait isn't block (/tmp/spectrum-971-cuda-sync or SPECTRUM_971_CUDA_SYNC left from a test?)"
+      warn "CUDA wait isn't block (/tmp/spectrum-detector-cuda-sync or SPECTRUM_DETECTOR_CUDA_SYNC left from a test?)"
     grep -q "GPU connections 32" <<<"$loaded" ||
       warn "GPU connections isn't 32 (rerun 08-select-detector.sh, or remove a test drop-in)"
   fi
   # Test switches the detector and decoder re-read every few seconds. Left behind after a test,
   # a fault hook keeps failing frames (and a sticky one restarts PhotonVision again after every
   # restart); the others change how it runs. /tmp is emptied at boot, so a reboot clears them too.
-  for f in /tmp/spectrum-971-fault-every /tmp/spectrum-jpeg-fault; do
+  for f in /tmp/spectrum-detector-fault-every /tmp/spectrum-971-fault-every /tmp/spectrum-jpeg-fault; do
     [[ -e $f ]] && fail "test fault hook $f is set: sudo rm $f"
   done
-  for f in /tmp/spectrum-971-gpu-lock /tmp/spectrum-971-gpu-input /tmp/spectrum-971-threads /tmp/spectrum-jpeg-decoder; do
+  # (/tmp/spectrum-971-*: the names from before the 2026-10-31 rename, which still work.)
+  for f in /tmp/spectrum-{detector,971}-{gpu-lock,gpu-input,threads,cuda-sync,graphs} /tmp/spectrum-jpeg-decoder; do
     [[ -e $f ]] && warn "test override $f is set ($(head -c 40 "$f" 2>/dev/null)): remove it unless you meant it"
   done
 elif grep -q "creategpudetector" <<<"$LOG"; then
-  warn "running the 4143 detector build (not Austin's current bos build)"
+  warn "running the gpu-4143 detector build (not our current gpu build)"
 else
   fail "CUDA detector not loaded (is an AprilTagCuda pipeline selected?)"
 fi
-recent=$(journalctl _PID="$P" --no-pager -o cat --since "-3 s" 2>/dev/null | grep '^971 stats')
-handles=$(grep -oE '^971 stats h[0-9]+' <<<"$recent" | sort -u | awk '{print $3}')
+recent=$(journalctl _PID="$P" --no-pager -o cat --since "-3 s" 2>/dev/null | grep -E '^(971|detector) stats')
+handles=$(grep -oE '^(971|detector) stats h[0-9]+' <<<"$recent" | sort -u | awk '{print $3}')
 for h in $handles; do
-  line=$(grep "^971 stats $h " <<<"$recent" | tail -1)
+  line=$(grep -E "^(971|detector) stats $h " <<<"$recent" | tail -1)
   fps=$(awk '{for(i=1;i<=NF;i++) if($i=="calls/s,") print int($(i-1))}' <<<"$line")
   det=$(awk '{for(i=1;i<=NF;i++) if($i=="avg" && $(i-1)=="detect") print $(i+1)}' <<<"$line")
   err=$(awk '{for(i=1;i<=NF;i++) if($i=="errors") print $(i+1)}' <<<"$line")
@@ -113,20 +114,20 @@ if [[ -n $badjpeg ]]; then
     warn "${cam%:} sent $n invalid JPEGs in 10 s (restart PhotonVision; if it persists, replug that camera)"
   done <<<"$badjpeg"
 fi
-# JPEG decoder ("971 jpeg" lines every 10 s): NVJPG hardware or libjpeg-turbo. Every ~2 s per
+# JPEG decoder ("jpeg decoder N s" lines every 10 s; "971 jpeg" before 2026-10-31): NVJPG hardware or libjpeg-turbo. Every ~2 s per
 # camera one hardware frame is re-decoded by libjpeg-turbo; a difference turns the hardware off.
 if grep -q "HARDWARE DECODE DIFFERS" <<<"$LOG"; then
   warn "hardware JPEG decode differed from libjpeg-turbo, so it's off until PhotonVision restarts (run tests/jpeg-hw/run.sh)"
 elif grep -q "CUDA failed in the hardware decoder" <<<"$LOG"; then
   warn "the hardware JPEG decoder hit a CUDA error; libjpeg-turbo until PhotonVision restarts"
 fi
-jline=$(journalctl _PID="$P" --no-pager -o cat --since "-15 s" 2>/dev/null | grep '^971 jpeg [0-9]' | tail -1)
+jline=$(journalctl _PID="$P" --no-pager -o cat --since "-15 s" 2>/dev/null | grep -E '^(971 jpeg|jpeg decoder) [0-9]' | tail -1)
 if [[ -n $jline ]]; then
   hw=$(awk '{for(i=1;i<=NF;i++) if($i=="nvjpg") {print int($(i+1)); exit}}' <<<"$jline")
   sw=$(awk '{for(i=1;i<=NF;i++) if($i=="libjpeg-turbo") {print int($(i+1)); exit}}' <<<"$jline")
   fell=$(grep -oE "[0-9]+ fell back" <<<"$jline" | awk '{print $1}')
   checks=$(grep -oE "[0-9]+ ok, [0-9]+ differ" <<<"$jline")
-  wanted=$(grep '^971 jpeg decoder:' <<<"$LOG" | tail -1)
+  wanted=$(grep -E '^(971 jpeg decoder|jpeg decoder mode):' <<<"$LOG" | tail -1)
   if [[ $jline == *"hardware decoder OFF"* ]]; then
     pass "JPEG decode: libjpeg-turbo, $sw frames/s (hardware decoder off, see above; checks: $checks)"
   elif [[ ${hw:-0} -gt 0 ]]; then
@@ -134,7 +135,7 @@ if [[ -n $jline ]]; then
     [[ ${sw:-0} -gt 0 ]] && msg+=", libjpeg-turbo $sw frames/s"
     if [[ -n $fell ]]; then warn "$msg; $fell frames fell back to libjpeg-turbo in 10 s"; else pass "$msg"; fi
   elif [[ $wanted == *nvjpg* ]]; then
-    why=$(grep -oE "971 jpeg: (can't load|no hardware decoder|this camera's JPEGs).*" <<<"$LOG" | tail -1)
+    why=$(grep -oE "(971 jpeg|jpeg decoder): (can't load|no hardware decoder|this camera's JPEGs).*" <<<"$LOG" | tail -1)
     warn "hardware JPEG decode is switched on but not decoding (${why:-see journalctl -u photonvision}); libjpeg-turbo $sw frames/s"
   else
     pass "JPEG decode: libjpeg-turbo, $sw frames/s"
@@ -147,7 +148,7 @@ if [[ $calib8 -ge $want_cal ]]; then pass "calibration loaded for $calib8 detect
 elif [[ $calib8 -gt 0 ]]; then warn "calibration loaded for only $calib8 of $want_cal AprilTag cameras"
 elif [[ $calib5 -gt 0 ]]; then warn "calibration loaded with only 5 lens coefficients"
 else warn "no calibration loaded (3D mode needs one at the active resolution)"; fi
-nfail=$(journalctl _PID="$P" --no-pager -o cat --since "-60 s" 2>/dev/null | grep -c "^971 detector h.* failure")
+nfail=$(journalctl _PID="$P" --no-pager -o cat --since "-60 s" 2>/dev/null | grep -cE "^(971 )?detector h.* failure")
 [[ $nfail -gt 0 ]] && warn "$nfail CUDA detector failures in the last minute"
 
 echo "== Cameras"

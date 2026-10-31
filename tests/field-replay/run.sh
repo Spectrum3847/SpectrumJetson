@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Field replay: TXMAN1 match recordings through far_replay with each detector variant, then every
+# Field replay: TXMAN1 match recordings through detector-replay with each detector variant, then every
 # sighting checked against the robot's logged pose (analyze.py; RESULTS.md has the findings).
 # Run ON THE JETSON, with the matches downloaded from robotlog into DATA/<match>/:
 #   tests/field-replay/run.sh [DATA [VARIANT...]]     DATA default /data/scratch/txman1
@@ -10,7 +10,7 @@
 # hot); the whole run under an 8 h deadline.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-BUILD=$HOME/build/bos-detector
+BUILD=$HOME/build/gpu-detector
 DATA=${1:-/data/scratch/txman1}
 shift || true
 if [[ -z ${FIELD_REPLAY_UNDER_TIMEOUT:-} ]]; then
@@ -20,7 +20,7 @@ if [[ -z ${FIELD_REPLAY_UNDER_TIMEOUT:-} ]]; then
   exit "$rc"
 fi
 
-# Variants: name and far_replay options. base = what runs now (mwbd 20, mse 10, no far search).
+# Variants: name and detector-replay options. base = what runs now (mwbd 20, mse 10, no far search).
 declare -A OPTS=(
   [base]="--off --mwbd 20 --mse 10"
   [mse2.5]="--off --mwbd 20 --mse 2.5"
@@ -38,8 +38,8 @@ declare -A OPTS=(
 ORDER=(base mse2.5 mse15 mse20 half fullres far mwbd5 mwbd10 mwbd30 mcp50 mcp100)
 (($#)) && ORDER=("$@")
 
-if ! nice cmake --build "$BUILD" --target far_replay --parallel 3 >/tmp/field-replay-build.log 2>&1; then
-  tail -20 /tmp/field-replay-build.log; echo "FAIL: far_replay didn't build" >&2; exit 2
+if ! nice cmake --build "$BUILD" --target detector-replay --parallel 3 >/tmp/field-replay-build.log 2>&1; then
+  tail -20 /tmp/field-replay-build.log; echo "FAIL: detector-replay didn't build" >&2; exit 2
 fi
 
 # Waits (up to 30 min) until tj is under 85 C. tegrastats prints e.g. "tj@84.5C".
@@ -85,7 +85,7 @@ for v in "${ORDER[@]}"; do
     mkdir -p "$dst"
     wait_cool || exit 3
     # shellcheck disable=SC2046
-    nice -n 19 timeout --kill-after=10 1800 "$BUILD/far_replay" "$sdir" --out "$dst/$s.csv" ${OPTS[$v]} \
+    nice -n 19 timeout --kill-after=10 1800 "$BUILD/detector-replay" "$sdir" --out "$dst/$s.csv" ${OPTS[$v]} \
         $(cat "$sdir/calib.args") >"$dst/$s.log" 2>&1 &
     pid=$!
     hot_pause "$pid"

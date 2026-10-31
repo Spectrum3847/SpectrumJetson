@@ -1,7 +1,7 @@
 // graph_bench: times GpuDetector::Detect() on frames from one Rewind camera folder, as the JNI
 // bridge runs it (the frame already on the GPU, copied into the detector's own fixed buffer, the
 // first-stage graph recorded once), and writes every detection exactly, for A/B tests of the
-// detector's CUDA launch path (bos-11, SPECTRUM_971_GRAPHS).
+// detector's CUDA launch path (detector-11, SPECTRUM_DETECTOR_GRAPHS).
 //
 //   graph_bench CAMERA_DIR [--frames N] [--loops N] [--mwbd N] [--out DETECTIONS.txt]
 //
@@ -95,7 +95,7 @@ int main(int argc, char **argv) {
   dc.num_params = 5;
   frc::apriltag::GpuDetector gpu(w, h, td, frc::apriltag::CameraMatrix{1, 1, 1, 1}, dc,
                                  vision::ImageFormat::MONO8);
-  gpu.SetEdgeBorder(edge);  // bos-12: full-resolution pixels, 0 = off
+  gpu.SetEdgeBorder(edge);  // detector-12: full-resolution pixels, 0 = off
 
   std::vector<double> cpu, wall;
   FILE *out = out_path.empty() ? nullptr : std::fopen(out_path.c_str(), "w");
@@ -107,7 +107,7 @@ int main(int argc, char **argv) {
         auto s = gpu.RecordFirstStageGraph(dev_in);
         if (!s.ok()) std::cerr << "first-stage graph: " << s.message() << "\n";
       }
-      if (gpu.StageGraphsWanted()) {  // bos-11
+      if (gpu.StageGraphsWanted()) {  // detector-11
         auto s = gpu.RecordStageGraphs();
         if (!s.ok()) std::cerr << "stage graphs: " << s.message() << "\n";
       }

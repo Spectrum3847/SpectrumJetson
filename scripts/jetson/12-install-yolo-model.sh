@@ -27,7 +27,7 @@ H=${5:-640}
 VERSION=${6:-YOLOV11}
 MODELS=/opt/photonvision/photonvision_config/models
 TRTEXEC=/usr/src/tensorrt/bin/trtexec
-[[ -f /usr/lib/libspectrumtrt.so ]] || { echo "libspectrumtrt.so isn't installed (07-build-bos-detector.sh, then install it to /usr/lib)." >&2; exit 1; }
+[[ -f /usr/lib/libspectrumtrt.so ]] || { echo "libspectrumtrt.so isn't installed (07-build-gpu-detector.sh, then install it to /usr/lib)." >&2; exit 1; }
 
 name=$(basename "${SRC%.*}")
 name=${name//[^A-Za-z0-9._-]/_}

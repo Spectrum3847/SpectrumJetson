@@ -4,7 +4,7 @@
      // post-selected values.
      size_t temp_storage_bytes = temp_storage_line_fit_scan_device_.size();
  
-+    // SpectrumJetson (bos-06): on this detector's stream. Without a stream argument it ran on
++    // SpectrumJetson (detector-06): on this detector's stream. Without a stream argument it ran on
 +    // CUDA's legacy default stream, which waits for, and holds up, every other blocking stream in
 +    // the process: each camera's line-fit scan waited on the other cameras' GPU work.
      CHECK_CUDA(cub::DeviceScan::InclusiveScanByKey(

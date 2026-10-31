@@ -374,13 +374,13 @@ int CopyBgr(SnjDecoder *d, int fd, uint8_t *bgr, int width, int height, size_t s
 static void PatchDualNvjpg() {
   const char *off = std::getenv("SPECTRUM_NVJPG_DUAL");
   if (off && std::strcmp(off, "0") == 0) {
-    std::cout << "971 jpeg: NVJPG dual-engine patch off (SPECTRUM_NVJPG_DUAL=0)" << std::endl;
+    std::cout << "jpeg decoder: NVJPG dual-engine patch off (SPECTRUM_NVJPG_DUAL=0)" << std::endl;
     return;
   }
   Dl_info info;
   if (!dladdr(reinterpret_cast<void *>(&jpeg_CreateDecompress), &info) || !info.dli_fbase ||
       !info.dli_fname || !std::strstr(info.dli_fname, "nvmm_jpeg")) {
-    std::cout << "971 jpeg: NVJPG dual-engine patch skipped (libnvmm_jpeg not found)" << std::endl;
+    std::cout << "jpeg decoder: NVJPG dual-engine patch skipped (libnvmm_jpeg not found)" << std::endl;
     return;
   }
   static const uint32_t kPattern[4] = {0x1a9f87e1, 0x91288264, 0x52800083, 0x531e7421};
@@ -399,7 +399,7 @@ static void PatchDualNvjpg() {
     }
   }
   if (sites.size() != 2) {
-    std::cout << "971 jpeg: NVJPG dual-engine patch skipped (" << sites.size()
+    std::cout << "jpeg decoder: NVJPG dual-engine patch skipped (" << sites.size()
               << " matches in " << info.dli_fname << ", expected 2: a different JetPack?)" << std::endl;
     return;
   }
@@ -407,14 +407,14 @@ static void PatchDualNvjpg() {
   for (uint32_t *w : sites) {
     void *pg = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(w) & ~(page - 1));
     if (mprotect(pg, page, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-      std::cout << "971 jpeg: NVJPG dual-engine patch failed (mprotect)" << std::endl;
+      std::cout << "jpeg decoder: NVJPG dual-engine patch failed (mprotect)" << std::endl;
       return;
     }
     *w = kLsl1;
     __builtin___clear_cache(reinterpret_cast<char *>(w), reinterpret_cast<char *>(w + 1));
     mprotect(pg, page, PROT_READ | PROT_EXEC);
   }
-  std::cout << "971 jpeg: NVJPG dual-engine patch applied (both engines, frames alternate)" << std::endl;
+  std::cout << "jpeg decoder: NVJPG dual-engine patch applied (both engines, frames alternate)" << std::endl;
 }
 
 extern "C" {

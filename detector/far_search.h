@@ -14,7 +14,7 @@
 //  - As soon as any camera has a good view again, all of it stops: cameras cost what they did.
 //
 // Everything is in image coordinates of the camera's frame: corners, centre and homography are
-// scaled back from the upscaled (and cropped) images. Shared by lib971apriltag.so (live, through
+// scaled back from the upscaled (and cropped) images. Shared by libspectrum-gpu-apriltag.so (live, through
 // GpuDetectorJNI.cc) and fieldcal_detect (replay), so both run the same policy.
 #pragma once
 

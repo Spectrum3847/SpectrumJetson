@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build FRC 971's CUDA AprilTag detector (FRC-Team-4143/GpuDetectorJNI) and install
-# lib971apriltag.so, which the 4143 PhotonVision fork loads via System.loadLibrary.
+# it as /usr/lib/libspectrum-gpu-apriltag.so (with lib971apriltag.so, the name the 4143 fork and
+# our jars from before 2026-10-31 load, linked to it). 08-select-detector.sh gpu-4143 does the same.
 # Run ON THE JETSON after 04-build-allwpilib.sh has installed allwpilib v2026.2.1.
 set -euo pipefail
 # Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
@@ -39,13 +40,14 @@ echo "==> Building lib971apriltag (CUDA arch 87)"
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
 cmake --build build --parallel 4
 
-sudo install -m 755 build/lib971apriltag.so /usr/lib/lib971apriltag.so
+sudo install -m 755 build/lib971apriltag.so /usr/lib/libspectrum-gpu-apriltag.so
+sudo ln -sfn libspectrum-gpu-apriltag.so /usr/lib/lib971apriltag.so
 sudo ldconfig
 
 echo "==> Dependency check"
-if ldd /usr/lib/lib971apriltag.so | grep "not found"; then
+if ldd /usr/lib/libspectrum-gpu-apriltag.so | grep "not found"; then
   echo "Unresolved libraries above." >&2
   exit 1
 fi
-ldd /usr/lib/lib971apriltag.so | grep -E "wpiutil|cuda"
-echo "Installed /usr/lib/lib971apriltag.so"
+ldd /usr/lib/libspectrum-gpu-apriltag.so | grep -E "wpiutil|cuda"
+echo "Installed /usr/lib/libspectrum-gpu-apriltag.so (and lib971apriltag.so linked to it)"

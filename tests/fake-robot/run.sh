@@ -65,7 +65,7 @@ stats = []  # (time, handle, calls/s)
 events = []
 for line in open(pv):
     t = float(line.split()[0])
-    m = re.search(r"971 stats (h\d+) \S+ ([\d.]+) calls/s", line)
+    m = re.search(r"(?:971|detector) stats (h\d+) \S+ ([\d.]+) calls/s", line)
     if m: stats.append((t, m.group(1), float(m.group(2))))
     if "garbage collected" in line or "Idle mode" in line:
         events.append((t, line.split("] ")[-1].strip()))

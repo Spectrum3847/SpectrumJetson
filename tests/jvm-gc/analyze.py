@@ -16,7 +16,7 @@ dur = None
 rows = []
 for line in open(stats):
     t = float(line.split()[0])
-    m = re.search(r"971 stats (h\d+) .* max ([\d.]+) ms", line)
+    m = re.search(r"(?:971|detector) stats (h\d+) .* max ([\d.]+) ms", line)
     if m: rows.append((t, m.group(1), float(m.group(2))))
 t0, t1 = rows[0][0], rows[-1][0]
 dur = t1 - t0

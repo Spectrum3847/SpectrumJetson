@@ -119,7 +119,7 @@ Site.chapter('failsafes', (root) => {
         ['info', ['pv'], '', 'The watchdog only counts time spent reading. A pause of over 2 s between reads (robot code re-enabling a camera) used to count as no frames, and reconnected a healthy camera: a 0.5–1 s blackout for nothing. Now such a pause restarts its clock (photonvision-66).', 'A pause in reading (robot code re-enabling a camera) no longer counts as a stuck camera (photonvision-66).'],
       ] },
     { id: 'cuda', icon: '⚡', name: 'One CUDA error', time: 'one frame', secs: 0.0083, m: 1,
-      src: 'bos-01 + detector/, fault injection with /tmp/spectrum-971-fault-every',
+      src: 'detector-01 + detector/, fault injection with /tmp/spectrum-detector-fault-every',
       steps: [
         ['fault', ['gpu'], '', 'A GPU call fails on one frame.'],
         ['detect', ['gpu', 'pv'], 'same frame', 'The error is caught instead of crashing the program (it used to abort everything).', 'The error is caught; the program keeps running.'],

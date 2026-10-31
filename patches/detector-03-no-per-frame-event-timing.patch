@@ -24,7 +24,7 @@
 +// events that exist only for the VLOG(1) timing report, then call cudaEventSynchronize and
 +// cudaEventElapsedTime on all 22 after every frame, even with VLOG off. Each call takes libcuda's
 +// context lock, which every camera shares; with 4 cameras at 120 fps the threads convoyed on it
-+// (2026-09-29, docs/TECHNICAL.md). On with VLOG(1), or "1" in /tmp/spectrum-971-event-timing
++// (2026-09-29, docs/TECHNICAL.md). On with VLOG(1), or "1" in /tmp/spectrum-detector-event-timing
 +// (re-read every 2 s, for A/B tests).
 +bool SpectrumEventTiming() {
 +  static std::mutex mu;
@@ -35,7 +35,7 @@
 +  if (now >= next) {
 +    next = now + std::chrono::seconds(2);
 +    int v = 0;
-+    if (FILE* f = std::fopen("/tmp/spectrum-971-event-timing", "r")) {
++    if (FILE* f = std::fopen("/tmp/spectrum-detector-event-timing", "r")) {
 +      if (std::fscanf(f, "%d", &v) != 1) v = 0;
 +      std::fclose(f);
 +    }

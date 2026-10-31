@@ -2,7 +2,7 @@
 # Does Rewind recording cost the vision pipeline anything? Run ON THE JETSON (no sudo), with the
 # cameras running. Alternates recording off / on (via the web API's bench switch) and measures,
 # per phase:
-#   - each detector's fps and detect time (from the 971 stats lines),
+#   - each detector's fps and detect time (from the "detector stats" lines),
 #   - PhotonVision's total CPU and the Rewind threads' CPU (from /proc),
 #   - SSD write rate (from /proc/diskstats).
 # Usage: tests/rewind-ab/run.sh [seconds_per_phase] [rounds]   (defaults 30, 2)
@@ -49,9 +49,9 @@ phase() { # $1 = off|on
   local el
   el=$(echo "$t1 - $t0" | bc -l)
   local stats
-  stats=$(journalctl _PID="$P" --no-pager -o cat --since "$since" | grep '^971 stats' || true)
+  stats=$(journalctl _PID="$P" --no-pager -o cat --since "$since" | grep -E '^(971|detector) stats' || true)
   printf "  recording %-3s " "$on"
-  for h in $(grep -oE '^971 stats h[0-9]+' <<<"$stats" | awk '{print $3}' | sort -u); do
+  for h in $(grep -oE '^(971|detector) stats h[0-9]+' <<<"$stats" | awk '{print $3}' | sort -u); do
     awk -v h="$h" '$3 == h {
         for (i = 1; i <= NF; i++) { if ($i == "calls/s,") f += $(i-1); if ($i == "avg" && $(i-1) == "detect") d += $(i+1) }
         n++ }

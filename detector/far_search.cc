@@ -103,7 +103,7 @@ struct FarDetector {
     try {
       gpu = new frc::apriltag::GpuDetector(w, h, td, cm, dc, vision::ImageFormat::MONO8);
     } catch (const std::exception &e) {
-      std::cout << "971 far search: detector " << w << "x" << h << " failed: " << e.what()
+      std::cout << "far search: detector " << w << "x" << h << " failed: " << e.what()
                 << std::endl;
       Reset();
       return false;
@@ -255,14 +255,14 @@ void SetExcluded(const std::vector<int> &ids) {
   std::lock_guard<std::mutex> lock(state_mu);
   if (ids == excluded_ids) return;
   excluded_ids = ids;
-  std::cout << "971 far search: " << ids.size() << " excluded tag(s) don't count toward a good view"
+  std::cout << "far search: " << ids.size() << " excluded tag(s) don't count toward a good view"
             << std::endl;
 }
 
 void SetConfig(const Config &c) {
   std::lock_guard<std::mutex> lock(state_mu);
   if (c.enabled != config.enabled || c.sweeps_per_s != config.sweeps_per_s) {
-    std::cout << "971 far search: " << (c.enabled ? "on" : "off");
+    std::cout << "far search: " << (c.enabled ? "on" : "off");
     if (c.enabled) std::cout << ", up to " << c.sweeps_per_s << " full-size searches a second";
     std::cout << std::endl;
   }

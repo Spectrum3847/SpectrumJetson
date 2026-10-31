@@ -1,4 +1,4 @@
-// SpectrumJetson: what lib971apriltag.so used to take from WPILib's C++ libraries, without linking
+// SpectrumJetson: what libspectrum-gpu-apriltag.so used to take from WPILib's C++ libraries, without linking
 // them. PhotonVision loads its own WPILib (2026 or 2027) into the same JVM, and a detector linked
 // against a different build would bind to libraries it wasn't built for (MAINTENANCE-2027.md).
 //   - WPI_RawFrame: cscore's C frame struct, which Java hands us by address. Same layout in WPILib

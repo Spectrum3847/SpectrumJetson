@@ -13,7 +13,7 @@ import org.opencv.objdetect.Objdetect;
 import org.wpilib.vision.apriltag.AprilTagDetection;
 import org.wpilib.vision.apriltag.AprilTagDetector;
 
-// tests/detector-2027/run.sh: lib971apriltag.so in a JVM with WPILib 2027's own natives (from
+// tests/detector-2027/run.sh: libspectrum-gpu-apriltag.so in a JVM with WPILib 2027's own natives (from
 // PhotonVision's jar), as PhotonVision runs it. One synthetic tag, detected by WPILib's CPU
 // detector and by ours; ours must report corners 0.5 px up-left of WPILib's (OpenCV's pixel
 // convention vs AprilTag's), and agree otherwise.

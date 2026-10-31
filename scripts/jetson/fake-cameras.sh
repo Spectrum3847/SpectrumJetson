@@ -35,8 +35,8 @@ start() {
   running && { echo "Already running ($(cat $RUN/session))."; exit 0; }
   if [[ ! -d $session ]]; then
     [[ $session == "$HOME/fakecam/synthetic" ]] || { echo "No session at $session" >&2; exit 1; }
-    gen=$HOME/build/bos-detector/far_search_test
-    [[ -x $gen ]] || cmake --build "$HOME/build/bos-detector" --target far_search_test --parallel 3 >/dev/null
+    gen=$HOME/build/gpu-detector/far_search_test
+    [[ -x $gen ]] || cmake --build "$HOME/build/gpu-detector" --target far_search_test --parallel 3 >/dev/null
     mkdir -p "$HOME/fakecam"
     "$gen" --write-session "$session" | tail -1
   fi

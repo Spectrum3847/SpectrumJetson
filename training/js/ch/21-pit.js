@@ -65,7 +65,7 @@ Site.chapter('pit', (root) => {
         'Too dark? Exposure should be about 5 ms, with auto exposure off. The decision margin cutoff is 15.',
         'Wipe the lens. Check focus with the Focus card on the Camera page.',
       ],
-      confirm: 'A box on the tag in the dashboard, and <code>tags/frame</code> above 0 in the <code>971 stats</code> log line.',
+      confirm: 'A box on the tag in the dashboard, and <code>tags/frame</code> above 0 in the <code>detector stats</code> log line.',
       why: ['#settings', 'Chapter 4: Camera settings'],
       more: 'The pipeline type for our GPU detector is the CUDA AprilTag one. If the health check says "CUDA detector not loaded", no camera is on it. Match Ready names any camera on the CPU AprilTag type.',
     },
@@ -170,7 +170,7 @@ Site.chapter('pit', (root) => {
         'All of them at about 60 fps, on a fanless Jetson? That\'s the thermal cap (<code>photonvision-57</code>): at 95 °C every camera is capped at 60 fps until the chip is under 88 °C. Match Ready and Settings › Robot state show it. Let it cool, and get it some air. With the stock fan, set Cooling to a Fan setting.',
         'Restart PhotonVision (Settings › Device Control › Restart Software).',
       ],
-      confirm: 'Every camera reads ~120 fps; the <code>971 stats</code> lines say about 120 calls/s.',
+      confirm: 'Every camera reads ~120 fps; the <code>detector stats</code> lines say about 120 calls/s.',
       why: ['#settings', 'Chapter 4: Camera settings'],
     },
 
@@ -180,7 +180,7 @@ Site.chapter('pit', (root) => {
       title: 'Decision margin near the cutoff: light is the problem',
       cause: 'Each tag gets a <span class="term">decision margin</span> score. If it\'s hovering near our cutoff of 15, the tag drops in and out. Dim light, or lights that flicker, cause it.',
       steps: [
-        'Watch the margin: the <code>971 stats</code> log line shows <code>margin avg … min …</code>.',
+        'Watch the margin: the <code>detector stats</code> log line shows <code>margin avg … min …</code>.',
         'Run <code>tests/flicker-check/run.sh</code> under these lights. If the frames pulse, set exposure to 83 (8.3 ms): that covers one full flicker of mains-powered lights.',
         'If they don\'t pulse, lower the cutoff a little. Retune on the event field, not in the pit.',
       ],
@@ -485,7 +485,7 @@ Site.chapter('pit', (root) => {
   /* ── Health-check reports ─────────────────────────────── */
   {
     const CMD = '$ ssh -i ~/.ssh/jetson_ed25519 spectrum3847@10.85.15.15 \\\n    ~/SpectrumJetson/scripts/jetson/health-check.sh 4';
-    const DET = '  PASS  971 library loaded (frc971/bos detector, min_white_black_diff 20, max_line_fit_mse 10, threads 6, CUDA wait block, GPU connections 32)';
+    const DET = '  PASS  detector loaded (frc971/bos detector, min_white_black_diff 20, max_line_fit_mse 10, threads 6, CUDA wait block, GPU connections 32)';
     const tail = (boots, quiet) => [
       '== Robot connection',
       '  PASS  NT connected to 10.85.15.2:5810 (server team is 8515)',
@@ -599,10 +599,10 @@ Site.chapter('pit', (root) => {
     });
   }
 
-  /* ── 971 stats line ───────────────────────────────────── */
+  /* ── detector stats line ───────────────────────────────────── */
   {
     const PARTS = [
-      ['971 stats', 'Printed once a second for every AprilTag camera by our GPU detector, the 971 library (Austin Schuh and FRC 971\'s CUDA AprilTag detector).'],
+      ['detector stats', 'Printed once a second for every AprilTag camera by our GPU detector, the 971 library (Austin Schuh and FRC 971\'s CUDA AprilTag detector).'],
       ['h1', 'Which detector. Each AprilTag camera gets its own: h0, h1, h2, h3. The number is not the camera\'s name, so count the lines: four cameras, four handles.'],
       ['1280x800:', 'The image size the detector gets. A Thriftiest Cam should be 1280x800.'],
       ['121.9 calls/s,', 'Frames per second reaching the detector. About 120 is healthy. The health check warns under 30: usually exposure too long.'],

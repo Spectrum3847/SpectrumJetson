@@ -9,7 +9,7 @@
      // our original line that have large gradients. On really big tags,
      // we're willing to sample more to get an even better estimate.
      int nsamples = std::max<int>(16, mag / 8);  // XXX tunable
-+    // SpectrumJetson (bos-08): never more samples than the image is big. A candidate quad with a
++    // SpectrumJetson (detector-08): never more samples than the image is big. A candidate quad with a
 +    // corner far outside the image (seen on full-size searches of busy scenes) made this hundreds
 +    // of millions, and one frame's detection ran for minutes.
 +    nsamples = std::min<int>(nsamples, std::max<int>(16, (im_orig->width + im_orig->height) / 8));
@@ -20,7 +20,7 @@
      quad_original.H = nullptr;
      quad_original.Hinv = nullptr;
  
-+    // SpectrumJetson (bos-08): a quad with a corner that isn't a number or is far outside the image
++    // SpectrumJetson (detector-08): a quad with a corner that isn't a number or is far outside the image
 +    // can't be a tag; skip it before RefineEdges spends its samples on it.
 +    {
 +      bool sane = true;

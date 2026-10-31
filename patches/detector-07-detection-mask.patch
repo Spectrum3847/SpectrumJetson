@@ -4,7 +4,7 @@
  constexpr size_t kBlobDiffBlockWidth = 32;
  constexpr size_t kBlobDiffBlockHeight = 16;
  // BlobDiff's grid: overlap 1 on each side in x, and 1 in y.
-+// SpectrumJetson (bos-07): pixels the mask ignores (0) become "no contrast" (127), which
++// SpectrumJetson (detector-07): pixels the mask ignores (0) become "no contrast" (127), which
 +// BlobDiff skips, so nothing is found there.
 +__global__ void ApplyMask(uint8_t* thresholded, const uint8_t* mask, size_t n) {
 +  const size_t i = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x;
@@ -86,7 +86,7 @@
    bool FirstStageGraphWanted(const uint8_t* image_device);
    absl::Status RecordFirstStageGraph(const uint8_t* image_device);
  
-+  // SpectrumJetson (bos-07): a detection mask at the decimated size ((width/2) x (height/2), 1 =
++  // SpectrumJetson (detector-07): a detection mask at the decimated size ((width/2) x (height/2), 1 =
 +  // search here, 0 = ignore), or nullptr for none. Ignored pixels become "no contrast" (127)
 +  // right after thresholding, so no blob, edge or tag is found there. The bytes are copied on
 +  // this detector's stream: keep them alive until the next Detect() returns.
@@ -101,7 +101,7 @@
    bool first_stage_failed_ = false;  // recording failed: don't try again (this detector)
 +  bool first_stage_mask_ = false;    // whether the recorded graph masks
 +
-+  // SpectrumJetson (bos-07): SetMask's mask on the GPU, and whether it's on.
++  // SpectrumJetson (detector-07): SetMask's mask on the GPU, and whether it's on.
 +  GpuMemory<uint8_t> mask_device_;
 +  bool mask_on_ = false;
  

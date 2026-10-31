@@ -41,7 +41,7 @@ if ! jar_ok "$JAR"; then
   echo "Refusing to install $JAR: not a valid PhotonVision jar ($(stat -c %s "$JAR") bytes)." >&2
   exit 1
 fi
-[[ -f /usr/lib/lib971apriltag.so ]] || echo "WARNING: /usr/lib/lib971apriltag.so missing; CUDA pipeline will fail to load." >&2
+[[ -f /usr/lib/libspectrum-gpu-apriltag.so ]] || echo "WARNING: /usr/lib/libspectrum-gpu-apriltag.so missing; CUDA pipeline will fail to load." >&2
 
 sudo systemctl stop photonvision
 

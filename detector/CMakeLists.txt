@@ -1,10 +1,10 @@
-# Drop-in lib971apriltag.so for the FRC-Team-4143 PhotonVision fork, built from
+# libspectrum-gpu-apriltag.so (was libspectrum-gpu-apriltag.so), a drop-in for the FRC-Team-4143 PhotonVision fork, built from
 # Austin Schuh's current CUDA AprilTag detector as packaged in frc971/bos
 # (third_party/971apriltag) plus our JNI bridge (GpuDetectorJNI.cc).
 #
 # Configure with -DBOS_DIR=<frc971/bos checkout with the abseil-cpp submodule> and
 # -DAPRILTAG_DIR=<AprilRobotics/apriltag checkout, in a directory named "apriltag">.
-# scripts/jetson/07-build-bos-detector.sh does the fetch + build.
+# scripts/jetson/07-build-gpu-detector.sh does the fetch + build.
 #
 # No WPILib: PhotonVision loads its own (2026 or 2027) into the same JVM, so this library links
 # none of it (wpi_compat.h), and the AprilTag C library and abseil are built in statically with
@@ -83,13 +83,13 @@ target_link_libraries(971apriltag_dep PUBLIC apriltag)
 
 # JVM only: the headless JDK has no AWT, which FindJNI otherwise requires.
 find_package(JNI REQUIRED COMPONENTS JVM)
-# Headers only in lib971apriltag.so (PhotonVision's JVM has its own OpenCV); imgproc for the far
+# Headers only in libspectrum-gpu-apriltag.so (PhotonVision's JVM has its own OpenCV); imgproc for the far
 # search's bench test, a separate program.
 find_package(OpenCV REQUIRED core imgproc)
 find_package(JPEG REQUIRED)  # libjpeg-turbo (libjpeg-turbo8-dev), for decodeMjpegGray
 
 add_library(971apriltag_jni SHARED GpuDetectorJNI.cc far_search.cc fault_kernel.cu)
-set_target_properties(971apriltag_jni PROPERTIES OUTPUT_NAME 971apriltag)
+set_target_properties(971apriltag_jni PROPERTIES OUTPUT_NAME spectrum-gpu-apriltag)
 target_include_directories(971apriltag_jni PRIVATE ${BOS_DIR} ${JNI_INCLUDE_DIRS}
                                                    ${OpenCV_INCLUDE_DIRS})
 # bos uses ABSL_FLAG (use_neon, debug_blob_index) but its CMake does not link absl::flags.
@@ -102,7 +102,7 @@ set_target_properties(971apriltag_jni PROPERTIES CXX_VISIBILITY_PRESET hidden
                                                  CUDA_VISIBILITY_PRESET hidden)
 target_link_options(971apriltag_jni PRIVATE -Wl,--no-undefined -Wl,--exclude-libs,ALL)
 
-# SpectrumJetson: NVJPG hardware JPEG decode (libspectrumnvjpg.so), which lib971apriltag.so
+# SpectrumJetson: NVJPG hardware JPEG decode (libspectrumnvjpg.so), which libspectrum-gpu-apriltag.so
 # loads with dlopen when SPECTRUM_JPEG_DECODER=nvjpg. Its own library because libnvjpeg exports
 # the same jpeg_* names as libjpeg-turbo (nvjpg_decoder.h). It must never link libjpeg-turbo, and
 # it takes jpeglib.h from the Jetson Multimedia API (libnvjpeg's struct layout).
@@ -161,15 +161,15 @@ target_include_directories(far_search_test PRIVATE ${BOS_DIR} ${OpenCV_INCLUDE_D
 target_link_libraries(far_search_test PRIVATE 971apriltag absl::flags CUDA::cudart JPEG::JPEG
                                               ${OpenCV_LIBS} Threads::Threads ${CMAKE_DL_LIBS})
 
-# SpectrumJetson: far_replay, a whole Rewind session through the detector with the far-tag search
-# deciding as it does live (far_replay.cc). A command-line tool; tests/far-search/replay.sh.
-add_executable(far_replay far_replay.cc far_search.cc)
-target_include_directories(far_replay PRIVATE ${BOS_DIR} ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(far_replay PRIVATE 971apriltag absl::flags CUDA::cudart JPEG::JPEG
+# SpectrumJetson: detector-replay (was far_replay), a whole Rewind session through the detector
+# with the far-tag search deciding as it does live (detector_replay.cc). A command-line tool; tests/far-search/replay.sh.
+add_executable(detector-replay detector_replay.cc far_search.cc)
+target_include_directories(detector-replay PRIVATE ${BOS_DIR} ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(detector-replay PRIVATE 971apriltag absl::flags CUDA::cudart JPEG::JPEG
                                          ${OpenCV_LIBS} Threads::Threads ${CMAKE_DL_LIBS})
 
 # SpectrumJetson: graph_bench, Detect() timing (thread CPU, wall) and exact detections on one
-# Rewind camera folder, for A/B tests of the detector's CUDA launch path (bos-11). Not installed.
+# Rewind camera folder, for A/B tests of the detector's CUDA launch path (detector-11). Not installed.
 add_executable(graph_bench graph_bench.cc)
 target_include_directories(graph_bench PRIVATE ${BOS_DIR})
 target_link_libraries(graph_bench PRIVATE 971apriltag absl::flags CUDA::cudart JPEG::JPEG

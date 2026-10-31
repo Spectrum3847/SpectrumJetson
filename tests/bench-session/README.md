@@ -28,7 +28,7 @@ Ctrl-C at any time stops and puts everything back.
 |---|---|---|---|
 | inventory | nothing | cameras, fps, every camera on NVJPG (no libjpeg-turbo frames, no fallback lines since start), clocks locked, temperatures, spectrum-rt, detector options | nothing |
 | baseline | cameras away from tags, then at tags | fps, latency median/p95/max per camera, detect times, PhotonVision CPU, perf profile per thread, GPU, power, temperature | nothing |
-| graphs | tags in view, keep still | CUDA graphs on vs off, interleaved | `/tmp/spectrum-971-graphs` |
+| graphs | tags in view, keep still | CUDA graphs on vs off, interleaved | `/tmp/spectrum-detector-graphs` |
 | far | tags in view, some 5+ m away | far search on vs off, interleaved: turn it on for the robot if the live cost is near the replay's 1.7 ms/frame | `/api/robotState` farSearch |
 | 3d | tags in view, keep still | 3D (solvePNPEnabled) on vs off: CPU, latency | each camera's active pipeline setting, via PhotonVision's websocket |
 | rt | tags in view, keep still | spectrum-rt off vs on with LOAD=0 and LOAD=4 (tests/rt-ab) | spectrum-rt mode |
@@ -46,9 +46,9 @@ Copy to the laptop: `rsync -a jetson:bench-results/ logs/bench-results/`
 
 Notes:
 - Camera rows (fps, latency) come from PhotonVision's 10 s "Loop timing" lines; detector rows
-  (`h0`, `h1`, ...) from the "971 stats" lines. The log doesn't say which detector is which camera.
+  (`h0`, `h1`, ...) from the "detector stats" lines. The log doesn't say which detector is which camera.
 - 3D changes nothing unless the camera has a calibration for its resolution.
-- The edge step is skipped if the installed detector has no `SPECTRUM_971_EDGE_BORDER_PX`, or if
-  `~/build/bos-detector` differs from what's installed (08-select-detector.sh would swap it).
+- The edge step is skipped if the installed detector has no `SPECTRUM_DETECTOR_EDGE_BORDER_PX`, or if
+  `~/build/gpu-detector` differs from what's installed (08-select-detector.sh would swap it).
 - CPU profiling uses perf, never async-profiler (its SIGPROF stops cscore camera threads).
 - Tunables: `BENCH_SECS` (window, 30), `BENCH_ROUNDS` (A/B rounds, 2), `RT_SECS` (45), `EDGE_VALUES` ("0 25 50").
