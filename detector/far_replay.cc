@@ -5,14 +5,18 @@
 //
 //   far_replay SESSION_DIR [--out OUT.csv] [--budget N] [--off] [--every N] [--threads N]
 //              [--calib CAMERA=fx,fy,cx,cy,k1,k2,p1,p2,k3,k4,k5,k6]... [--mwbd N] [--mse X]
-//              [--exclude ID,ID...] [--edge N]
+//              [--exclude ID,ID...] [--mcp N] [--fullres | --half] [--edge N]
 //
 // SESSION_DIR: a Rewind session (one folder per camera, docs/REWIND.md). --budget: full-size
 // searches a second (default 30, as live). --off: the far search switched off, for a baseline.
 // --every N: every Nth frame of each camera (the policy's timings stay on the recording's clock).
 // --calib: a camera's lens calibration by folder name; without one, no undistortion (as in
 // PhotonVision before a calibration). --exclude: PhotonVision's excluded tags, which don't count
-// toward a good view (photonvision-69).
+// toward a good view (photonvision-69). --mcp: min_cluster_pixels (the 971 detector's floor is 24).
+// --fullres: the normal search at full resolution (the frame upscaled 2x in tiles, as the far
+// search's full-size search does) instead of the detector's half-resolution quad search.
+// --half: the frame downscaled 2x (2x2 average) first, as a 640x400 camera mode; corners and sizes
+// are reported in full-frame pixels (X = 2U, the 971 detector's pixel-edge convention).
 //
 // OUT.csv, one row per detection: camera,frame,jetson_us,id,margin,side_px,source,x0,y0,...,x3,y3
 // (source: normal or far). Summary on stdout: tag sightings (camera x frame x tag) by the normal
@@ -20,11 +24,13 @@
 // time starved, full-size searches and crops, and what they cost, and the slowest frames.
 // --edge N: drop tags whose blob comes within N full-frame pixels of the image edge (bos-12,
 // SPECTRUM_971_EDGE_BORDER_PX live; default 0 = off). Normal search only, not the far search's crops.
+// With --half, N/2 rounded up in the small frame; ignored with --fullres.
 // --trace: each frame's far-search time on stderr as it goes (to find a frame that stalls).
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -63,7 +69,41 @@ struct Camera {
   long frames_done = 0, normal_sightings = 0, far_sightings = 0, bad_jpegs = 0;
   std::map<int, long> far_only;           // tag -> frames only the far search found it
   std::map<int, double> far_only_min_px;  // tag -> smallest side it was found at
+  // --fullres: one detector per tile (the frame upscaled 2x), and the tiles' x origins.
+  std::vector<frc::apriltag::GpuDetector *> tiles;
+  std::vector<int> tile_x0;
+  int tile_w = 0;
+  std::vector<uint8_t> up, small;
 };
+
+constexpr int kTileSide = 1024;  // frame pixels; upscaled 2x, the 971 detector's 2048 limit
+
+void Upscale2x(const uint8_t *src, int stride, int x0, int w, int h, uint8_t *dst) {
+  const size_t dw = 2 * static_cast<size_t>(w);
+  for (int y = 0; y < h; ++y) {
+    const uint8_t *s = src + static_cast<size_t>(y) * stride + x0;
+    uint8_t *d = dst + 2 * static_cast<size_t>(y) * dw;
+    for (int x = 0; x < w; ++x) d[2 * x] = d[2 * x + 1] = s[x];
+    std::memcpy(d + dw, d, dw);
+  }
+}
+
+// A detection from an image scaled by 1/k (k = 0.5: upscaled 2x) and offset x0, back to the frame:
+// X = k U + x0 (pixel edges at whole numbers, as far_search.cc's Unscale).
+far_search::Det Rescale(const far_search::Det &d, double k, double x0) {
+  far_search::Det o = d;
+  for (int i = 0; i < 4; ++i) {
+    o.p[2 * i] = d.p[2 * i] * k + x0;
+    o.p[2 * i + 1] = d.p[2 * i + 1] * k;
+  }
+  o.c[0] = d.c[0] * k + x0;
+  o.c[1] = d.c[1] * k;
+  for (int col = 0; col < 3; ++col) {
+    o.H[0 * 3 + col] = d.H[0 * 3 + col] * k + x0 * d.H[2 * 3 + col];
+    o.H[1 * 3 + col] = d.H[1 * 3 + col] * k;
+  }
+  return o;
+}
 
 struct Item {
   int camera;
@@ -91,7 +131,8 @@ int main(int argc, char **argv) {
                                : fs::path(argv[1]).lexically_normal();
   std::string out_path;
   double budget = 30;
-  bool off = false, trace = false;
+  bool off = false, trace = false, fullres = false, half = false;
+  int mcp = -1;
   int edge = 0;
   int every = 1, threads = 5;
   double mwbd = EnvOr("SPECTRUM_971_MIN_WHITE_BLACK_DIFF", 5), mse = EnvOr("SPECTRUM_971_MAX_LINE_FIT_MSE", 10);
@@ -104,7 +145,10 @@ int main(int argc, char **argv) {
     else if (a == "--budget") budget = std::atof(v), ++i;
     else if (a == "--off") off = true;
     else if (a == "--trace") trace = true;
+    else if (a == "--fullres") fullres = true;
+    else if (a == "--half") half = true;
     else if (a == "--edge") edge = std::max(0, std::atoi(v)), ++i;
+    else if (a == "--mcp") mcp = std::atoi(v), ++i;
     else if (a == "--every") every = std::max(1, std::atoi(v)), ++i;
     else if (a == "--threads") threads = std::max(1, std::atoi(v)), ++i;
     else if (a == "--mwbd") mwbd = std::atof(v), ++i;
@@ -163,6 +207,7 @@ int main(int argc, char **argv) {
     c.td->wp = workerpool_create(c.td->nthreads);
     c.td->qtp.min_white_black_diff = static_cast<int>(mwbd);
     c.td->qtp.max_line_fit_mse = static_cast<float>(mse);
+    if (mcp > 0) c.td->qtp.min_cluster_pixels = mcp;
     c.td->debug = false;
     c.dc.num_params = 5;
     if (auto it = calibs.find(c.name); it != calibs.end()) {
@@ -172,8 +217,33 @@ int main(int argc, char **argv) {
       for (size_t j = 4; j < k.size() && j - 4 < 8; ++j) *d[j - 4] = k[j];
       if (k.size() >= 12) c.dc.num_params = 8;  // PhotonVision's 8-coefficient calibrations
     }
-    c.gpu = new frc::apriltag::GpuDetector(c.width, c.height, c.td, c.cm, c.dc, vision::ImageFormat::MONO8);
-    c.gpu->SetEdgeBorder(edge);
+    if (half) {
+      // 2x2 average: OpenCV-convention centres move as x' = (x + 0.5) / 2 - 0.5.
+      auto cm = c.cm;
+      if (calibs.count(c.name)) cm = {c.cm.fx / 2, (c.cm.cx + 0.5) / 2 - 0.5, c.cm.fy / 2, (c.cm.cy + 0.5) / 2 - 0.5};
+      c.small.resize(static_cast<size_t>(c.width / 2) * (c.height / 2));
+      c.gpu = new frc::apriltag::GpuDetector(c.width / 2, c.height / 2, c.td, cm, c.dc, vision::ImageFormat::MONO8);
+      c.gpu->SetEdgeBorder((edge + 1) / 2);
+    } else if (fullres) {
+      if (edge > 0 && &c == &cams[0]) std::cerr << "--edge is ignored with --fullres\n";
+      if (c.height > kTileSide || c.width > 2 * kTileSide) {
+        std::cerr << "--fullres: frame too big\n";
+        return 2;
+      }
+      c.tile_w = std::min(c.width, kTileSide);
+      c.tile_x0 = {0};
+      if (c.width > kTileSide) c.tile_x0.push_back(c.width - kTileSide);
+      c.up.resize(static_cast<size_t>(4) * c.tile_w * c.height);
+      for (int x0 : c.tile_x0) {
+        auto cm = c.cm;
+        if (calibs.count(c.name)) cm = {2 * c.cm.fx, 2 * (c.cm.cx - x0), 2 * c.cm.fy, 2 * c.cm.cy};
+        c.tiles.push_back(
+            new frc::apriltag::GpuDetector(2 * c.tile_w, 2 * c.height, c.td, cm, c.dc, vision::ImageFormat::MONO8));
+      }
+    } else {
+      c.gpu = new frc::apriltag::GpuDetector(c.width, c.height, c.td, c.cm, c.dc, vision::ImageFormat::MONO8);
+      c.gpu->SetEdgeBorder(edge);
+    }
   }
 
   // All frames, merged in recording-time order.
@@ -183,8 +253,9 @@ int main(int argc, char **argv) {
   std::sort(items.begin(), items.end(), [](const Item &a, const Item &b) { return a.jetson_us < b.jetson_us; });
   const double seconds = items.size() > 1 ? (items.back().jetson_us - items.front().jetson_us) / 1e6 : 0;
 
-  std::printf("%s: %zu cameras, %zu frames, %.1f s; far search %s (%.0f full-size searches a second)\n",
-              session.filename().c_str(), cams.size(), items.size(), seconds, off ? "OFF" : "on", budget);
+  std::printf("%s: %zu cameras, %zu frames, %.1f s; far search %s (%.0f full-size searches a second)%s\n",
+              session.filename().c_str(), cams.size(), items.size(), seconds, off ? "OFF" : "on", budget,
+              fullres ? "; normal search at FULL resolution" : half ? "; frames downscaled 2x" : "");
   for (auto &c : cams)
     std::printf("  %s: %zu frames %dx%d%s\n", c.name.c_str(), c.frames.size(), c.width, c.height,
                 calibs.count(c.name) ? ", calibrated" : "");
@@ -235,8 +306,32 @@ int main(int argc, char **argv) {
       }
       cv::Mat img(c.height, c.width, CV_8UC1, gray[k].data());
       auto t0 = std::chrono::steady_clock::now();
-      if (!c.gpu->Detect(gray[k].data(), nullptr).ok()) continue;
-      auto normal = far_search::Copy(c.gpu->Detections());
+      std::vector<far_search::Det> normal;
+      if (half) {
+        const int w2 = c.width / 2, h2 = c.height / 2;
+        const uint8_t *g = gray[k].data();
+        for (int y = 0; y < h2; ++y)
+          for (int x = 0; x < w2; ++x) {
+            const uint8_t *s = g + static_cast<size_t>(2 * y) * c.width + 2 * x;
+            c.small[static_cast<size_t>(y) * w2 + x] = static_cast<uint8_t>((s[0] + s[1] + s[c.width] + s[c.width + 1] + 2) / 4);
+          }
+        if (!c.gpu->Detect(c.small.data(), nullptr).ok()) continue;
+        for (const auto &d : far_search::Copy(c.gpu->Detections())) normal.push_back(Rescale(d, 2, 0));
+      } else if (fullres) {
+        for (size_t t = 0; t < c.tiles.size(); ++t) {
+          Upscale2x(gray[k].data(), c.width, c.tile_x0[t], c.tile_w, c.height, c.up.data());
+          if (!c.tiles[t]->Detect(c.up.data(), nullptr).ok()) continue;
+          for (const auto &d : far_search::Copy(c.tiles[t]->Detections())) {
+            auto o = Rescale(d, 0.5, c.tile_x0[t]);
+            auto it = std::find_if(normal.begin(), normal.end(), [&](const far_search::Det &e) { return e.id == o.id; });
+            if (it == normal.end()) normal.push_back(o);
+            else if (o.margin > it->margin) *it = o;
+          }
+        }
+      } else {
+        if (!c.gpu->Detect(gray[k].data(), nullptr).ok()) continue;
+        normal = far_search::Copy(c.gpu->Detections());
+      }
       auto t1 = std::chrono::steady_clock::now();
       if (trace) std::fprintf(stderr, "trace %s frame %d...", c.name.c_str(), c.frames[it.frame].index);
       auto far = far_search::Process(it.camera, img, normal, c.td, c.cm, c.dc, it.jetson_us);
