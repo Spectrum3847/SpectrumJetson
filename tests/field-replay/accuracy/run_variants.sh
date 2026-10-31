@@ -25,8 +25,6 @@ declare -A OPTS=(
   [a_edgefitu]="$B --mse 10 --edgefit-undist"
   [a_edgefitu_sub2]="$B --mse 10 --edgefit-undist --subpix 2"
   [a_norefine]="$B --mse 10 --no-refine-edges"
-  [a_nmax5]="$B --mse 10 --nmaxima 5"
-  [a_nmax20]="$B --mse 10 --nmaxima 20"
   [a_base]="$B --mse 10"  # base again, for timings under the same conditions
   [a_mse5]="$B --mse 5"
   [a_mse7.5]="$B --mse 7.5"
@@ -37,7 +35,7 @@ declare -A OPTS=(
   [a_mse10_cos0.996]="$B --mse 10 --cos 0.996"
   [a_mse20_cos0.996]="$B --mse 20 --cos 0.996"
 )
-ORDER=(a_base a_mse5 a_mse7.5 a_sub1 a_sub2 a_sub3 a_edgefit a_edgefitu a_edgefitu_sub2 a_norefine a_nmax5 a_nmax20
+ORDER=(a_base a_mse5 a_mse7.5 a_sub1 a_sub2 a_sub3 a_edgefit a_edgefitu a_edgefitu_sub2 a_norefine
        a_mse10_cos0.94 a_mse10_cos0.996 a_mse2.5_cos0.94 a_mse20_cos0.94 a_mse2.5_cos0.996 a_mse20_cos0.996)
 (($#)) && ORDER=("$@")
 

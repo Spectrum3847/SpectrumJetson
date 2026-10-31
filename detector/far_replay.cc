@@ -32,7 +32,7 @@
 // strongest gradient across each tag edge (subpixel peak, every ~1.5 px along the edge);
 // --edgefit-undist: the same, with the lines fitted in undistorted coordinates (needs --calib).
 // --no-refine-edges: the detector's own RefineEdges off. --cos X: qtp.cos_critical_rad.
-// --nmaxima N: qtp.max_nmaxima. Refinement time goes on its own "Refine:" line.
+// --nmaxima N: qtp.max_nmaxima (bos compiles it in as 10: any other value CHECK-fails). Refinement time goes on its own "Refine:" line.
 #include <algorithm>
 #include <atomic>
 #include <chrono>

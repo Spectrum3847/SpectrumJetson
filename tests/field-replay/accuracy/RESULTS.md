@@ -101,3 +101,59 @@ Refine time is CPU, one thread, per frame (2 cameras' tags).
 - **The 971 detector's own RefineEdges is worth 0.73 px of median error** (and refine off also
   swaps 1,353 good-ish sightings for 741 bad ones, median 17 px). It's already on and is the best
   corner estimate tried. Nothing cheap to add after it.
+
+## Checkpoint 4: detector internals, the cos_critical x mse sweep, the mse curve
+
+What bos honours on the GPU path (third_party/971apriltag): `min_white_black_diff`,
+`min_cluster_pixels` (floor 24), `max_line_fit_mse`, `cos_critical_rad` (the quad fit),
+`refine_edges` (CPU decode). `quad_sigma` (pre-blur) and `decode_sharpening` aren't used
+anywhere. `max_nmaxima` is compiled in as 10, and any other value CHECK-fails, so `--nmaxima`
+is a no-op in practice. A base re-run (`a_base`) gives bit-identical output, so the replay is
+deterministic.
+
+**Timing:** today's replays (all variants, `a_base` included) ran at 5.8–6.4 ms detect/frame against 3.1 ms
+for the original base. That's the conditions (clocks/load), not the knobs: `a_base` itself is
+5.98 ms. Against it, no mse/cos variant costs anything measurable (±0.4 ms, which is noise).
+
+**max_line_fit_mse curve** (cos_critical default, cos 10° = 0.985). Lost/gained are relative to mse 10, with in-frame error
+(median px; base all-sightings median 1.28):
+
+| mse | Sightings | Lost vs 10 (checkable: median, >20.4 px) | Gained vs 10 | Corners on common sightings |
+|---|---|---|---|---|
+| 2.5 | 38,383 | 107 (32: **6.2 px**, 2) | 1 (10.8 px) | identical |
+| 5 | 38,468 | 22 (5: 7.0 px, 1) | 1 | identical |
+| 7.5 | 38,483 | 6 (3: 3.6 px, 0) | 0 | identical |
+| **10 (base)** | 38,489 | | | |
+| 15 | 38,493 | 0 | 4 (none checkable) | identical (p90 −0.002, n.s.) |
+| 20 | 38,496 | 0 | 7 (1: 10.6 px) | identical (p90 −0.002, n.s.) |
+
+**cos_critical_rad x mse** (0.94 = 20°, default 0.985, 0.996 = 5°): cos changes 0–8 sightings in
+any column (mse 2.5: 107/111/107 lost; mse 20: +7/+8/+7 gained). Corners are identical on common
+sightings. It's a gate like mse.
+
+## Recommendations
+
+1. **Settings that don't matter for accuracy:** max_line_fit_mse (2.5–20), cos_critical_rad
+   (0.94–0.996), min_white_black_diff (5–30), min_cluster_pixels (24–100). They never move a
+   corner; they only gate quads. Over 6 matches, mse moves 6–107 sightings out of 38,489 (≤0.3%).
+   The ones dropped below 10 are poor (median 3.6–7 px, 5x typical) but rarely wild (≤2 over
+   20 px). Keep mse 10: the curve is flat from 7.5 to 20. mse 5–7.5 would trim 6–22 poor
+   sightings at no accuracy cost, but it's a wash.
+2. **Settings that do matter, by measured accuracy:**
+   - **RefineEdges ON (current): worth 0.73 px of median in-frame error.** Never turn it off.
+   - **1280x800, not 640x400: 0.26 px** (plus 42% more sightings).
+   - Full-res quad search: −0.03 px on common corners (slightly worse) but +4,500 good
+     sightings, at 3.5x the detect time. The far search's finds are the most accurate
+     (0.95 px median).
+3. **Don't add a post-refinement.** cornerSubPix (+0.25 to +1.0 px) and the edge-line fit
+   (+0.46 px, either undistortion order) are both worse than the detector's corners.
+4. **Where the error actually is:** corner noise is ~0.08 px static, but the in-frame error is 1.28 px
+   median / 9.1 px p90, and 5.6 px within 10 px of the edge. So it's systematic: field layout
+   (tag positions), lens calibration (worse at the edges), and maybe per-tag corner bias from
+   blur/JPEG. The next accuracy gains are in calibration (more edge coverage) and the field map
+   (`field-map` / fieldcal), not detector knobs.
+5. **Needs new recordings** (can't be replayed from this data): exposure and gain (blur vs noise),
+   JPEG quality (MJPEG artifacts at tag edges), and a deliberate still period on the field (the
+   recordings have only 13 usable still stretches, and odometry can't find them). A one-minute
+   still capture at 2–3 distances per camera, at two exposures and two JPEG qualities, would give
+   the static-jitter judge thousands of tag-stretches instead of 32.
