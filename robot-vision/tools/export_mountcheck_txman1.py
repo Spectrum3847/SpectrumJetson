@@ -7,7 +7,7 @@ On the Jetson (nice 19), then copy the folder back:
       /data/scratch/txman1/replay OUT_DIR
   MOUNTCHECK_TXMAN1=OUT_DIR ./build.sh wpilib2026     (robot-vision; the test is skipped without it)
 """
-import csv, glob, json, os, sys
+import csv, glob, os, sys
 import numpy as np
 sys.path.insert(0, os.environ.get("FIELD_REPLAY", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../tests/field-replay")))
 import common, fieldgt as g
