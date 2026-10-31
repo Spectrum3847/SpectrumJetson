@@ -357,7 +357,6 @@ base = data[args.base]
 P(f"Judge: base {args.base}; matches {', '.join(matches)}")
 for v in variants:
     vb = data[v]
-    tm = times(os.path.join(args.root, matches[0]), v)
     tms = [times(os.path.join(args.root, m), v) for m in matches]
     n = sum(t[2] for t in tms)
     det_ms = sum(t[0] * t[2] for t in tms if t[2]) / n if n else np.nan
@@ -436,7 +435,6 @@ for v in variants:
     if sr:
         cl = np.array([r[0] for r in sr])
         ra = np.array([r[1] for r in sr]); rb = np.array([r[2] for r in sr])
-        aa, bb = np.abs(ra).max(1), np.abs(rb).max(1)  # unused summary of outliers
         # Per-window rms over the 8 coordinates; robust std ~ median |r| * 1.4826
         ma, mb = np.median(np.abs(ra), 1) * 1.4826, np.median(np.abs(rb), 1) * 1.4826
         ci = boot_diff(cl, ma, mb, np.median)

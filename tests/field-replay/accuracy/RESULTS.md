@@ -75,3 +75,29 @@ frame). The base's in-frame error over all checkable sightings is median 1.28 px
 - **Full-res search:** corners on common tags are very slightly *worse* (+0.03 px median), and
   its extra finds are good (median 1.18 px). Far search's finds are better still (0.95 px).
 - Static jitter is the same for everything here (0.084 px), the far search included.
+
+## Checkpoint 3: corner refinement knobs
+
+The same base settings plus one refinement after detection. Every sighting is common: refinement
+moves corners and never adds or drops a tag (except refine_edges off, which changes decoding).
+Refine time is CPU, one thread, per frame (2 cameras' tags).
+
+| Variant | In-frame p50 change (CI) | p90 change | Static jitter (base 0.084 px) | Refine ms/frame |
+|---|---|---|---|---|
+| cornerSubPix 3x3 (`--subpix 1`) | +0.25 (+0.23..+0.27) | +2.1 | 0.128 | 0.05 |
+| cornerSubPix 5x5 (`--subpix 2`) | +0.99 (+0.96..+1.03) | +7.2 | 0.241 | 0.04 |
+| cornerSubPix 7x7 (`--subpix 3`) | +0.80 (+0.75..+0.85) | +5.7 | 0.180 | 0.03 |
+| edge-line fit, pixel space (`--edgefit`) | +0.46 (+0.43..+0.48) | +2.3 | 0.164 | 0.11 |
+| edge-line fit, undistorted (`--edgefit-undist`) | +0.46 (+0.44..+0.49) | +2.1 | 0.164 | 0.17 |
+| edgefit-undist + subpix 2 | +1.16 (+1.11..+1.20) | +7.5 | 0.257 | 0.22 |
+| detector's RefineEdges OFF (`--no-refine-edges`) | **+0.73 (+0.69..+0.75)** | +5.8 | 0.111 | (−0.3 ms detect) |
+
+- **Every post-refinement makes corners worse.** cornerSubPix assumes a saddle (checkerboard)
+  corner. A tag corner is an L-corner on a black square, so it gets pulled off it. The edge-line
+  fit (strongest gradient, subpixel, weighted line fit, intersect) doubles the jitter and adds
+  +0.46 px.
+- **Undistortion order doesn't matter:** fitting the edge lines in undistorted or pixel space
+  differs by < 0.01 px at the median. Lens curvature over one tag edge is negligible here.
+- **The 971 detector's own RefineEdges is worth 0.73 px of median error** (and refine off also
+  swaps 1,353 good-ish sightings for 741 bad ones, median 17 px). It's already on and is the best
+  corner estimate tried. Nothing cheap to add after it.
