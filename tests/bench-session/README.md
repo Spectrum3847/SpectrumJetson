@@ -27,7 +27,7 @@ Ctrl-C at any time stops and puts everything back.
 
 | step | what you do | what it measures | changes (put back after) |
 |---|---|---|---|
-| inventory | nothing | cameras, fps, every camera on NVJPG (no libjpeg-turbo frames, no fallback lines since start), clocks locked, temperatures, spectrum-rt, detector options | nothing |
+| inventory | nothing | cameras (per camera: model VID:PID + product, serial, firmware, USB port, video node, exposure now/min/max and gain range from `v4l2-ctl --list-ctrls`, USB bandwidth reservation from `usb-bandwidth.py`; `cameras.py`, read-only), fps, every camera on NVJPG (no libjpeg-turbo frames, no fallback lines since start), clocks locked, temperatures, spectrum-rt, detector options | nothing |
 | baseline | cameras away from tags, then at tags | fps, latency median/p95/max per camera, detect times, PhotonVision CPU, perf profile per thread, GPU, power, temperature | nothing |
 | graphs | tags in view, keep still | CUDA graphs on vs off, interleaved | `/tmp/spectrum-detector-graphs` |
 | far | tags in view, some 5+ m away | far search on vs off, interleaved: turn it on for the robot if the live cost is near the replay's 1.7 ms/frame | `/api/robotState` farSearch |
@@ -44,6 +44,18 @@ Every step has a hard time limit; when it runs out the step is marked TIMEOUT an
 `~/bench-results/<yyyymmdd-HHMMSS>/results.md`: a table per camera/detector and one for the whole
 Jetson (A/B rounds averaged, max columns are the worst), then the checks and notes. Next to it:
 `session.log` (everything printed), the raw `cams.tsv`/`sys.tsv`, `profile-cpu.txt`, `rt-ab.txt`.
+At the end the session asks for camera notes (one line per camera: mounting, focus, cable;
+an empty line or 5 min ends) and adds them to results.md.
+
+**Camera comparison** (for Thriftiest vs Swyft, or any mix of models): results.md groups every
+camera by USB model. An inventory table (serial, firmware, exposure range, gain range, USB
+reservation), then per model: fps, latency median/p95/max (from the Loop timing lines, matched to
+cameras by PhotonVision name), USB bytes/microframe, min exposure, and USB recovery seconds when the
+usb step ran; then the same per camera. Detect time and decision margin are per model only when
+every camera is the same model (the detector lines don't say which camera they are). Static jitter
+is not computed here: the field-replay accuracy judge does that offline from the stills recordings.
+The usb step still refuses unless every camera is a Thriftiest with the usbrecov firmware.
+
 Copy to the laptop: `rsync -a jetson:bench-results/ logs/bench-results/`
 
 Notes:

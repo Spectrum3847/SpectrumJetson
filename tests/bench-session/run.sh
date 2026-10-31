@@ -6,8 +6,10 @@
 #   ~/bench-results/<yyyymmdd-HHMMSS>/results.md   (raw logs for each step next to it)
 #
 # Steps (run in this order; name some to run only those):
-#   inventory  cameras, fps per camera, every camera on the NVJPG hardware decoder, clocks locked,
-#              temperatures, spectrum-rt mode, detector options
+#   inventory  cameras (model, serial, firmware, USB port, exposure now/min/max, gain range, USB
+#              bandwidth reservation: tests/bench-session/cameras.py, read-only), fps per camera,
+#              every camera on the NVJPG hardware decoder, clocks locked, temperatures, spectrum-rt
+#              mode, detector options
 #   baseline   no tags, then tags: fps, latency median/p95/max per camera, detect times, CPU
 #              (tests/perf-snapshot.sh, then a perf profile per thread: scripts/jetson/profile-cpu.sh),
 #              GPU %, power, temperature
@@ -21,6 +23,8 @@
 #              which cuts camera links. Only with the usbrecov firmware on every camera.
 #   stills     OPT-IN: Rewind recordings of a tag held STILL, per camera at ~1, 2.5, 4 m and at the
 #              current exposure and half of it, for the field-replay accuracy (static-jitter) judge.
+# At the end it asks for camera notes (mounting, focus, cable) and puts them in results.md, under a
+# "Camera comparison" that groups every measurement by camera model (Thriftiest vs Swyft, ...).
 #
 # Usage: tests/bench-session/run.sh [STEP...] [usb]
 #   tests/bench-session/run.sh                 everything but usb
@@ -70,9 +74,10 @@ for line in open(jl, errors="replace"):
                   r'.*latency median ([\d.]+) p95 ([\d.]+) max ([\d.]+) ms', line)
     if m:
         loop[m.group(1)].append(tuple(float(x) for x in m.groups()[1:])); continue
-    m = re.match(r'(?:971|detector) stats (h\d+) \S+: ([\d.]+) calls/s, detect avg ([\d.]+) ms max ([\d.]+) ms.*?tags/frame ([\d.]+)', line)
+    m = re.match(r'(?:971|detector) stats (h\d+) \S+: ([\d.]+) calls/s, detect avg ([\d.]+) ms max ([\d.]+) ms.*?tags/frame ([\d.]+)'
+                 r'(?:, margin avg ([\d.]+))?', line)
     if m:
-        det[m.group(1)].append(tuple(float(x) for x in m.groups()[1:])); continue
+        det[m.group(1)].append(tuple(float(x) if x else None for x in m.groups()[1:])); continue
     m = re.match(r'(?:971 jpeg|jpeg decoder) \d+ s: nvjpg ([\d.]+) frames/s.*?libjpeg-turbo ([\d.]+) frames/s', line)
     if m:
         jpeg.append((float(m.group(1)), float(m.group(2))))
@@ -81,11 +86,12 @@ with open(f"{out}/cams.tsv", "a") as o:
     for cam, w in sorted(loop.items()):
         o.write("\t".join([step, cond, rnd, cam, f(statistics.mean(x[0] for x in w) / 10),
                            f(statistics.median(x[1] for x in w)), f(statistics.median(x[2] for x in w)),
-                           f(max(x[3] for x in w)), "", "", "", ""]) + "\n")
+                           f(max(x[3] for x in w)), "", "", "", "", ""]) + "\n")
     for h, w in sorted(det.items()):
         o.write("\t".join([step, cond, rnd, "detector " + h, f(statistics.mean(x[0] for x in w)), "", "", "",
                            f(statistics.mean(x[1] for x in w)), f(max(x[2] for x in w)),
-                           f(statistics.mean(x[3] for x in w)), f"{sum(x[0] * x[3] for x in w):.0f}"]) + "\n")
+                           f(statistics.mean(x[3] for x in w)), f"{sum(x[0] * x[3] for x in w):.0f}",
+                           f(statistics.mean(x[4] for x in w) if all(x[4] is not None for x in w) else None)]) + "\n")
 t = collections.defaultdict(list)
 for line in open(tl, errors="replace"):
     for k, pat in (("gpu", r'GR3D_FREQ (\d+)%'), ("power", r'VDD_IN (\d+)mW'), ("temp", r'tj@([\d.]+)C'),
@@ -332,6 +338,8 @@ step_inventory() {
     printf '%s %s C, ' "$(cat "$z/type")" $(($(cat "$z/temp") / 1000)); done | sed 's/, $//')"
   note "detector options ($DROPIN): $(grep -o 'Environment=.*' "$DROPIN" 2>/dev/null | sed 's/Environment=//' | tr '\n' ' ')"
   note "CUDA graphs switch $GRAPHS_FILE: $GRAPHS_ORIG"
+  # per camera: model, serial, firmware, port, exposure/gain ranges, USB reservation (all read-only)
+  tmo 120 python3 "$HERE/cameras.py" inventory "$OUT" "$REPO" | while read -r l; do note "$l"; done
   measure "running" 1 22 || return 1
   awk -F'\t' '$1 == "inventory" { if ($4 ~ /^detector/) d++; else c++ } END {
     printf "%d cameras and %d detectors reported in the logs\n", c, d }' "$OUT/cams.tsv" | while read -r l; do note "$l"; done
@@ -571,7 +579,7 @@ step_stills() {
 # ---------------------------------------------------------------------------------------------
 # results.md: the TSVs averaged over rounds (max columns: worst), plus the notes
 render() {
-  python3 - "$OUT" <<'PY' > "$OUT/results.md"
+  BENCH_HERE=$HERE python3 - "$OUT" <<'PY' > "$OUT/results.md"
 import collections, os, statistics, subprocess, sys, time
 out = sys.argv[1]
 def rows(name):
@@ -594,18 +602,24 @@ print(f"Jetson {os.uname().nodename}, kernel {os.uname().release}; PhotonVision 
                        capture_output=True, text=True).stdout.strip() + "\n")
 print("Several rounds of an A/B are averaged (max columns: the worst round).\n")
 print("## Per camera and per detector\n")
-print("| step | condition | camera / detector | rounds | fps | latency median ms | p95 ms | max ms | detect avg ms | detect max ms | tags/frame | detections |")
-print("|---|---|---|---|---|---|---|---|---|---|---|---|")
+print("| step | condition | camera / detector | rounds | fps | latency median ms | p95 ms | max ms | detect avg ms | detect max ms | tags/frame | detections | margin avg |")
+print("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 for k, c, n in agg(rows("cams.tsv"), (0, 1, 3), {7, 9}):
     print("| " + " | ".join(k + [str(n)] + c) + " |")
-print("\n## Whole Jetson\n")
+print()
+sys.stdout.flush()
+subprocess.run([sys.executable, os.path.join(os.environ["BENCH_HERE"], "cameras.py"), "compare", out])
+print("## Whole Jetson\n")
 print("| step | condition | rounds | PV CPU % (1 core = 100) | camera threads % | workers % | other % | Jetson CPU % (avg of 6) | GPU % | power W | max temp C | NVJPG0 % | NVJPG1 % | nvjpg fps | libjpeg-turbo fps |")
 print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 for k, c, n in agg(rows("sys.tsv"), (0, 1), {10}):
     print("| " + " | ".join(k + [str(n)] + c) + " |")
 print("\n## Checks and notes\n")
 print(open(f"{out}/notes.md").read() or "(none)")
-print("\nRaw: session.log (everything printed), cams.tsv, sys.tsv, profile-cpu.txt, rt-ab.txt, usb-recovery.txt (when run)")
+if os.path.exists(f"{out}/camera-notes.md"):
+    print("\n## Camera notes (from the bench)\n")
+    print(open(f"{out}/camera-notes.md").read() or "(none given)")
+print("\nRaw: session.log (everything printed), cameras.tsv, cams.tsv, sys.tsv, profile-cpu.txt, rt-ab.txt, usb-recovery.txt (when run)")
 PY
   echo
   cat "$OUT/results.md"
@@ -619,7 +633,7 @@ PY
 sudo -n true 2>/dev/null || { echo "Needs passwordless sudo (run 'sudo true' first)" >&2; exit 1; }
 echo "Bench session: ${STEPS[*]} -> $OUT  (window ${SECS}s, ${ROUNDS} rounds; Ctrl-C puts everything back)"
 
-declare -A LIMIT=([inventory]=180 [baseline]=900 [graphs]=$((ROUNDS * 2 * (SECS + 90) + 600))
+declare -A LIMIT=([inventory]=300 [far]=$((ROUNDS * 2 * (SECS + 90) + 600)) [baseline]=900 [graphs]=$((ROUNDS * 2 * (SECS + 90) + 600))
                   [3d]=$((ROUNDS * 2 * (SECS + 120) + 600)) [rt]=$((4 * ROUNDS * (RT_SECS + 15) + 900))
                   [edge]=2400 [usb]=2400
                   [stills]=$((5 * 3 * 2 * (STILL_SECS + 90) + 600)))
@@ -633,4 +647,14 @@ for s in "${STEPS[@]}"; do
   else echo "  $s done"; fi
 done
 STEP=end
+# Qualitative camera notes for the Thriftiest vs Swyft decision (results.md, "Camera notes")
+camera_notes() {
+  local l
+  printf '\a\n>>> CAMERA NOTES: per camera, anything the numbers miss (mounting, focus, cable, lens, heat).\n'
+  printf '>>> One line each, e.g. "Swyft @2.3: cable loose at the camera end". Empty line (or 5 min) ends.\n'
+  : > "$OUT/camera-notes.md"
+  while read -r -t 300 -p ">>> " l < /dev/tty && [[ -n $l ]]; do echo "- $l" >> "$OUT/camera-notes.md"; done
+  echo
+}
+camera_notes
 for s in "${STEPS[@]}"; do [[ $s == stills ]] && echo "Still recordings: copy them off with  rsync -a jetson:/opt/photonvision/rewind/sessions/ logs/rewind/sessions/  (session names in results.md)"; done
