@@ -165,6 +165,44 @@ WantedBy=multi-user.target
 EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now jetson-clocks.service
+# JetPack 7 (2026-10-30): an hour after a clean boot the GPU was back at 306 MHz (its minimum)
+# and two CPU cores at 730 MHz, with jetson-clocks.service still "active" and nothing in the log.
+# That tripled detect times (6.3 ms vs 1.7 locked) and halved fps. Until we know what resets
+# them, check every 15 s and lock again, logging when it happens (journalctl -t spectrum-clocks).
+sudo tee /usr/local/bin/spectrum-clocks-guard >/dev/null <<'GUARD'
+#!/usr/bin/env bash
+# SpectrumJetson (09-robot-tuning.sh): relock the clocks if something lowered them.
+G=$(ls -d /sys/devices/platform/bus@0/17000000.gpu/devfreq/* 2>/dev/null | head -1)
+low=""
+if [[ -n $G && $(cat "$G/min_freq") -lt $(cat "$G/max_freq") ]]; then low+=" GPU min $(( $(cat "$G/min_freq") / 1000000 )) MHz"; fi
+for c in /sys/devices/system/cpu/cpu[0-9]*/cpufreq; do
+  [[ $(cat $c/scaling_min_freq) -lt $(cat $c/scaling_max_freq) ]] && { low+=" CPU min $(( $(cat $c/scaling_min_freq) / 1000 )) MHz"; break; }
+done
+[[ -z $low ]] && exit 0
+logger -t spectrum-clocks "clocks were unlocked ($low ); locking again"
+exec /usr/bin/jetson_clocks
+GUARD
+sudo chmod 755 /usr/local/bin/spectrum-clocks-guard
+sudo tee /etc/systemd/system/spectrum-clocks-guard.service >/dev/null <<'UNIT'
+[Unit]
+Description=Relock CPU/GPU clocks if something lowered them (SpectrumJetson)
+After=jetson-clocks.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/spectrum-clocks-guard
+UNIT
+sudo tee /etc/systemd/system/spectrum-clocks-guard.timer >/dev/null <<'UNIT'
+[Unit]
+Description=Check the clock lock every 15 s (SpectrumJetson)
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=15
+AccuracySec=1
+[Install]
+WantedBy=timers.target
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl enable --now spectrum-clocks-guard.timer
 
 echo "==> 5. No USB autosuspend for cameras"
 # Any device with a uvcvideo interface: set power/control=on on the USB device (the parent).

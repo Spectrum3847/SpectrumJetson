@@ -108,12 +108,20 @@ target_link_options(971apriltag_jni PRIVATE -Wl,--no-undefined -Wl,--exclude-lib
 # it takes jpeglib.h from the Jetson Multimedia API (libnvjpeg's struct layout).
 set(JETSON_MMAPI /usr/src/jetson_multimedia_api CACHE PATH "Jetson Multimedia API (nvidia-l4t-jetson-multimedia-api)")
 set(TEGRA_LIBDIR /usr/lib/aarch64-linux-gnu/nvidia)
-find_library(NVJPEG_LIB nvjpeg PATHS ${TEGRA_LIBDIR} NO_DEFAULT_PATH)
+# JetPack 6 (r36): libnvjpeg.so and include/libjpeg-8b. JetPack 7 (r39): renamed libnvmm_jpeg.so,
+# with include/libjpeg-9f. (Tegra's, not CUDA's libnvjpeg in /usr/local/cuda.)
+find_library(NVJPEG_LIB NAMES nvmm_jpeg nvjpeg PATHS ${TEGRA_LIBDIR} NO_DEFAULT_PATH)
 find_library(NVBUFSURFACE_LIB nvbufsurface PATHS ${TEGRA_LIBDIR} NO_DEFAULT_PATH)
 find_library(EGL_LIB EGL)
-if(NVJPEG_LIB AND NVBUFSURFACE_LIB AND EGL_LIB AND EXISTS ${JETSON_MMAPI}/include/libjpeg-8b/jpeglib.h)
+foreach(v libjpeg-9f libjpeg-8b)
+  if(NOT MMAPI_JPEG_INCLUDE AND EXISTS ${JETSON_MMAPI}/include/${v}/jpeglib.h)
+    set(MMAPI_JPEG_INCLUDE ${JETSON_MMAPI}/include/${v})
+  endif()
+endforeach()
+if(NVJPEG_LIB AND NVBUFSURFACE_LIB AND EGL_LIB AND MMAPI_JPEG_INCLUDE)
+  message(STATUS "NVJPG: ${NVJPEG_LIB}, headers ${MMAPI_JPEG_INCLUDE}")
   add_library(spectrumnvjpg SHARED NvJpgDecoder.cc nvjpg_bgr.cu)
-  target_include_directories(spectrumnvjpg BEFORE PRIVATE ${JETSON_MMAPI}/include/libjpeg-8b
+  target_include_directories(spectrumnvjpg BEFORE PRIVATE ${MMAPI_JPEG_INCLUDE}
                                                           ${JETSON_MMAPI}/include)
   target_compile_definitions(spectrumnvjpg PRIVATE EGL_NO_X11)
   set_target_properties(spectrumnvjpg PROPERTIES CXX_VISIBILITY_PRESET hidden
