@@ -324,7 +324,7 @@ This tests both builds, compiles the examples, runs both simulation tests, and m
 
 **Where dependencies come from:**
 - **CTRE Phoenix 6:** from CTRE's Maven repository.
-- **AdvantageKit:** from its GitHub releases' offline Maven repo, which `build.sh` downloads. Some school web filters block frcmaven.wpi.edu, where it's normally hosted (ours does).
+- **AdvantageKit:** from its GitHub releases' offline Maven repo, which `build.sh` downloads. That also works where a web filter blocks frcmaven.wpi.edu, where it's normally hosted. (Ours doesn't, as of 2026-10-30.)
 
 **How one source serves two WPILibs:**
 - **The source:** `src/main` is written against WPILib 2026.

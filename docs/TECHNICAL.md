@@ -91,12 +91,10 @@ Settings shared by the scripts live in [config.env](../config.env).
 - **Harmless flash warnings:** "backup GPT table is corrupt", missing
   `/dev/mmcblk0boot0` (there's no eMMC), "Skip writing ... no image is specified".
 - The whole flash took about 7 minutes on a 16-core host.
-- **The shop network (`spectrum3847` Wi-Fi) blocks `frcmaven.wpi.edu`.** Fortinet
-  FortiGuard DNS filtering resolves it to a block page (`2620:101:9000:53::55`, cert
-  `CN = Fortiguard SDNS Blocked Page`), so Java reports a PKIX/SSL error. Gradle builds
-  that need WPILib artifacts (the PhotonVision fork, GradleRIO robot code) must run on
-  another network, or the domain needs allowlisting. GitHub and
-  maven.photonvision.org are not blocked.
+- **`frcmaven.wpi.edu` works from the shop** (checked 2026-10-30). On 2026-10-01 a
+  Fortinet FortiGuard DNS filter returned a block page for it (cert
+  `CN = Fortiguard SDNS Blocked Page`), and Java reported a PKIX/SSL error. If Gradle
+  fails that way again, check with `curl -I https://frcmaven.wpi.edu` before working around it.
 
 ## Vision stack: 2026 CUDA fork on the Jetson, 2027 robot code
 
