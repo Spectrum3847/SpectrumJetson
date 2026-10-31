@@ -254,6 +254,7 @@ struct DetectorSlot {
   // When the first-stage graph (bos-05) was last recorded: at most once a second, so a buffer
   // or mask that keeps changing can't stall every camera on each frame.
   std::chrono::steady_clock::time_point last_graph_record{};
+  std::chrono::steady_clock::time_point last_stage_graph_record{};  // bos-11
   // Detection mask (setMask, bos-07): 0 off, 1 ignore inside the boxes, 2 search only inside
   // them. Boxes are x, y, w, h fractions of the image. mask_dirty: rasterise it on the next frame.
   int mask_mode = 0;
@@ -1258,6 +1259,7 @@ JNIEXPORT jlong JNICALL Java_org_photonvision_jni_GpuDetectorJNI_createGpuDetect
   s.mask_rects.clear();
   s.mask_dirty = true;
   s.last_graph_record = {};
+  s.last_stage_graph_record = {};
   // If the GPU build fails, keep the slot: processimage retries the build each frame.
   if (!Rebuild(s, width, height)) s.needs_rebuild = true;
   s.stats = Stats{};
@@ -1551,6 +1553,22 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
         absl::Status status = s->gpu->RecordFirstStageGraph(image_device);
         std::cout << "971 detector h" << handle << ": first-stage graph "
                   << (status.ok() ? "recorded" : std::string(status.message())) << std::endl;
+      }
+      cuda.lock();
+    }
+    // bos-11: the later stages' graphs (one per size bucket) that Detect() needed and didn't have,
+    // recorded the same way, all at once, at most once a second per camera. Until then Detect()
+    // runs those frames step by step (same results). SPECTRUM_971_GRAPHS=0 switches them off.
+    if (s->gpu && now_graph - s->last_stage_graph_record >= std::chrono::seconds(1) &&
+        s->gpu->StageGraphsWanted()) {
+      s->last_stage_graph_record = now_graph;
+      cuda.unlock();
+      {
+        std::lock_guard<CudaCaptureLock> exclusive(cuda_capture_lock);
+        absl::Status status = s->gpu->RecordStageGraphs();
+        if (!status.ok()) {
+          std::cout << "971 detector h" << handle << ": " << status.message() << std::endl;
+        }
       }
       cuda.lock();
     }

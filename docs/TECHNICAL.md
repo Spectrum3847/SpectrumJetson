@@ -2043,6 +2043,64 @@ For comparison, one camera alone took 1.45 ms and 7% GPU at the start.
   launches), detect 1.20 against 1.23 ms, CPU unchanged (1.23 cores). The remaining CPU isn't
   launch overhead any more (below).
 
+#### The rest of `Detect()` as CUDA graphs too (`bos-11`)
+
+- **Why:** after `bos-05`, perf (2 cameras, 122 fps, no tags in view) still put ~29% of the camera
+  threads' CPU inside libcuda, plus nvgpu ioctls in the kernel; the detector's own code was ~1%.
+  nsys on `graph_bench` (below) showed why. Per `Detect()`, after the first-stage graph: 32 kernel
+  launches, 17 memsets, 5–6 copies back, 6 event records and 6 waits for the GPU: ~67 CUDA calls,
+  at ~10–15 µs of CPU each on this GPU (each launch is a submission through the nvgpu driver).
+  In a graph a kernel costs ~0.3 µs (40 empty kernels: 174 µs launched one by one, 32 µs as one
+  graph, launch and wait included). A memset or copy node in a graph still costs 3–8 µs.
+- **What:** the stages after the first become two graphs. Stage 2: the boundary-point sort, blob
+  extents, extent filter and point filter. Stage 3: the angle sort, line fits, peaks, peak sort,
+  peak extents and quad fits, and the fit quads straight into pinned memory. The host still waits
+  3 times a frame (point count, selected-point count, fit-quad count), against 6.
+  - **Sizes:** CUB picks its grids from the item count, which the host only learns by waiting.
+    So each graph is recorded for a size bucket (1024 up, ~25% steps), and the real counts stay
+    on the GPU. Entries past the real count are padding: sort keys of all ones (they sort after
+    every real key, and the radix sort is stable, so the real entries end up exactly where they
+    were), points the filters drop, and one extra run in a reduce-by-key that a 1-thread kernel
+    takes off the count. `FitLines` and `FitQuads` read their counts on the GPU and the blocks past
+    them return at once. The blob-extent scan is a one-block `cub::BlockScan` over the real quad
+    count (`cub::DeviceScan` over the bucket cost 36 µs instead of 7). Every scan and reduction is
+    integer, so all outputs for the real entries are the same as the one-by-one path's.
+  - **Memset and copy nodes as kernels:** after recording, each memset node and each small copy
+    becomes a kernel node (`CopiesAsKernels`; CUB's own memsets, the counts' copies back). That
+    took the CPU from ~400 to ~330 µs a frame. The first-stage graph gets the same treatment.
+  - **Recording:** like the first-stage graph, only while no other thread uses CUDA. `Detect()`
+    never records. When a bucket's graph is missing, that frame runs step by step and asks for it.
+    `processimage` then records the missing ones under the exclusive `CudaCaptureLock`, at most
+    once a second per camera (`StageGraphsWanted` / `RecordStageGraphs`). A detector needs a few
+    dozen at most; a recording takes ~0.3 ms plus ~0.35 ms to instantiate.
+  - **Switch:** `SPECTRUM_971_GRAPHS=0` in the environment switches it off at start. `0` in
+    `/tmp/spectrum-971-graphs` switches it off live (re-read every 2 s), for A/B tests. Off, or
+    with event timing, or without the first-stage graph, `Detect()` runs as before.
+- **`detector/graph_bench.cc`:** decodes a camera folder's frames once, then times `Detect()` as
+  the JNI bridge runs it: blocking sync, the frame copied into the detector's fixed buffer, graphs
+  recorded between frames. It reports the calling thread's CPU time
+  (`CLOCK_THREAD_CPUTIME_ID`) and wall time per call, and writes every detection with `%a`
+  (exact) floats. Build it with `cmake --build ~/build/bos-detector --target graph_bench`.
+- **Same results:** byte-identical detections (id, hamming, decision margin, corners, centre) to
+  the build before `bos-11`, with the graphs on and off, on all 10 regression cameras. That's
+  2,182 detections at `min_white_black_diff` 20, and 3 cameras again at 5.
+- **Measured** (`graph_bench`, 150 frames x 2 timed loops, interleaved off/on x 6, PhotonVision
+  running 2 cameras meanwhile). Medians of the 6 runs' medians:
+
+  | Recording | CPU p50 (p95), off → on | Detect wall p50 (p95), off → on |
+  | --- | --- | --- |
+  | ceiling-4cam TopLeft (busy, no tags) | 1550 (1958) → **345 (416) µs** | 3.22 (4.94) → **2.02 (3.24) ms** |
+  | fieldcal-synth TopLeft (tags) | 1027 (1664) → **267 (382) µs** | 1.54 (3.47) → **1.28 (2.50) ms** |
+  | synthetic-near-far CamA (tags) | 1202 (1740) → **306 (386) µs** | 2.61 (4.00) → **1.61 (2.40) ms** |
+
+  Spread of the 6 runs' CPU medians: 251–376 µs on, 945–1587 µs off; they don't overlap. That's
+  about 4x less CPU per frame and 0.25–1.2 ms off each `Detect()`. Not yet measured live in
+  PhotonVision.
+
+  GPU time per `Detect()` (nsys): 695 → 728 µs on the busy ceiling camera (+5%: the padded sorts,
+  mostly the peak sort, which now runs CUB's multi-pass sort over the bucket instead of its
+  single-tile one), 366 + ~40 µs of memsets → 384 µs with tags.
+
 #### Where the remaining CPU goes (4 cameras, 1.2 cores)
 
 - **`tests/cpu-profile.sh`:** the 4 camera threads (15–25% of a core each) split their samples

@@ -167,3 +167,10 @@ add_executable(far_replay far_replay.cc far_search.cc)
 target_include_directories(far_replay PRIVATE ${BOS_DIR} ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(far_replay PRIVATE 971apriltag absl::flags CUDA::cudart JPEG::JPEG
                                          ${OpenCV_LIBS} Threads::Threads ${CMAKE_DL_LIBS})
+
+# SpectrumJetson: graph_bench, Detect() timing (thread CPU, wall) and exact detections on one
+# Rewind camera folder, for A/B tests of the detector's CUDA launch path (bos-11). Not installed.
+add_executable(graph_bench graph_bench.cc)
+target_include_directories(graph_bench PRIVATE ${BOS_DIR})
+target_link_libraries(graph_bench PRIVATE 971apriltag absl::flags CUDA::cudart JPEG::JPEG
+                                          Threads::Threads ${CMAKE_DL_LIBS})

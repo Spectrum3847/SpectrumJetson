@@ -1,0 +1,911 @@
+diff --git a/third_party/971apriltag/apriltag.cc b/third_party/971apriltag/apriltag.cc
+index beecf25..dc6e545 100644
+--- a/third_party/971apriltag/apriltag.cc
++++ b/third_party/971apriltag/apriltag.cc
+@@ -1,8 +1,10 @@
+ #include "apriltag.h"
+ 
+ #include <thrust/iterator/constant_iterator.h>
++#include <thrust/iterator/counting_iterator.h>
+ #include <thrust/iterator/transform_iterator.h>
+ 
++#include <cub/block/block_scan.cuh>
+ #include <cub/device/device_copy.cuh>
+ #include <cub/device/device_radix_sort.cuh>
+ #include <cub/device/device_reduce.cuh>
+@@ -12,8 +14,12 @@
+ #include <cub/device/device_select.cuh>
+ #include <cub/iterator/discard_output_iterator.cuh>
+ #include <cub/iterator/transform_input_iterator.cuh>
++#include <algorithm>
+ #include <chrono>
+ #include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <string>
+ #include <mutex>
+ #include <vector>
+ 
+@@ -224,7 +230,8 @@ GpuDetector::GpuDetector(size_t width, size_t height,
+       filtered_is_local_peak_device_(line_fit_points_device_.size()),
+       compressed_peaks_device_(line_fit_points_device_.size()),
+       sorted_compressed_peaks_device_(line_fit_points_device_.size()),
+-      peak_extents_device_(kMaxBlobs),
++      // bos-11: +1 for the pad run a graph's reduce-by-key can add.
++      peak_extents_device_(kMaxBlobs + 1),
+       camera_matrix_(camera_matrix),
+       distortion_coefficients_(distortion_coefficients),
+       fit_quads_device_(kMaxBlobs),
+@@ -283,6 +290,8 @@ GpuDetector::GpuDetector(size_t width, size_t height,
+ 
+ GpuDetector::~GpuDetector() {
+   if (first_stage_exec_) cudaGraphExecDestroy(first_stage_exec_);
++  for (auto& [key, exec] : stage_graphs_) cudaGraphExecDestroy(exec);
++  if (capture_stream_) cudaStreamDestroy(capture_stream_);
+   for (int i = 0; i < zarray_size(detections_); ++i) {
+     apriltag_detection_t* det;
+     zarray_get(detections_, i, &det);
+@@ -842,6 +851,316 @@ struct MergePeakExtents {
+   }
+ };
+ 
++
++// SpectrumJetson (bos-11): the pieces that let the stages after the first run as CUDA graphs.
++// A graph's sizes are fixed, so each step runs over a size bucket (StageBucket) at least as large
++// as the real count, which stays on the GPU. The entries past the real count are made harmless:
++// sort keys that sort after every real one (a stable radix sort then leaves the real entries
++// exactly where they were), and filters that drop them. Every output for the real entries is the
++// same as the one-by-one path's (the scans and reductions are integer, and each output depends
++// only on the entries before it).
++bool SpectrumStageGraphs() {
++  static const bool on = [] {
++    const char* v = std::getenv("SPECTRUM_971_GRAPHS");
++    return !(v && std::string(v) == "0");
++  }();
++  static SpectrumKnob knob("/tmp/spectrum-971-graphs", 1);
++  return on && knob.Get() != 0;
++}
++
++// The smallest bucket >= n, from 1024 up in steps of about 25% (multiples of 256), at most cap.
++size_t StageBucket(size_t n, size_t cap) {
++  size_t b = 1024;
++  while (b < n) b = (b + b / 4 + 255) & ~static_cast<size_t>(255);
++  return std::min(b, cap);
++}
++
++// Fills p[*count, bucket) with pad (keys that sort after every real key).
++template <typename T>
++__global__ void PadTail(T* p, const int* count, size_t bucket, T pad) {
++  const size_t i = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x;
++  if (i < bucket && i >= static_cast<size_t>(*count)) p[i] = pad;
++}
++template <typename T>
++void LaunchPadTail(T* p, const int* count, size_t bucket, T pad, cudaStream_t stream) {
++  PadTail<<<(bucket + 255) / 256, 256, 0, stream>>>(p, count, bucket, pad);
++}
++
++// A reduce-by-key over a padded bucket finds one extra run (the pad keys) when there was padding.
++template <typename C>
++__global__ void DropPadRun(C* runs, const int* count, size_t bucket) {
++  if (static_cast<size_t>(*count) < bucket) --*runs;
++}
++
++// num_quads as an int, and 0 when there are more than the buffers hold (the host then skips the
++// frame, as the one-by-one path does before it uses them).
++__global__ void QuadsToInt(const size_t* num_quads, int* out, size_t max_quads) {
++  *out = *num_quads > max_quads ? 0 : static_cast<int>(*num_quads);
++}
++
++constexpr uint64_t kPadKey = ~uint64_t{0};
++
++// RewriteToIndexPoint with the counts on the GPU: points past the real count become kPadKey.
++// A real IndexPoint here has no angle yet (bits 24-51 zero), so it is never kPadKey.
++class RewriteToIndexPointDevice {
++ public:
++  RewriteToIndexPointDevice(MinMaxExtents* extents_device, const int* num_extents_device,
++                            const int* num_points_device)
++      : extents_device_(extents_device),
++        num_extents_device_(num_extents_device),
++        num_points_device_(num_points_device) {}
++
++  __host__ __device__ __forceinline__ IndexPoint
++  operator()(cub::KeyValuePair<long, QuadBoundaryPoint> pt) const {
++    IndexPoint result;
++    if (pt.key >= *num_points_device_ || *num_extents_device_ == 0) {
++      result.key = kPadKey;
++      return result;
++    }
++    // BlobExtentsIndexFinder::FindBlobIndex (its constructor is host-only).
++    const apriltag_size_t num_extents = *num_extents_device_;
++    const apriltag_size_t point_index = pt.key;
++    apriltag_size_t min = 0;
++    apriltag_size_t max = num_extents;
++    while (min + 1 != max) {
++      const apriltag_size_t average = min + (max - min) / 2;
++      if (average < num_extents && extents_device_[average].starting_offset <= point_index) {
++        min = average;
++      } else {
++        max = average;
++      }
++    }
++    return IndexPoint(min, pt.value.point_bits());
++  }
++
++ private:
++  MinMaxExtents* extents_device_;
++  const int* num_extents_device_;
++  const int* num_points_device_;
++};
++
++class NonzeroBlobsDevice {
++ public:
++  NonzeroBlobsDevice(const cub::KeyValuePair<long, MinMaxExtents>* extents_device)
++      : extents_device_(extents_device) {}
++
++  __host__ __device__ __forceinline__ bool operator()(const IndexPoint& a) const {
++    return a.key != kPadKey && extents_device_[a.blob_index()].value.count > 0;
++  }
++
++ private:
++  const cub::KeyValuePair<long, MinMaxExtents>* extents_device_;
++};
++
++// The line-fit peaks, with the ones past the real point count read as "no peak".
++struct PeakOrNone {
++  const Peak* peaks;
++  const int* count;
++  __host__ __device__ __forceinline__ Peak operator()(int i) const {
++    if (i < *count) return peaks[i];
++    Peak p;
++    p.error = 0;
++    p.filtered_point_index = 0;
++    p.blob_index = Peak::kNoPeak();
++    return p;
++  }
++};
++
++// The blob extents' inclusive scan (SumPoints over TransformZeroFilteredBlobSizes) for the stage 2
++// graph: one block over the real number of quads (on the GPU), where cub::DeviceScan had to run
++// over the whole size bucket (up to kMaxBlobs, 36 us a frame instead of 7). Integer and
++// associative, so any order of combining gives the same values as CUB's scan.
++struct ScanPrefix {
++  cub::KeyValuePair<long, MinMaxExtents> running;
++  __device__ cub::KeyValuePair<long, MinMaxExtents> operator()(
++      const cub::KeyValuePair<long, MinMaxExtents>& block_aggregate) {
++    const cub::KeyValuePair<long, MinMaxExtents> old = running;
++    running = SumPoints()(running, block_aggregate);
++    return old;
++  }
++};
++
++__device__ __forceinline__ cub::KeyValuePair<long, MinMaxExtents> ScanIdentity() {
++  // SumPoints(identity, b) == b in every field SumPoints sets.
++  cub::KeyValuePair<long, MinMaxExtents> id;
++  id.key = -1;
++  id.value = MinMaxExtents{};
++  return id;
++}
++
++constexpr int kScanThreads = 1024;
++__global__ void ScanSelectedExtents(const MinMaxExtents* extents, const int* count,
++                                    TransformZeroFilteredBlobSizes rewrite,
++                                    cub::KeyValuePair<long, MinMaxExtents>* out) {
++  using BlockScan = cub::BlockScan<cub::KeyValuePair<long, MinMaxExtents>, kScanThreads>;
++  __shared__ typename BlockScan::TempStorage temp;
++  const int n = *count;
++  ScanPrefix prefix{ScanIdentity()};
++  for (int base = 0; base < n; base += kScanThreads) {
++    const int i = base + threadIdx.x;
++    cub::KeyValuePair<long, MinMaxExtents> v = ScanIdentity();
++    if (i < n) v = rewrite(cub::KeyValuePair<long, MinMaxExtents>(i, extents[i]));
++    BlockScan(temp).InclusiveScan(v, v, SumPoints(), prefix);
++    if (i < n) out[i] = v;
++    __syncthreads();
++  }
++}
++
++// A recorded graph's memset and small memcpy nodes, as kernels. On this GPU each memset or copy
++// node costs 3-8 us of CPU in cudaGraphLaunch (it goes to a different engine) and a kernel node
++// almost nothing; the stage graphs have ~10 of them (CUB's own memsets, the counts' copies back).
++// A contiguous memset of `bytes` bytes with the 32-bit pattern p32 (the value repeated, as seen
++// from dst): 16-byte stores in the aligned middle.
++__global__ void GraphFillContiguous(char* dst, size_t bytes, uint32_t p32) {
++  const size_t head = std::min<size_t>(bytes, (16 - reinterpret_cast<uintptr_t>(dst) % 16) % 16);
++  const size_t vectors = (bytes - head) / 16;
++  const size_t tail_start = head + vectors * 16;
++  // The pattern as seen from the first aligned byte.
++  const unsigned rot = 8 * (head % 4);
++  const uint32_t w = rot ? (p32 >> rot) | (p32 << (32 - rot)) : p32;
++  const uint4 v = make_uint4(w, w, w, w);
++  uint4* mid = reinterpret_cast<uint4*>(dst + head);
++  const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
++  const size_t t = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x;
++  for (size_t i = t; i < vectors; i += stride) mid[i] = v;
++  if (t < 16) {
++    if (t < head) dst[t] = static_cast<char>(p32 >> (8 * (t % 4)));
++    const size_t j = tail_start + t;
++    if (j < bytes) dst[j] = static_cast<char>(p32 >> (8 * (j % 4)));
++  }
++}
++
++__global__ void GraphFill(char* dst, size_t pitch, unsigned value, unsigned element_size,
++                          size_t width, size_t height) {
++  const size_t total = width * height;
++  for (size_t i = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x; i < total;
++       i += static_cast<size_t>(blockDim.x) * gridDim.x) {
++    char* p = dst + (i / width) * pitch + (i % width) * element_size;
++    if (element_size == 1) {
++      *reinterpret_cast<uint8_t*>(p) = static_cast<uint8_t>(value);
++    } else if (element_size == 2) {
++      *reinterpret_cast<uint16_t*>(p) = static_cast<uint16_t>(value);
++    } else {
++      *reinterpret_cast<uint32_t*>(p) = value;
++    }
++  }
++}
++
++static_assert(sizeof(FitQuad) % sizeof(uint32_t) == 0);
++// Copies min(*count, max_count) records of words_per_record 32-bit words.
++__global__ void CopyCounted(uint32_t* dst, const uint32_t* src, const int* count,
++                            size_t words_per_record, size_t max_count) {
++  const size_t n = std::min<size_t>(static_cast<size_t>(std::max(*count, 0)), max_count);
++  const size_t words = n * words_per_record;
++  for (size_t i = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x; i < words;
++       i += static_cast<size_t>(blockDim.x) * gridDim.x) {
++    dst[i] = src[i];
++  }
++}
++
++__global__ void GraphCopy(char* dst, const char* src, size_t bytes) {
++  for (size_t i = threadIdx.x; i < bytes; i += blockDim.x) dst[i] = src[i];
++}
++
++// The device address of p (pinned host memory has one; device memory is its own).
++void* DeviceAddress(void* p) {
++  cudaPointerAttributes a{};
++  if (cudaPointerGetAttributes(&a, p) != cudaSuccess) {
++    cudaGetLastError();
++    return nullptr;
++  }
++  if (a.type == cudaMemoryTypeDevice || a.type == cudaMemoryTypeManaged) return p;
++  if (a.type == cudaMemoryTypeHost) return a.devicePointer;
++  return nullptr;
++}
++
++// Replaces node with a kernel node (same dependencies both ways). False on any failure.
++bool ReplaceWithKernel(cudaGraph_t graph, cudaGraphNode_t node, cudaKernelNodeParams* params) {
++  size_t n_deps = 0, n_dependents = 0;
++  if (cudaGraphNodeGetDependencies(node, nullptr, nullptr, &n_deps) != cudaSuccess ||
++      cudaGraphNodeGetDependentNodes(node, nullptr, nullptr, &n_dependents) != cudaSuccess) {
++    return false;
++  }
++  std::vector<cudaGraphNode_t> deps(n_deps), dependents(n_dependents);
++  if ((n_deps && cudaGraphNodeGetDependencies(node, deps.data(), nullptr, &n_deps) != cudaSuccess) ||
++      (n_dependents && cudaGraphNodeGetDependentNodes(node, dependents.data(), nullptr,
++                                                      &n_dependents) != cudaSuccess)) {
++    return false;
++  }
++  cudaGraphNode_t kernel = nullptr;
++  if (cudaGraphAddKernelNode(&kernel, graph, deps.data(), n_deps, params) != cudaSuccess) {
++    return false;
++  }
++  for (cudaGraphNode_t d : dependents) {
++    if (cudaGraphAddDependencies(graph, &kernel, &d, nullptr, 1) != cudaSuccess) return false;
++  }
++  return cudaGraphDestroyNode(node) == cudaSuccess;
++}
++
++// The pass. Returns false if the graph may be broken (don't use it).
++bool CopiesAsKernels(cudaGraph_t graph) {
++  size_t n = 0;
++  if (cudaGraphGetNodes(graph, nullptr, &n) != cudaSuccess) return false;
++  std::vector<cudaGraphNode_t> nodes(n);
++  if (n && cudaGraphGetNodes(graph, nodes.data(), &n) != cudaSuccess) return false;
++  for (cudaGraphNode_t node : nodes) {
++    cudaGraphNodeType type;
++    if (cudaGraphNodeGetType(node, &type) != cudaSuccess) return false;
++    if (type == cudaGraphNodeTypeMemset) {
++      cudaMemsetParams m{};
++      if (cudaGraphMemsetNodeGetParams(node, &m) != cudaSuccess) return false;
++      if (m.elementSize != 1 && m.elementSize != 2 && m.elementSize != 4) continue;
++      char* dst = static_cast<char*>(DeviceAddress(m.dst));
++      if (!dst) continue;
++      size_t pitch = m.height > 1 ? m.pitch : m.width * m.elementSize;
++      unsigned value = m.value, element_size = m.elementSize;
++      size_t width = m.width, height = m.height ? m.height : 1;
++      cudaKernelNodeParams k{};
++      k.blockDim = dim3(256, 1, 1);
++      if (height == 1 || pitch == width * element_size) {
++        // Contiguous: a 32-bit pattern (dst is aligned to the element size).
++        size_t bytes = width * height * element_size;
++        uint32_t p32 = element_size == 1   ? (value & 0xff) * 0x01010101u
++                       : element_size == 2 ? (value & 0xffff) * 0x00010001u
++                                           : value;
++        void* args[] = {&dst, &bytes, &p32};
++        k.func = reinterpret_cast<void*>(GraphFillContiguous);
++        k.gridDim = dim3(static_cast<unsigned>(
++            std::max<size_t>(1, std::min<size_t>(512, (bytes / 16 + 255) / 256))), 1, 1);
++        k.kernelParams = args;
++        if (!ReplaceWithKernel(graph, node, &k)) return false;
++        continue;
++      }
++      void* args[] = {&dst, &pitch, &value, &element_size, &width, &height};
++      k.func = reinterpret_cast<void*>(GraphFill);
++      k.gridDim = dim3(static_cast<unsigned>(
++          std::max<size_t>(1, std::min<size_t>(1024, (width * height + 255) / 256))), 1, 1);
++      k.kernelParams = args;
++      if (!ReplaceWithKernel(graph, node, &k)) return false;
++    } else if (type == cudaGraphNodeTypeMemcpy) {
++      cudaMemcpy3DParms c{};
++      if (cudaGraphMemcpyNodeGetParams(node, &c) != cudaSuccess) return false;
++      if (c.srcArray || c.dstArray || c.extent.height != 1 || c.extent.depth != 1 ||
++          c.srcPos.x || c.srcPos.y || c.srcPos.z || c.dstPos.x || c.dstPos.y || c.dstPos.z ||
++          c.extent.width > 4096) {
++        continue;
++      }
++      char* dst = static_cast<char*>(DeviceAddress(c.dstPtr.ptr));
++      char* src = static_cast<char*>(DeviceAddress(c.srcPtr.ptr));
++      if (!dst || !src) continue;
++      size_t bytes = c.extent.width;
++      void* args[] = {&dst, &src, &bytes};
++      cudaKernelNodeParams k{};
++      k.func = reinterpret_cast<void*>(GraphCopy);
++      k.blockDim = dim3(32, 1, 1);
++      k.gridDim = dim3(1, 1, 1);
++      k.kernelParams = args;
++      if (!ReplaceWithKernel(graph, node, &k)) return false;
++    }
++  }
++  return true;
++}
++
+ }  // namespace
+ 
+ // The GPU buffer Detect() thresholds: the caller's, or its own copy of a host image.
+@@ -906,6 +1225,12 @@ absl::Status GpuDetector::RecordFirstStageGraph(const uint8_t* image_device) {
+     return absl::UnknownError(std::string("recording the first-stage graph failed: ") +
+                               cudaGetErrorString(e));
+   }
++  // bos-11: its 2 memsets and the count's copy back as kernels too (SpectrumStageGraphs).
++  if (SpectrumStageGraphs() && !CopiesAsKernels(graph)) {
++    cudaGraphDestroy(graph);
++    cudaGetLastError();
++    return absl::UnknownError("recording the first-stage graph failed: copies as kernels");
++  }
+   e = cudaGraphInstantiate(&first_stage_exec_, graph, 0);
+   cudaGraphDestroy(graph);
+   if (e != cudaSuccess) {
+@@ -921,6 +1246,297 @@ absl::Status GpuDetector::RecordFirstStageGraph(const uint8_t* image_device) {
+   return absl::OkStatus();
+ }
+ 
++// SpectrumJetson (bos-11): see SpectrumStageGraphs. Only after the first-stage graph (a gray image,
++// the fused BlobDiff, no event timing), and not once recording a graph has failed.
++bool GpuDetector::SecondStageGraphs() {
++  return !stage_graphs_failed_ && SpectrumStageGraphs();
++}
++
++// The sort, blob extents, extent filter and point filter over points_bucket points (the real
++// count, num_compressed_union_marker_pair_device_, stays on the GPU). Leaves num_quads in
++// num_quads_host_ and the number of selected points in stage_counts_host_[0].
++absl::Status GpuDetector::EnqueueSecondStage(size_t points_bucket, cudaStream_t stream) {
++  // As int, as the one-by-one path passes it: CUB picks its kernels by the offset type.
++  const int bucket = static_cast<int>(points_bucket);
++  const int* num_points = num_compressed_union_marker_pair_device_.get();
++  QuadBoundaryPoint pad;
++  pad.key = kPadKey;
++  LaunchPadTail(compressed_union_marker_pair_device_.get(), num_points, points_bucket, pad, stream);
++  {
++    size_t temp_storage_bytes = radix_sort_tmpstorage_device_.size();
++    QuadBoundaryPointDecomposer decomposer;
++    CHECK_CUDA(cub::DeviceRadixSort::SortKeys(
++        radix_sort_tmpstorage_device_.get(), temp_storage_bytes,
++        compressed_union_marker_pair_device_.get(), sorted_union_marker_pair_device_.get(),
++        bucket, decomposer, QuadBoundaryPoint::kRepEndBit, QuadBoundaryPoint::kBitsInKey,
++        stream));
++  }
++  {
++    cub::ArgIndexInputIterator<QuadBoundaryPoint*> value_index_input_iterator(
++        sorted_union_marker_pair_device_.get());
++    TransformQuadBoundaryPointToMinMaxExtents min_max;
++    cub::TransformInputIterator<MinMaxExtents, TransformQuadBoundaryPointToMinMaxExtents,
++                                cub::ArgIndexInputIterator<QuadBoundaryPoint*>>
++        value_input_iterator(value_index_input_iterator, min_max);
++    cub::DiscardOutputIterator<uint64_t> key_discard_iterator;
++    MaskRep01 mask;
++    cub::TransformInputIterator<uint64_t, MaskRep01, QuadBoundaryPoint*> key_input_iterator(
++        sorted_union_marker_pair_device_.get(), mask);
++    QuadBoundaryPointExtents reduce;
++    size_t temp_storage_bytes = temp_storage_bounds_reduce_by_key_device_.size();
++    CHECK_CUDA(cub::DeviceReduce::ReduceByKey(
++        temp_storage_bounds_reduce_by_key_device_.get(), temp_storage_bytes, key_input_iterator,
++        key_discard_iterator, value_input_iterator, extents_device_.get(), num_quads_device_.get(),
++        reduce, bucket, stream));
++    DropPadRun<<<1, 1, 0, stream>>>(num_quads_device_.get(), num_points, points_bucket);
++    QuadsToInt<<<1, 1, 0, stream>>>(num_quads_device_.get(), num_quads_int_device_.get(),
++                                    kMaxBlobs);
++    CHECK_CUDA(cudaMemcpyAsync(num_quads_host_.get(), num_quads_device_.get(), sizeof(size_t),
++                               cudaMemcpyDeviceToHost, stream));
++  }
++  const apriltag_size_t max_april_tag_perimeter = 2 * (width_ + height_);
++  {
++    // Over the real number of quads only (ScanSelectedExtents).
++    TransformZeroFilteredBlobSizes rewrite(min_tag_width_, reversed_border_, normal_border_,
++                                           tag_detector_->qtp.min_cluster_pixels,
++                                           max_april_tag_perimeter);
++    ScanSelectedExtents<<<1, kScanThreads, 0, stream>>>(
++        extents_device_.get(), num_quads_int_device_.get(), rewrite,
++        selected_extents_device_.get());
++  }
++  {
++    cub::ArgIndexInputIterator<QuadBoundaryPoint*> value_index_input_iterator(
++        sorted_union_marker_pair_device_.get());
++    RewriteToIndexPointDevice rewrite(extents_device_.get(), num_quads_int_device_.get(),
++                                      num_points);
++    cub::TransformInputIterator<IndexPoint, RewriteToIndexPointDevice,
++                                cub::ArgIndexInputIterator<QuadBoundaryPoint*>>
++        input_iterator(value_index_input_iterator, rewrite);
++    AddThetaToIndexPoint add_theta(extents_device_.get(), 0);
++    TransformOutputIterator<IndexPoint, IndexPoint, AddThetaToIndexPoint> output_iterator(
++        selected_blobs_device_.get(), add_theta);
++    NonzeroBlobsDevice select_blobs(selected_extents_device_.get());
++    size_t temp_storage_bytes = temp_storage_compressed_filtered_blobs_device_.size();
++    CHECK_CUDA(cub::DeviceSelect::If(temp_storage_compressed_filtered_blobs_device_.get(),
++                                     temp_storage_bytes, input_iterator, output_iterator,
++                                     num_selected_blobs_device_.get(), bucket, select_blobs,
++                                     stream));
++    CHECK_CUDA(cudaMemcpyAsync(stage_counts_host_.get(), num_selected_blobs_device_.get(),
++                               sizeof(int), cudaMemcpyDeviceToHost, stream));
++  }
++  return absl::OkStatus();
++}
++
++// The angle sort, line fits, peaks and quad fits over points_bucket selected points and
++// quads_bucket quads. Leaves the number of fit quads in stage_counts_host_[1].
++absl::Status GpuDetector::EnqueueThirdStage(size_t points_bucket, size_t quads_bucket,
++                                            cudaStream_t stream) {
++  const int bucket = static_cast<int>(points_bucket);
++  const int* num_points = num_selected_blobs_device_.get();
++  {
++    IndexPoint pad;
++    pad.key = kPadKey;
++    LaunchPadTail(selected_blobs_device_.get(), num_points, points_bucket, pad, stream);
++    size_t temp_storage_bytes = radix_sort_tmpstorage_device_.size();
++    QuadIndexPointDecomposer decomposer;
++    CHECK_CUDA(cub::DeviceRadixSort::SortKeys(
++        radix_sort_tmpstorage_device_.get(), temp_storage_bytes, selected_blobs_device_.get(),
++        sorted_selected_blobs_device_.get(), bucket, decomposer, 0,
++        IndexPoint::kBitsInKey, stream));
++  }
++  {
++    TransformLineFitPoint rewrite(decimated_image_device_.get(), width_ / 2, height_ / 2);
++    cub::TransformInputIterator<LineFitPoint, TransformLineFitPoint, IndexPoint*> input_iterator(
++        sorted_selected_blobs_device_.get(), rewrite);
++    MaskBlobIndex mask;
++    cub::TransformInputIterator<uint32_t, MaskBlobIndex, IndexPoint*> key_iterator(
++        sorted_selected_blobs_device_.get(), mask);
++    SumLineFitPoints sum_points;
++    size_t temp_storage_bytes = temp_storage_line_fit_scan_device_.size();
++    CHECK_CUDA(cub::DeviceScan::InclusiveScanByKey(
++        temp_storage_line_fit_scan_device_.get(), temp_storage_bytes, key_iterator,
++        input_iterator, line_fit_points_device_.get(), sum_points, bucket,
++        ::cuda::std::equal_to<>{}, stream));
++  }
++  FitLinesDeviceCount(line_fit_points_device_.get(), num_points, points_bucket,
++                      selected_extents_device_.get(), errs_device_.get(),
++                      filtered_errs_device_.get(), filtered_is_local_peak_device_.get(), stream);
++  {
++    PeakOrNone peak_or_none{filtered_is_local_peak_device_.get(), num_points};
++    thrust::transform_iterator<PeakOrNone, thrust::counting_iterator<int>> input_iterator(
++        thrust::counting_iterator<int>(0), peak_or_none);
++    size_t temp_storage_bytes = temp_storage_compressed_union_marker_pair_device_.size();
++    ValidPeaks peak_filter;
++    CHECK_CUDA(cub::DeviceSelect::If(temp_storage_compressed_union_marker_pair_device_.get(),
++                                     temp_storage_bytes, input_iterator,
++                                     compressed_peaks_device_.get(),
++                                     num_compressed_peaks_device_.get(), bucket,
++                                     peak_filter, stream));
++  }
++  {
++    Peak pad;
++    pad.error = 0;
++    pad.filtered_point_index = 0xffffffff;
++    pad.blob_index = Peak::kNoPeak();  // after every real peak's blob
++    LaunchPadTail(compressed_peaks_device_.get(), num_compressed_peaks_device_.get(),
++                  points_bucket, pad, stream);
++    size_t temp_storage_bytes = radix_sort_tmpstorage_device_.size();
++    PeakDecomposer decomposer;
++    CHECK_CUDA(cub::DeviceRadixSort::SortKeys(
++        radix_sort_tmpstorage_device_.get(), temp_storage_bytes, compressed_peaks_device_.get(),
++        sorted_compressed_peaks_device_.get(), bucket, decomposer, 0,
++        PeakDecomposer::kBitsInKey, stream));
++  }
++  {
++    cub::ArgIndexInputIterator<Peak*> value_index_input_iterator(
++        sorted_compressed_peaks_device_.get());
++    TransformToPeakExtents transform_extents;
++    cub::TransformInputIterator<PeakExtents, TransformToPeakExtents,
++                                cub::ArgIndexInputIterator<Peak*>>
++        value_input_iterator(value_index_input_iterator, transform_extents);
++    cub::DiscardOutputIterator<uint32_t> key_discard_iterator;
++    MaskPeakExtentsByBlobId mask;
++    cub::TransformInputIterator<uint32_t, MaskPeakExtentsByBlobId, Peak*> key_input_iterator(
++        sorted_compressed_peaks_device_.get(), mask);
++    MergePeakExtents reduce;
++    size_t temp_storage_bytes = temp_storage_bounds_reduce_by_key_device_.size();
++    CHECK_CUDA(cub::DeviceReduce::ReduceByKey(
++        temp_storage_bounds_reduce_by_key_device_.get(), temp_storage_bytes, key_input_iterator,
++        key_discard_iterator, value_input_iterator, peak_extents_device_.get(),
++        num_quad_peaked_quads_device_.get(), reduce, bucket, stream));
++    DropPadRun<<<1, 1, 0, stream>>>(num_quad_peaked_quads_device_.get(),
++                                    num_compressed_peaks_device_.get(), points_bucket);
++  }
++  FitQuadsDeviceCount(sorted_compressed_peaks_device_.get(), peak_extents_device_.get(),
++                      num_quad_peaked_quads_device_.get(), quads_bucket,
++                      line_fit_points_device_.get(), tag_detector_->qtp.max_nmaxima,
++                      selected_extents_device_.get(), tag_detector_->qtp.max_line_fit_mse,
++                      tag_detector_->qtp.cos_critical_rad, fit_quads_device_.get(), stream);
++  CHECK_CUDA(cudaMemcpyAsync(stage_counts_host_.get() + 1, num_quad_peaked_quads_device_.get(),
++                             sizeof(int), cudaMemcpyDeviceToHost, stream));
++  // The fit quads themselves, as many as there are, straight into pinned memory (a pageable copy
++  // after the graph cost ~70 us of CPU a frame).
++  void* pinned = DeviceAddress(fit_quads_pinned_.get());
++  if (!pinned) return absl::UnknownError("no device address for the fit quads' pinned memory");
++  CopyCounted<<<16, 256, 0, stream>>>(static_cast<uint32_t*>(pinned),
++                                      reinterpret_cast<const uint32_t*>(fit_quads_device_.get()),
++                                      num_quad_peaked_quads_device_.get(),
++                                      sizeof(FitQuad) / sizeof(uint32_t), kMaxBlobs);
++  return absl::OkStatus();
++}
++
++bool GpuDetector::StageGraphsWanted() {
++  return !pending_stage_graphs_.empty() && SecondStageGraphs();
++}
++
++// The recorded graph for a stage (2 or 3) and size bucket, or nullptr (then noted for
++// RecordStageGraphs).
++cudaGraphExec_t GpuDetector::StageGraph(int stage, size_t points_bucket, size_t quads_bucket) {
++  const auto key = std::make_tuple(stage, points_bucket, quads_bucket);
++  if (auto it = stage_graphs_.find(key); it != stage_graphs_.end()) return it->second;
++  if (pending_stage_graphs_.size() < 64) pending_stage_graphs_.insert(key);
++  return nullptr;
++}
++
++absl::Status GpuDetector::RecordStageGraphs() {
++  // Buckets grow ~25% a step, so a detector needs a few dozen at most; this only bounds memory.
++  if (stage_graphs_.size() + pending_stage_graphs_.size() > 256) {
++    for (auto& [k, exec] : stage_graphs_) cudaGraphExecDestroy(exec);
++    stage_graphs_.clear();
++  }
++  for (const auto& [stage, points_bucket, quads_bucket] : pending_stage_graphs_) {
++    if (stage_graphs_failed_) break;
++    if (!RecordStageGraph(stage, points_bucket, quads_bucket)) {
++      pending_stage_graphs_.clear();
++      return absl::UnknownError("recording a stage graph failed; running those steps one by one");
++    }
++  }
++  pending_stage_graphs_.clear();
++  return absl::OkStatus();
++}
++
++// Records one stage graph; nullptr (and no more graphs for this detector) when that fails.
++cudaGraphExec_t GpuDetector::RecordStageGraph(int stage, size_t points_bucket,
++                                              size_t quads_bucket) {
++  const auto key = std::make_tuple(stage, points_bucket, quads_bucket);
++  if (auto it = stage_graphs_.find(key); it != stage_graphs_.end()) return it->second;
++  auto fail = [&](const std::string& what, cudaError_t e) -> cudaGraphExec_t {
++    cudaGetLastError();
++    LOG(WARNING) << "971 detector: recording the stage " << stage << " graph failed (" << what
++                 << ": " << cudaGetErrorString(e) << "); running the steps one by one";
++    stage_graphs_failed_ = true;
++    return nullptr;
++  };
++  if (!capture_stream_) {
++    cudaError_t e = cudaStreamCreateWithFlags(&capture_stream_, cudaStreamNonBlocking);
++    if (e != cudaSuccess) {
++      capture_stream_ = nullptr;
++      return fail("stream", e);
++    }
++  }
++  cudaError_t e = cudaStreamBeginCapture(capture_stream_, cudaStreamCaptureModeThreadLocal);
++  if (e != cudaSuccess) return fail("begin", e);
++  absl::Status status;
++  try {
++    status = stage == 2 ? EnqueueSecondStage(points_bucket, capture_stream_)
++                        : EnqueueThirdStage(points_bucket, quads_bucket, capture_stream_);
++  } catch (const std::exception& ex) {
++    status = absl::UnknownError(ex.what());
++  }
++  cudaGraph_t graph = nullptr;
++  e = cudaStreamEndCapture(capture_stream_, &graph);
++  if (!status.ok() || e != cudaSuccess || !graph) {
++    if (graph) cudaGraphDestroy(graph);
++    return fail(status.ok() ? "capture" : std::string(status.message()), e);
++  }
++  if (!CopiesAsKernels(graph)) {
++    cudaGraphDestroy(graph);
++    return fail("copies as kernels", cudaGetLastError());
++  }
++  cudaGraphExec_t exec = nullptr;
++  e = cudaGraphInstantiate(&exec, graph, 0);
++  cudaGraphDestroy(graph);
++  if (e != cudaSuccess) return fail("instantiate", e);
++  cudaGraphUpload(exec, stream_.get());  // now, not on its first launch
++  stage_graphs_[key] = exec;
++  return exec;
++}
++
++// Detect() after the first-stage graph, as two graphs. *done: nothing to detect (no candidate
++// points), detections cleared by the caller. Unavailable: a graph couldn't be recorded, and the
++// caller runs the steps one by one instead (they recompute everything a graph wrote).
++absl::Status GpuDetector::DetectGraphStages(int* num_selected_blobs, int* num_compressed_peaks,
++                                            int* num_quad_peaked_quads, bool* done) {
++  const size_t points_capacity = sorted_union_marker_pair_device_.size();
++  // The first-stage graph's point count.
++  CHECK_CUDA(cudaStreamSynchronize(stream_.get()));
++  const size_t n = static_cast<size_t>(*num_compressed_union_marker_pair_host_.get());
++  cudaGraphExec_t second = StageGraph(2, StageBucket(n, points_capacity), 0);
++  if (!second) return absl::UnavailableError("no stage 2 graph");
++  CHECK_CUDA(cudaGraphLaunch(second, stream_.get()));
++  CHECK_CUDA(cudaStreamSynchronize(stream_.get()));
++  if (*num_quads_host_.get() > kMaxBlobs) {
++    return absl::ResourceExhaustedError(
++        "more candidate quads (" + std::to_string(*num_quads_host_.get()) +
++        ") than the detector's buffers hold (" + std::to_string(kMaxBlobs) +
++        "): frame skipped");
++  }
++  *num_selected_blobs = stage_counts_host_.get()[0];
++  if (*num_selected_blobs == 0) {
++    *done = true;
++    return absl::OkStatus();
++  }
++  cudaGraphExec_t third =
++      StageGraph(3, StageBucket(static_cast<size_t>(*num_selected_blobs), points_capacity),
++                 StageBucket(*num_quads_host_.get(), kMaxBlobs));
++  if (!third) return absl::UnavailableError("no stage 3 graph");
++  CHECK_CUDA(cudaGraphLaunch(third, stream_.get()));
++  CHECK_CUDA(cudaStreamSynchronize(stream_.get()));
++  *num_quad_peaked_quads = stage_counts_host_.get()[1];
++  *num_compressed_peaks = -1;  // only for VLOG; stays on the GPU
++  return absl::OkStatus();
++}
++
+ absl::Status GpuDetector::Detect(const uint8_t* image,
+                                  const uint8_t* image_device) {
+   // const aos::monotonic_clock::time_point start_time =
+@@ -1089,6 +1705,33 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+     }
+   }
+ 
++  int num_selected_blobs_host = 0;
++  int num_compressed_peaks_host = 0;
++  int num_quad_peaked_quads_host = 0;
++  // bos-11: the rest as two CUDA graphs, when the first stage was one.
++  bool staged = false;
++  if (graph && SecondStageGraphs()) {
++    bool done = false;
++    absl::Status status = DetectGraphStages(&num_selected_blobs_host, &num_compressed_peaks_host,
++                                            &num_quad_peaked_quads_host, &done);
++    if (absl::IsUnavailable(status)) {
++      staged = false;
++    } else if (!status.ok()) {
++      return status;
++    } else if (done) {
++      for (int i = 0; i < zarray_size(detections_); ++i) {
++        apriltag_detection_t* det;
++        zarray_get(detections_, i, &det);
++        apriltag_detection_destroy(det);
++      }
++      zarray_truncate(detections_, 0);
++      return absl::OkStatus();
++    } else {
++      staged = true;
++    }
++  }
++  if (!staged) {
++
+   after_num_compact_memcpy_.Record(&stream_);
+ 
+   {
+@@ -1200,7 +1843,6 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+ 
+   if (timing) after_transform_extents_.Record(&stream_);
+ 
+-  int num_selected_blobs_host;
+   {
+     // Now, copy over all points which pass our thresholds.
+     cub::ArgIndexInputIterator<QuadBoundaryPoint*> value_index_input_iterator(
+@@ -1313,7 +1955,6 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+   }
+   if (timing) after_line_filter_.Record(&stream_);
+ 
+-  int num_compressed_peaks_host;
+   {
+     // Remove empty points which aren't to be considered before sorting to speed
+     // things up.
+@@ -1362,7 +2003,6 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+ 
+   if (timing) after_peak_sort_.Record(&stream_);
+ 
+-  int num_quad_peaked_quads_host;
+   // Now that we have the peaks sorted, recompute the extents so we can easily
+   // pick out the number and top 10 peaks for line fitting.
+   {
+@@ -1414,8 +2054,20 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+     MaybeCheckAndSynchronize("FitQuads");
+   }
+   if (timing) after_quad_fit_.Record(&stream_);
++  // bos-11: a frame that ran step by step because its stage 2 graph wasn't recorded yet also
++  // asks for the stage 3 graph it will need.
++  if (graph && SecondStageGraphs()) {
++    StageGraph(3, StageBucket(num_selected_blobs_host, sorted_union_marker_pair_device_.size()),
++               StageBucket(*num_quads_host_.get(), kMaxBlobs));
++  }
++  }  // !staged
+ 
+-  {
++  if (staged) {
++    // bos-11: the stage 3 graph already copied them to pinned memory.
++    fit_quads_host_.resize(num_quad_peaked_quads_host);
++    std::memcpy(fit_quads_host_.data(), fit_quads_pinned_.get(),
++                num_quad_peaked_quads_host * sizeof(FitQuad));
++  } else {
+     fit_quads_host_.resize(num_quad_peaked_quads_host);
+     fit_quads_device_.MemcpyAsyncTo(fit_quads_host_.data(),
+                                     num_quad_peaked_quads_host, &stream_);
+diff --git a/third_party/971apriltag/apriltag.h b/third_party/971apriltag/apriltag.h
+index c2a9b5a..b120970 100644
+--- a/third_party/971apriltag/apriltag.h
++++ b/third_party/971apriltag/apriltag.h
+@@ -3,6 +3,11 @@
+ 
+ #include "apriltag/apriltag.h"
+ 
++#include <map>
++#include <set>
++#include <tuple>
++#include <utility>
++
+ #include <cuda_runtime.h>
+ #include "cuda.h"
+ #include "cuda_runtime.h"
+@@ -113,6 +118,11 @@ class GpuDetector {
+   // other thread uses CUDA. image_device: what Detect() will get (nullptr: a host image).
+   bool FirstStageGraphWanted(const uint8_t* image_device);
+   absl::Status RecordFirstStageGraph(const uint8_t* image_device);
++  // SpectrumJetson (bos-11): the later stages' graphs (one per size bucket) that Detect() needed
++  // and didn't have; it ran those frames step by step. Record them like the first-stage graph:
++  // when no other thread uses CUDA (recording breaks other threads' CUDA calls, see bos-05).
++  bool StageGraphsWanted();
++  absl::Status RecordStageGraphs();
+ 
+   // SpectrumJetson (bos-07): a detection mask at the decimated size ((width/2) x (height/2), 1 =
+   // search here, 0 = ignore), or nullptr for none. Ignored pixels become "no contrast" (127)
+@@ -419,6 +429,28 @@ class GpuDetector {
+   bool first_stage_failed_ = false;  // recording failed: don't try again (this detector)
+   bool first_stage_mask_ = false;    // whether the recorded graph masks
+ 
++  // SpectrumJetson (bos-11): everything after the first stage as two CUDA graphs (SecondStage:
++  // sort, blob extents, filter; ThirdStage: line fits, peaks, quad fits), each recorded once per
++  // size bucket with the counts kept on the GPU, instead of ~50 launches and 5 host round trips.
++  // Recorded by RecordStageGraphs (the caller makes sure no other thread uses CUDA meanwhile) on
++  // capture_stream_ (non-blocking, used for nothing else); launched on stream_.
++  bool SecondStageGraphs();
++  cudaGraphExec_t RecordStageGraph(int stage, size_t points_bucket, size_t quads_bucket);
++  absl::Status EnqueueSecondStage(size_t points_bucket, cudaStream_t stream);
++  absl::Status EnqueueThirdStage(size_t points_bucket, size_t quads_bucket, cudaStream_t stream);
++  cudaGraphExec_t StageGraph(int stage, size_t points_bucket, size_t quads_bucket);
++  absl::Status DetectGraphStages(int* num_selected_blobs, int* num_compressed_peaks,
++                                 int* num_quad_peaked_quads, bool* done);
++  cudaStream_t capture_stream_ = nullptr;
++  std::map<std::tuple<int, size_t, size_t>, cudaGraphExec_t> stage_graphs_;
++  std::set<std::tuple<int, size_t, size_t>> pending_stage_graphs_;  // wanted, not yet recorded
++  bool stage_graphs_failed_ = false;
++  // Counts the graphs copy back: num_selected_blobs, num_quad_peaked_quads.
++  HostMemory<int> stage_counts_host_{2};
++  GpuMemory<int> num_selected_blobs_int_device_{1};
++  GpuMemory<int> num_quads_int_device_{1};
++  HostMemory<FitQuad> fit_quads_pinned_{kMaxBlobs};  // stage 3's fit quads, for the host
++
+   // SpectrumJetson (bos-07): SetMask's mask on the GPU, and whether it's on.
+   GpuMemory<uint8_t> mask_device_;
+   bool mask_on_ = false;
+diff --git a/third_party/971apriltag/line_fit_filter.cc b/third_party/971apriltag/line_fit_filter.cc
+index 46e6935..b14f3f1 100644
+--- a/third_party/971apriltag/line_fit_filter.cc
++++ b/third_party/971apriltag/line_fit_filter.cc
+@@ -345,7 +345,15 @@ template <size_t kThreads>
+ __global__ void DoFitLines(
+     const LineFitPoint* line_fit_points_device, size_t points,
+     const cub::KeyValuePair<long, MinMaxExtents>* selected_extents_device,
+-    double* errs_device, double* filtered_errs_device, Peak* peaks_device) {
++    double* errs_device, double* filtered_errs_device, Peak* peaks_device,
++    const int* points_device = nullptr) {
++  // SpectrumJetson (bos-11): in a CUDA graph the grid is for a worst-case
++  // count; the real count is on the GPU, and blocks past it do nothing (the
++  // whole block returns, before any __syncthreads).
++  if (points_device) {
++    points = static_cast<size_t>(*points_device);
++    if (blockIdx.x * (kPointsPerBlock - 2 * kErrorsBuffer) >= points) return;
++  }
+   __shared__ TempStorage storage;
+ 
+   ErrorCalculator<kThreads> calculator(line_fit_points_device, points,
+@@ -1102,7 +1110,10 @@ __global__ void DoFitQuads(
+     const LineFitPoint* line_fit_points_device,
+     const cub::KeyValuePair<long, MinMaxExtents>* selected_extents_device,
+     float max_line_fit_mse, double cos_critical_rad,
+-    FitQuad* fit_quads_device) {
++    FitQuad* fit_quads_device, const int* num_extents_device = nullptr) {
++  // SpectrumJetson (bos-11): a worst-case grid in a CUDA graph; blocks past
++  // the real count (on the GPU) do nothing.
++  if (num_extents_device && blockIdx.x >= static_cast<unsigned>(*num_extents_device)) return;
+   __shared__ QuadFitStorage storage;
+   // Specialize BlockReduce for a 1D block of 128 threads of type int
+   typedef cub::BlockReduce<QuadError, MaxRankedIndex()> BlockReduce;
+@@ -1223,6 +1234,38 @@ void FitQuads(
+       fit_quads_device);
+ }
+ 
++// SpectrumJetson (bos-11): FitLines and FitQuads with their counts on the GPU, for a CUDA graph:
++// the grid covers max_points / max_extents, and blocks past the real count return at once.
++void FitLinesDeviceCount(
++    const LineFitPoint* line_fit_points_device, const int* points_device, size_t max_points,
++    const cub::KeyValuePair<long, MinMaxExtents>* selected_extents_device,
++    double* errs_device, double* filtered_errs_device, Peak* peaks_device,
++    cudaStream_t stream) {
++  constexpr size_t kThreads = 128;
++  const size_t kBlocks = (max_points + kPointsPerBlock - 2 * kErrorsBuffer - 1) /
++                         (kPointsPerBlock - 2 * kErrorsBuffer);
++  if (kBlocks == 0) return;
++  DoFitLines<kThreads><<<kBlocks, kThreads, 0, stream>>>(
++      line_fit_points_device, max_points, selected_extents_device, errs_device,
++      filtered_errs_device, peaks_device, points_device);
++}
++
++void FitQuadsDeviceCount(
++    const Peak* peaks_device, const PeakExtents* peak_extents,
++    const int* num_extents_device, size_t max_extents,
++    const LineFitPoint* line_fit_points_device, int nmaxima,
++    const cub::KeyValuePair<long, MinMaxExtents>* selected_extents_device,
++    float max_line_fit_mse, double cos_critical_rad, FitQuad* fit_quads_device,
++    cudaStream_t stream) {
++  constexpr size_t kThreads = MaxRankedIndex();
++  CHECK_EQ(nmaxima, kNMaxima);
++  if (max_extents == 0) return;
++  DoFitQuads<<<max_extents, kThreads, 0, stream>>>(
++      peaks_device, peak_extents, line_fit_points_device,
++      selected_extents_device, max_line_fit_mse, cos_critical_rad,
++      fit_quads_device, num_extents_device);
++}
++
+ std::ostream& operator<<(std::ostream& os,
+                          const frc::apriltag::LineFitMoments& moments) {
+   os << "{Mx:" << std::setprecision(20) << moments.Mx / 2.
+diff --git a/third_party/971apriltag/line_fit_filter.h b/third_party/971apriltag/line_fit_filter.h
+index d1670a7..caa5563 100644
+--- a/third_party/971apriltag/line_fit_filter.h
++++ b/third_party/971apriltag/line_fit_filter.h
+@@ -151,6 +151,22 @@ void FitQuads(
+     float max_line_fit_mse, double cos_critical_rad, FitQuad* fit_quads_device,
+     CudaStream* stream);
+ 
++// SpectrumJetson (bos-11): the same with the count on the GPU (for a CUDA graph); the grid covers
++// the max_ count and blocks past the real one do nothing.
++void FitLinesDeviceCount(
++    const LineFitPoint* line_fit_points_device, const int* points_device, size_t max_points,
++    const cub::KeyValuePair<long, MinMaxExtents>* selected_extents_device,
++    double* errs_device, double* filtered_errs_device, Peak* peaks_device,
++    cudaStream_t stream);
++
++void FitQuadsDeviceCount(
++    const Peak* peaks_device, const PeakExtents* peak_extents,
++    const int* num_extents_device, size_t max_extents,
++    const LineFitPoint* line_fit_points_device, int nmaxima,
++    const cub::KeyValuePair<long, MinMaxExtents>* selected_extents_device,
++    float max_line_fit_mse, double cos_critical_rad, FitQuad* fit_quads_device,
++    cudaStream_t stream);
++
+ // Returns the m0, m1, m2, m3 indices for the provided index.  The index is the
+ // inner loop number when you process the 4 for loops in order and count.  See
+ // FilterTest.Unrank for an example.
