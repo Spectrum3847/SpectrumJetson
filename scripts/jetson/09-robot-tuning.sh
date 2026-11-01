@@ -130,6 +130,7 @@ if [[ ${1:-} == --undo ]]; then
   sudo systemctl enable apt-daily.timer apt-daily-upgrade.timer
   sudo systemctl unmask "${SNAP_UNITS[@]}"
   sudo systemctl enable snapd.service snapd.socket snapd.seeded.service
+  sudo systemctl unmask docker.socket 2>/dev/null || true   # step 1 desktop services: re-enable by hand if wanted
   [[ -x $CLOCKS_HELPER ]] && sudo "$CLOCKS_HELPER" full >/dev/null
   sudo systemctl disable --now spectrum-clocks-guard.timer 2>/dev/null || true
   sudo rm -f /etc/systemd/system/spectrum-clocks-guard.{service,timer} /usr/local/bin/spectrum-clocks-guard
@@ -148,6 +149,37 @@ fi
 
 echo "==> 1. Automatic updates off"
 sudo systemctl disable --now apt-daily.timer apt-daily-upgrade.timer
+# Ubuntu's iperf3 package enables an iperf3 server at boot (port 5201). Bandwidth tests start
+# their own `iperf3 -s` when needed; nothing should listen on the robot network otherwise.
+if systemctl list-unit-files iperf3.service --no-legend 2>/dev/null | grep -q iperf3; then
+  sudo systemctl disable --now iperf3.service
+fi
+# Desktop-rootfs services a robot coprocessor never uses (stock JetPack 7 / Ubuntu 24.04).
+UNNEEDED_UNITS=(
+  lpd.service                     # printer daemon (generated from /etc/init.d/lpd)
+  cups.service cups.socket        # printing (not installed on stock JetPack 7)
+  saned.socket                    # scanner server, listens on port 6566
+  docker.service containerd.service  # containers; we run nothing in Docker
+  bluetooth.service               # Bluetooth stack
+  ModemManager.service            # cellular modems; probes serial/USB devices
+  fwupd.service fwupd-refresh.timer  # firmware updates over the internet
+  kerneloops.service              # kernel crash reporter
+  udisks2.service upower.service  # desktop disk automount / battery status
+  nvargus-daemon.service          # CSI camera daemon; our cameras are USB (V4L2), NVJPG doesn't use it
+  avahi-daemon.service avahi-daemon.socket  # mDNS (.local names); we connect by IP, PV has its own mDNS
+  motd-news.timer update-notifier-download.timer update-notifier-motd.timer  # login banner / update checks
+  man-db.timer                    # man page index rebuild
+  anacron.timer anacron.service   # catch-up cron (runs daily jobs after boot)
+  e2scrub_all.timer               # weekly ext4 metadata scrub (heavy disk I/O)
+)
+for u in "${UNNEEDED_UNITS[@]}"; do
+  systemctl list-unit-files "$u" --no-legend 2>/dev/null | grep -q . || continue
+  sudo systemctl disable --now "$u" 2>/dev/null || true
+done
+# docker.socket socket-activates docker.service again, so mask it.
+if systemctl list-unit-files docker.socket --no-legend 2>/dev/null | grep -q .; then
+  sudo systemctl mask --now docker.socket
+fi
 sudo tee "$APT_CONF" >/dev/null <<'EOF'
 // SpectrumJetson: robot coprocessor, no background package updates.
 APT::Periodic::Update-Package-Lists "0";
@@ -375,9 +407,14 @@ StartLimitIntervalSec=0
 [Service]
 Restart=always
 RestartSec=1
-# A stop takes 3-7 s; the settings are saved in the first second. Twice on 2026-10-01 the
-# process hung in its native exit, after the shutdown hooks, until the default 90 s kill
-# (docs/AUDIT-2026-10.md): every camera and the dashboard were down that long.
+# PhotonVision's own unit stops with ExecStop=/bin/systemctl kill photonvision: that SIGTERMs
+# its own systemctl (the unit's control process) too, so every stop ended "failed (Result:
+# signal)" even though java exits in ~1 s. Clear it: systemd's normal stop sends the SIGTERM.
+# The JVM exits 143 (128 + SIGTERM) after its shutdown hooks: count that as a clean stop.
+ExecStop=
+SuccessExitStatus=143
+# Twice on 2026-10-01 the process hung in its native exit, after the shutdown hooks, until
+# the default 90 s kill (docs/AUDIT-2026-10.md); not seen since. Bound it at 15 s.
 TimeoutStopSec=15
 CONF
 sudo systemctl daemon-reexec   # picks up the watchdog setting
