@@ -290,3 +290,26 @@ On all TXMAN1 sessions, scored as in section 2-3, with timing on one thread as i
   targets at ≤ 4 cameras). Far search when it can't, or at high frame rates: 1.25 ms per frame.
 
 Outputs: `results/judge-far.txt`, `results/analyze-far.txt` (size/range part), `results/timing-far.txt`.
+
+## 7. Live A/B at full clocks (2026-11-01)
+
+`tests/object-detection/run.sh live` (now also logs CPU_GPU_CV rail power and PhotonVision's top threads),
+`TAGS_ON_CPU=0/1`, `NAPA_FAR=0/1`, with `spectrum-clocks mode full` (GPU 1020 / CPU 1728 / EMC 3199 MHz,
+verified before each condition). 2 Thriftiest cams 1280x800 at 122 fps, NVJPG decode, yolo11n at Object FPS
+max 30 on the Jetson. GPU / NAPA min 16 / NAPA far interleaved, 2 rounds of 60 s, means of both rounds.
+**No tags in view on the bench: base cost only.** The earlier auto-clock numbers are in `docs/TECHNICAL.md`.
+
+| Condition | Tag latency p50 / p95 / max | Tag fps (per cam) | GPU | PhotonVision CPU | Top threads (cores) | YOLO batch / queue wait | VDD_IN | CPU_GPU_CV | tj max |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| GPU detector, tags only | 14.9 / 15.7 / 28.4 ms | 121.3 | 18% | 0.38 cores | decode 0.18, VisionRunner 0.09 | | 9.0 W | 2.75 W | 75 °C |
+| NAPA min 16, tags only | 14.9 / 15.7 / 21.6 ms | 121.3 | 1% | 0.63 cores | VisionRunner 0.36, decode 0.19 | | 8.7 W | 2.56 W | 77 °C |
+| NAPA far search, tags only | **13.8 / 15.0 / 20.3 ms** | 121.3 | 1% | 0.38 cores | decode 0.17, VisionRunner 0.13 | | **8.5 W** | **2.39 W** | 77 °C |
+| GPU detector + yolo11n 30 fps | 14.8 / 16.1 / 28.2 ms | 121.3 | 42% | 0.67 cores | TensorRT 0.24, decode 0.19, VisionRunner 0.11 | 6.3 / 2.9 ms | 12.0 W | 4.58 W | 80 °C |
+| NAPA min 16 + yolo11n 30 fps | 15.3 / 16.3 / 23.4 ms | 121.3 | 28% | 0.93 cores | VisionRunner 0.38, TensorRT 0.25, decode 0.21 | 6.1 / 2.9 ms | 12.0 W | 4.61 W | 79 °C |
+| NAPA far + yolo11n 30 fps (extra) | 14.2 / 15.3 / 25.3 ms | 121.3 | 30% | 0.67 cores | TensorRT 0.23, decode 0.19, VisionRunner 0.15 | 5.5 / 3.6 ms | 11.4 W | 4.19 W | 80 °C |
+
+- NAPA min 16 matches the GPU detector at p50/p95 at full clocks with a lower max, for ~0.25 more cores.
+- The far search is the cheapest and fastest here: ~1 ms lower p50/p95, same CPU as the GPU detector, lowest
+  power. With no tags in view it only does its min 32 pass and sweeps; expect more cost with tags.
+- YOLO's batch time no longer depends on the tag backend at full clocks (~6 ms); the GPU has headroom.
+- tj rose through the run (67 -> 80 °C); round 2 reads hotter for all conditions.

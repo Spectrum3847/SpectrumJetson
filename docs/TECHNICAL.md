@@ -2448,7 +2448,7 @@ backend of the fork:
   | AprilTag 3 decimate 2 | 38,916 | 11.6% | 7.73 m | 17.2 (21.8) |
 
   Median in-frame error and static jitter are the GPU detector's. The p75 in-frame tail is ~0.2 px worse.
-- **Live on the Jetson** (`tests/object-detection/run.sh live` with `TAGS_ON_CPU=0/1`, 2 Thriftiest cams at
+- **Live on the Jetson, clocks auto** (`tests/object-detection/run.sh live` with `TAGS_ON_CPU=0/1`, 2 Thriftiest cams at
   1280x800 122 fps, clocks auto, 60 s each, NVJPG decode in both, no tags in view):
 
   | | Tag latency p50 / p95 | GPU | PhotonVision CPU | Board power | tj |
@@ -2463,6 +2463,35 @@ backend of the fork:
   - Cost: up to ~0.2 cores (min 16, every frame, no tags in view). Expect more with tags and clutter; the
     replay's 2.3 ms per frame is ~0.28 cores per camera at 122 fps.
   - Not yet measured live with tags in view.
+
+  - Same day, clocks auto (`spectrum-clocks` deep state, CPU 729 MHz, GPU 306 MHz); see the full-clock rerun below.
+
+- **Live at full clocks** (`spectrum-clocks mode full`: GPU 1020 MHz, CPU 1728 MHz, EMC 3199 MHz, checked
+  before every condition). 2 Thriftiest cams at 1280x800 122 fps, NVJPG decode, 60 s per condition, PhotonVision
+  restarted per condition (`run.sh live` rewrites the pipelines), conditions interleaved GPU / NAPA / far, 2
+  rounds, means of both. **No tags in view on the bench: this is the base cost**, not the cost with tags and clutter.
+  Logs: Jetson `~/SpectrumJetson/logs/napa-ab-full/` (driver `napa-ab-full.sh`).
+
+  | Condition | Tag latency p50 / p95 / max | Tag fps (per cam) | GPU | PhotonVision CPU | Top threads (cores) | YOLO batch / queue wait | VDD_IN | CPU_GPU_CV | tj max |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | GPU detector, tags only | 14.9 / 15.7 / 28.4 ms | 121.3 | 18% | 0.38 cores | decode 0.18, VisionRunner 0.09 | | 9.0 W | 2.75 W | 75 °C |
+  | NAPA min 16, tags only | 14.9 / 15.7 / 21.6 ms | 121.3 | 1% | 0.63 cores | VisionRunner 0.36, decode 0.19 | | 8.7 W | 2.56 W | 77 °C |
+  | NAPA far search, tags only | **13.8 / 15.0 / 20.3 ms** | 121.3 | 1% | 0.38 cores | decode 0.17, VisionRunner 0.13 | | **8.5 W** | **2.39 W** | 77 °C |
+  | GPU detector + yolo11n 30 fps | 14.8 / 16.1 / 28.2 ms | 121.3 | 42% | 0.67 cores | TensorRT 0.24, decode 0.19, VisionRunner 0.11 | 6.3 / 2.9 ms | 12.0 W | 4.58 W | 80 °C |
+  | NAPA min 16 + yolo11n 30 fps | 15.3 / 16.3 / 23.4 ms | 121.3 | 28% | 0.93 cores | VisionRunner 0.38, TensorRT 0.25, decode 0.21 | 6.1 / 2.9 ms | 12.0 W | 4.61 W | 79 °C |
+  | NAPA far + yolo11n 30 fps (extra) | 14.2 / 15.3 / 25.3 ms | 121.3 | 30% | 0.67 cores | TensorRT 0.23, decode 0.19, VisionRunner 0.15 | 5.5 / 3.6 ms | 11.4 W | 4.19 W | 80 °C |
+
+  - At full clocks NAPA min 16 is no faster than the GPU detector at p50/p95 (14.9 / 15.7 ms both), but its
+    max is lower (21.6 vs 28.4 ms). The far search is ~1 ms better at p50 and p95 than both.
+  - NAPA min 16 costs ~0.25 cores more than the GPU detector (VisionRunner threads 0.36 vs 0.09 cores). The far
+    search costs nothing measurable over the GPU detector (0.38 cores both) on an empty scene.
+  - GPU: tags take 18% of the GPU at 1020 MHz; NAPA takes it to 1%. With yolo11n: 42% vs 28-30%.
+  - YOLO batches are ~6 ms at full clocks (vs ~10-13 ms at auto) in every condition; the NAPA advantage on batch
+    time seen at auto clocks is gone (6.3 vs 6.1 ms; queue wait 2.9 both). Far + YOLO shows 5.5 ms batches.
+  - Power: NAPA min 16 saves ~0.3 W board / 0.2 W CPU_GPU_CV tags only, ~0 with YOLO; far saves ~0.5-0.6 W.
+  - Temps crept up through the run (tj 67 -> 80 °C, < 85), so round 2 reads slightly hotter for every condition.
+  - Top threads: "decode" is SpectrumDecoder (NVJPG JPEG decode, ~0.18 cores in all conditions), VisionRunner
+    is the two cameras' pipeline threads (where NAPA runs), TensorRT is the YOLO service thread.
 - **SystemCore / CM5:** the same library is the CPU detector the 2027 robot should use, with min 16, or with far
   search when CPU is short. Confirm on a real CM5 (`tests/napa-eval` section 4 caveats).
 

@@ -26,14 +26,15 @@ mkdir -p "$OUT"
 tegra_summary() {  # tegrastats log -> mean GPU %, mean/max VDD_IN mW, max temps
   python3 - "$1" <<'PY'
 import re, sys
-g, p, t = [], [], {}
+g, p, r, t = [], [], [], {}
 for l in open(sys.argv[1]):
     m = re.search(r"GR3D_FREQ (\d+)%", l); g += [int(m.group(1))] if m else []
     m = re.search(r"VDD_IN (\d+)mW", l); p += [int(m.group(1))] if m else []
+    m = re.search(r"VDD_CPU_GPU_CV (\d+)mW", l); r += [int(m.group(1))] if m else []
     for k, v in re.findall(r"(\w+)@([\d.]+)C", l): t[k] = max(t.get(k, 0), float(v))
 if not g: print("tegrastats: no samples"); sys.exit()
-print("GPU %.0f%% (max %d) | VDD_IN %.1f W mean, %.1f W max | max temp %s" % (
-    sum(g) / len(g), max(g), sum(p) / len(p) / 1000, max(p) / 1000,
+print("GPU %.0f%% (max %d) | VDD_IN %.1f W mean, %.1f W max | CPU_GPU_CV %.2f W mean | max temp %s" % (
+    sum(g) / len(g), max(g), sum(p) / len(p) / 1000, max(p) / 1000, sum(r) / max(len(r), 1) / 1000,
     ", ".join("%s %.0fC" % kv for kv in sorted(t.items()) if kv[0] in ("cpu", "gpu", "tj", "soc0", "soc1", "soc2"))))
 PY
 }
@@ -102,9 +103,12 @@ PY
       since=$(date '+%Y-%m-%d %H:%M:%S')
       local pid t0 t1 hz; pid=$(systemctl show -p MainPID --value photonvision); hz=$(getconf CLK_TCK)
       t0=$(awk '{print $14 + $15}' "/proc/$pid/stat" 2>/dev/null || echo 0)
+      threads() { for f in /proc/"$pid"/task/*/stat; do sed -E 's/^([0-9]+) \((.*)\) . (.*)/\1|\2|\3/' "$f"; done 2>/dev/null; }
+      threads > "$OUT/live-$1.threads0"
       sudo -n tegrastats --interval 500 --logfile "$OUT/live-$1.tegra" &
       sleep "$secs"
       t1=$(awk '{print $14 + $15}' "/proc/$pid/stat" 2>/dev/null || echo 0)
+      threads > "$OUT/live-$1.threads1"
       sudo -n tegrastats --stop; sleep 1
       journalctl -u photonvision --since "$since" --no-pager > "$OUT/live-$1.journal"
       echo "== $1"
@@ -112,6 +116,9 @@ PY
       grep -E "TensorRT .*frames in" "$OUT/live-$1.journal" | sed -E 's/.*(TensorRT .*)/  \1/' | tail -2
       grep -E "TensorRT|Exception" "$OUT/live-$1.journal" | grep -i -E "fail|exception" | head -3
       echo "  $(tegra_summary "$OUT/live-$1.tegra")"
+      echo "  top threads (cores): $(awk -F'|' -v hz="$hz" -v s="$secs" 'NR==FNR{split($3,a," "); t[$1]=a[11]+a[12]; next}
+        {split($3,a," "); u=(a[11]+a[12]-t[$1])/hz/s; n[$2]+=u} END{for(k in n) if(n[k]>=0.02) printf "%.2f %s\n", n[k], k}' \
+        "$OUT/live-$1.threads0" "$OUT/live-$1.threads1" | sort -rn | head -8 | awk '{c=$1; $1=""; printf "%s%s %s", sep, substr($0,2), c; sep="; "}')"
       echo "  PhotonVision CPU $(awk -v a="$t0" -v b="$t1" -v hz="$hz" -v s="$secs" 'BEGIN{printf "%.2f", (b - a) / hz / s}') cores"
     }
     set_pipelines AprilTagCuda 0; timeout $((secs + 120)) bash -c "$(declare -f measure tegra_summary); OUT=$OUT secs=$secs measure baseline" || echo "TIMEOUT: baseline"
