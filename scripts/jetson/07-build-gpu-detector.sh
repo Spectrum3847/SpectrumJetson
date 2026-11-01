@@ -72,7 +72,7 @@ cmake -S "$REPO_ROOT/detector" -B "$OUT" -G Ninja -DCMAKE_BUILD_TYPE=Release -DB
 cmake --build "$OUT" --parallel 4 --target 971apriltag_jni
 # The hardware JPEG decoder and TensorRT are optional (the CMake skips them when their libraries
 # are missing), and each is built on its own so one failing doesn't stop the detector.
-for t in spectrumnvjpg spectrumtrt_jni; do
+for t in spectrumnvjpg spectrumtrt_jni trt_yolo_bench; do
   cmake --build "$OUT" --parallel 4 --target "$t" || echo "==> $t didn't build (optional)"
 done
 

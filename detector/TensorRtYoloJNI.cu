@@ -11,6 +11,15 @@
 //          -> flat [x, y, w, h, classId, confidence] per detection, best first
 //   void   destroy(long ptr)
 //
+// Batched API (trt_yolo.h; the shared object-detection service, photonvision-100):
+//   long    createModel(String modelPath, String cacheDir, int w, int h, int maxBatch, boolean fp16)
+//           .onnx (built and cached on first use; minutes) or .engine; 0 on error (lastError)
+//   int[]   modelInfo(long ptr)                 {width, height, maxBatch, numClasses (-1: e2e)}
+//   float[] detectBatch(long ptr, long[] matPtrs, int n, double conf, double iou, int maxDet)
+//           any size grey (CV_8UC1) or BGR (CV_8UC3) frames, letterboxed on the GPU; flat
+//           [count, x, y, w, h, classId, confidence * count] per frame, source pixels
+//   void    destroyModel(long ptr); String lastError()
+//
 // Output layouts handled (Ultralytics export):
 //   raw YOLOv8/YOLO11/YOLO26 (nms=None): [1, 4+nc, N], cx cy w h + per-class scores; NMS here
 //   end-to-end (nms=True, or YOLO26 nms=False): [1, K, 6], x1 y1 x2 y2 score class
@@ -33,6 +42,8 @@
 #include <cuda_runtime.h>
 #include <NvInfer.h>
 #include <opencv2/core/mat.hpp>
+
+#include "trt_yolo.h"
 
 namespace {
 
@@ -377,6 +388,87 @@ JNIEXPORT jfloatArray JNICALL Java_org_photonvision_jni_TensorRtJNI_detect(
 JNIEXPORT void JNICALL Java_org_photonvision_jni_TensorRtJNI_destroy(JNIEnv *, jclass, jlong ptr) {
   CudaShared cuda;
   delete reinterpret_cast<Detector *>(ptr);
+}
+
+// ---- Batched API (trt_yolo.h) ----
+
+static thread_local std::string tLastError;
+
+JNIEXPORT jstring JNICALL Java_org_photonvision_jni_TensorRtJNI_lastError(JNIEnv *env, jclass) {
+  return env->NewStringUTF(tLastError.c_str());
+}
+
+JNIEXPORT jlong JNICALL Java_org_photonvision_jni_TensorRtJNI_createModel(
+    JNIEnv *env, jclass, jstring jpath, jstring jcache, jint w, jint h, jint max_batch,
+    jboolean fp16) {
+  auto str = [&](jstring j) {
+    const char *c = env->GetStringUTFChars(j, nullptr);
+    std::string s(c);
+    env->ReleaseStringUTFChars(j, c);
+    return s;
+  };
+  spectrum_trt::Options opt;
+  opt.width = w;
+  opt.height = h;
+  opt.max_batch = std::max(1, static_cast<int>(max_batch));
+  opt.fp16 = fp16;
+  opt.cache_dir = str(jcache);
+  std::string err;
+  auto e = spectrum_trt::YoloEngine::Create(str(jpath), opt, &err);
+  if (!e) {
+    tLastError = err;
+    std::cout << "TensorRT: " << err << std::endl;
+    return 0;
+  }
+  return reinterpret_cast<jlong>(e.release());
+}
+
+JNIEXPORT jintArray JNICALL Java_org_photonvision_jni_TensorRtJNI_modelInfo(JNIEnv *env, jclass,
+                                                                           jlong ptr) {
+  auto *e = reinterpret_cast<spectrum_trt::YoloEngine *>(ptr);
+  jint v[4] = {e ? e->width() : 0, e ? e->height() : 0, e ? e->max_batch() : 0,
+               e ? e->num_classes() : 0};
+  jintArray a = env->NewIntArray(4);
+  env->SetIntArrayRegion(a, 0, 4, v);
+  return a;
+}
+
+JNIEXPORT jfloatArray JNICALL Java_org_photonvision_jni_TensorRtJNI_detectBatch(
+    JNIEnv *env, jclass, jlong ptr, jlongArray jmats, jint n, jdouble conf, jdouble iou,
+    jint max_det) {
+  auto *e = reinterpret_cast<spectrum_trt::YoloEngine *>(ptr);
+  if (!e || n < 1 || n > e->max_batch() || env->GetArrayLength(jmats) < n) return nullptr;
+  std::vector<jlong> mats(n);
+  env->GetLongArrayRegion(jmats, 0, n, mats.data());
+  std::vector<spectrum_trt::Image> ims(n);
+  for (int i = 0; i < n; ++i) {
+    auto *m = reinterpret_cast<cv::Mat *>(mats[i]);
+    if (!m || !m->data || m->rows <= 0 || m->cols <= 0 || (m->type() != CV_8UC1 && m->type() != CV_8UC3)) {
+      tLastError = "frame " + std::to_string(i) + " isn't 8-bit grey or BGR";
+      return nullptr;
+    }
+    ims[i] = {m->data, m->cols, m->rows, static_cast<int>(m->step[0]), m->channels(), false};
+  }
+  std::vector<std::vector<spectrum_trt::Detection>> out;
+  if (!e->Detect(ims.data(), n, static_cast<float>(conf), static_cast<float>(iou), max_det, &out)) {
+    tLastError = "detect failed";
+    return nullptr;
+  }
+  std::vector<float> flat;
+  for (const auto &dets : out) {
+    flat.push_back(static_cast<float>(dets.size()));
+    for (const auto &d : dets) {
+      flat.insert(flat.end(), {d.x, d.y, d.w, d.h, static_cast<float>(d.cls), d.score});
+    }
+  }
+  jfloatArray a = env->NewFloatArray(static_cast<jsize>(flat.size()));
+  env->SetFloatArrayRegion(a, 0, static_cast<jsize>(flat.size()), flat.data());
+  return a;
+}
+
+JNIEXPORT void JNICALL Java_org_photonvision_jni_TensorRtJNI_destroyModel(JNIEnv *, jclass,
+                                                                         jlong ptr) {
+  delete reinterpret_cast<spectrum_trt::YoloEngine *>(ptr);
 }
 
 }  // extern "C"

@@ -137,11 +137,20 @@ endif()
 # object-detection pipeline (TensorRtYoloJNI.cu; Java side in the photonvision-13 patch).
 find_library(NVINFER_LIB nvinfer)
 if(NVINFER_LIB)
-  add_library(spectrumtrt_jni SHARED TensorRtYoloJNI.cu)
+  # trt_yolo.cu: ONNX -> cached engine, GPU letterbox, batching, GPU decode (photonvision-100).
+  find_library(NVONNXPARSER_LIB nvonnxparser REQUIRED)
+  add_library(spectrumtrt_core OBJECT trt_yolo.cu)
+  set_target_properties(spectrumtrt_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  add_library(spectrumtrt_jni SHARED TensorRtYoloJNI.cu $<TARGET_OBJECTS:spectrumtrt_core>)
   set_target_properties(spectrumtrt_jni PROPERTIES OUTPUT_NAME spectrumtrt)
   target_include_directories(spectrumtrt_jni PRIVATE ${JNI_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
-  target_link_libraries(spectrumtrt_jni PRIVATE ${NVINFER_LIB} CUDA::cudart ${JNI_LIBRARIES})
+  target_link_libraries(spectrumtrt_jni PRIVATE ${NVINFER_LIB} ${NVONNXPARSER_LIB} CUDA::cudart
+                                                ${JNI_LIBRARIES} ${CMAKE_DL_LIBS})
   target_link_options(spectrumtrt_jni PRIVATE -Wl,--no-undefined)
+  # The bench tool (tests/object-detection): build alone with --target trt_yolo_bench.
+  add_executable(trt_yolo_bench trt_yolo_bench.cc $<TARGET_OBJECTS:spectrumtrt_core>)
+  target_link_libraries(trt_yolo_bench PRIVATE ${NVINFER_LIB} ${NVONNXPARSER_LIB} CUDA::cudart
+                                               ${CMAKE_DL_LIBS})
 else()
   message(STATUS "TensorRT (libnvinfer) not found: skipping libspectrumtrt.so")
 endif()
