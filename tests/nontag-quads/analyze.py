@@ -14,7 +14,6 @@ import collections
 import csv
 import glob
 import os
-import statistics
 
 ap = argparse.ArgumentParser()
 ap.add_argument("out")

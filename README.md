@@ -646,7 +646,8 @@ PhotonVision runs YOLO models (YOLOv8 / YOLO11, exported to ONNX) on the Jetson'
 
   At 15-30 objects a second per camera, the tags hardly notice (+0.2-0.3 ms). Don't run "every frame": it adds 1.3 ms to the tags and runs hot.
 - **Train your own model** on our cameras' frames (from Rewind recordings), with about half the training images turned gray so one model works on both mono and colour cameras: [docs/OBJECT-DETECTION.md](docs/OBJECT-DETECTION.md). The 2026 FUEL models are in [docs/GAME-PIECE-MODELS.md](docs/GAME-PIECE-MODELS.md). Their 2026 engines don't load on JetPack 7, so re-install them from the ONNX.
-- **When the GPU runs short:** first lower Tag FPS max on the side cameras, then try the GPU offload ladder (`08-select-detector.sh gpu --gpu-level list`). [TECHNICAL.md](docs/TECHNICAL.md#gpu-offload-ladder-08-select-detectorsh---gpu-level-n-2026-10-31) explains both.
+- **When the GPU runs short:** first lower Tag FPS max on the side cameras, then try the GPU offload ladder (`08-select-detector.sh gpu --gpu-level list`). Last, switch on **Tags on CPU (NAPA)** in the AprilTag + Object pipeline: the tags move to the CPU, and the GPU is left to object detection (63% to 42% GPU with 2 cameras and yolo11n at 30 fps, the same tag latency). [TECHNICAL.md](docs/TECHNICAL.md#gpu-offload-ladder-08-select-detectorsh---gpu-level-n-2026-10-31) explains all three.
+- **NAPA** (by Zachary Wilson) is a fast CPU AprilTag detector. Use **Detector: NAPA** in the AprilTag pipeline on the SystemCore or other CPU-only computers. It finds more tags than AprilTag 3 for 1/7 of the CPU. Install `libspectrum-napa-apriltag.so` with `scripts/jetson/07-build-napa-detector.sh`. [TECHNICAL.md](docs/TECHNICAL.md#napa-apriltags-on-the-cpu-photonvision-101-detectornapa-2026-11-01).
 
 ## Known issues
 

@@ -11,6 +11,9 @@
 #                                        the TensorRT batch stats and tegrastats. Restores the
 #                                        settings DB and leaves PhotonVision as it found it.
 #                                        TAG_FPS=N sets every camera's Tag FPS max (default 0).
+#                                        TAGS_ON_CPU=1: "Tags on CPU (NAPA)" in both pipeline types
+#                                        (NAPA min tag px 16, max hamming 1; NAPA_FAR=1 adds its far
+#                                        search). Also logs PhotonVision's CPU use (cores).
 # Every step has a hard timeout and says TIMEOUT if it hits it.
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -70,15 +73,18 @@ case ${1:-} in
     name=$(basename "${model%.onnx}")
     set_pipelines() {  # set_pipelines TYPE OBJFPS
       sudo -n systemctl stop photonvision
-      sudo -n python3 - "$PVDB" "$1" "$2" "$CONFIG/models/$name.onnx" "$labels" "${TAG_FPS:-0}" <<'PY'
+      sudo -n python3 - "$PVDB" "$1" "$2" "$CONFIG/models/$name.onnx" "$labels" "${TAG_FPS:-0}" \
+        "${TAGS_ON_CPU:-0}" "${NAPA_FAR:-0}" <<'PY'
 import json, sqlite3, sys
-db, kind, objfps, path, labels, tagfps = sys.argv[1:7]
+db, kind, objfps, path, labels, tagfps, oncpu, napafar = sys.argv[1:9]
 c = sqlite3.connect(db)
 for uid, contents in c.execute("select unique_name, contents from cameras").fetchall():
     d = json.loads(contents)
     for p in d["pipelineSettings"]:
         if p.get("pipelineIndex") != d.get("currentPipelineIndex"): continue
         p["tagFpsMax"] = int(tagfps)
+        p.update(tagsOnCpu=oncpu == "1", napaMinTagPx=16, napaMaxHamming=1, napaFarSearch=napafar == "1",
+                 napaFarMinTagPx=16)
         if kind == "AprilTagObject":
             p["type"], p["pipelineType"] = "AprilTagObjectPipelineSettings", "AprilTagObject"
             p.update(confidence=0.5, nms=0.45, objectFpsMax=int(objfps), objectClasses="", objectMaxTargets=20,
@@ -94,8 +100,11 @@ PY
     measure() {  # measure NAME
       local since; sleep 45  # start-up, camera open, engine load (cached)
       since=$(date '+%Y-%m-%d %H:%M:%S')
+      local pid t0 t1 hz; pid=$(systemctl show -p MainPID --value photonvision); hz=$(getconf CLK_TCK)
+      t0=$(awk '{print $14 + $15}' "/proc/$pid/stat" 2>/dev/null || echo 0)
       sudo -n tegrastats --interval 500 --logfile "$OUT/live-$1.tegra" &
       sleep "$secs"
+      t1=$(awk '{print $14 + $15}' "/proc/$pid/stat" 2>/dev/null || echo 0)
       sudo -n tegrastats --stop; sleep 1
       journalctl -u photonvision --since "$since" --no-pager > "$OUT/live-$1.journal"
       echo "== $1"
@@ -103,6 +112,7 @@ PY
       grep -E "TensorRT .*frames in" "$OUT/live-$1.journal" | sed -E 's/.*(TensorRT .*)/  \1/' | tail -2
       grep -E "TensorRT|Exception" "$OUT/live-$1.journal" | grep -i -E "fail|exception" | head -3
       echo "  $(tegra_summary "$OUT/live-$1.tegra")"
+      echo "  PhotonVision CPU $(awk -v a="$t0" -v b="$t1" -v hz="$hz" -v s="$secs" 'BEGIN{printf "%.2f", (b - a) / hz / s}') cores"
     }
     set_pipelines AprilTagCuda 0; timeout $((secs + 120)) bash -c "$(declare -f measure tegra_summary); OUT=$OUT secs=$secs measure baseline" || echo "TIMEOUT: baseline"
     for f in "$@"; do

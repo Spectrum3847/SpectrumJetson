@@ -2387,6 +2387,12 @@ Individual flags given as well (`--gpu-refine`, `--graphs`, `--chain`, `--far`) 
   fixed schedule (every 1/max s), so 60 means 60, not ~48. Idle mode (30 fps) and deep idle (5 fps)
   still apply; the lower rate wins. Default 0 = every frame (unchanged). Object Detection pipelines
   have the same cap as "Object FPS max" (default 30 on the Jetson).
+- **Off the ladder, below it: Tags on CPU (NAPA)** (`photonvision-101`, per pipeline: AprilTag + Object
+  and CUDA AprilTag tabs). The tags move entirely to the CPU, on NAPA (next section), and the GPU detector
+  isn't run, so the GPU is left to TensorRT. Live, with 2 cameras at 122 fps and yolo11n at 30 fps, GPU use went
+  from 63% to 42%, and tags only from 33% to 4%. Tag latency was the same or better, and about 0.2 cores more
+  CPU. Use it when Tag FPS max and the ladder aren't enough, or when objects matter more than the GPU detector's
+  extra range: GPU far search, masks and edge refinement don't apply.
 - **Not on the ladder: JPEG decode.** `--jpeg nvjpg` decodes on the two NVJPG engines, which are not
   the GPU, so it doesn't compete with TensorRT. `--jpeg turbo` (or `echo turbo >
   /tmp/spectrum-jpeg-decoder`, live) moves it to the CPU: measured 0.52 → 0.85 cores for 2 cameras
@@ -2401,6 +2407,64 @@ Individual flags given as well (`--gpu-refine`, `--graphs`, `--chain`, `--far`) 
   calibration check. It replaced the `gpurefine` step (that name still runs it). Every
   measurement now has power: tegrastats `VDD_IN` (board) and `VDD_CPU_GPU_CV` (CPU+GPU rail),
   average and max, W.
+
+#### NAPA: AprilTags on the CPU (`photonvision-101`, `detector/napa`, 2026-11-01)
+
+NAPA (github.com/zwatx/NAPA, by **Zachary Wilson**, GPL-3.0-only with a section 7(b) credit term) is a
+sparse-sampling CPU AprilTag detector. `tests/napa-eval` evaluated it on all of TXMAN1, and it is now a
+backend of the fork:
+- **Library:** `third_party/napa` (v0.5.1, `de613ad`, unmodified) + `detector/napa/` → `libspectrum-napa-apriltag.so`
+  (`scripts/jetson/07-build-napa-detector.sh`; plain gcc, no CUDA/OpenCV/WPILib).
+  - Builds for the Jetson and SystemCore (aarch64; cross with WPILib's `aarch64-bookworm-linux-gnu`
+    toolchain) and for x86_64 (glibc 2.35, cross with `x86_64-linux-gnu-g++`). `napa_test` passes on all three.
+  - Install to `/usr/lib`. Without it, the NAPA options log once and keep the normal detector.
+- **Handles:** one per camera (`napa_far::Detector`), each with its own lock. NAPA has no internal threads, so
+  a camera's detect is one core's time. There is no "threads" setting: more cameras use more cores.
+- **Corners:** AprilTag's order (`p0` = tag (−1,1) ... `p3` = (−1,−1)) in OpenCV's pixel convention, with the
+  homography solved from the 4 corners and the centre from it. That is what the GPU detector's JNI returns, so
+  PhotonVision's single-tag pose, multi-tag, TagQuality and TagContrast paths take the results unchanged. NAPA
+  reports OpenCV's corner order, so the conversion is the permutation {1,0,3,2}. On a rendered tag the
+  corners are within 0.002 px (`napa_test`).
+- **Fork settings** (all off by default):
+  - AprilTag pipeline: **Detector: NAPA** (AprilTag 3 stays the default and the switch). Decimate, blur,
+    threads and refine edges are AprilTag 3's and don't apply. The low-CPU half-res decode keeps AprilTag 3.
+  - CUDA and AprilTag + Object pipelines: **Tags on CPU (NAPA)**.
+  - Both: **NAPA min tag px** (16), **NAPA max hamming** (1, which replaces the hamming filter),
+    **NAPA far search** (off), **NAPA far min tag px** (16).
+  - Tag FPS max and idle rates apply as before, and decision margin filters as before.
+  - The 7(b) credit is on the Settings > Device card and in `ExternalLicenses/NAPA-License`.
+- **Far search** (`napa_far.cc`): the full frame at min 32 every frame, and min 16 in tracking crops around
+  tags under 48 px (6x side) and in one capped sweep band (of 4, ≤ 60/s, time guard 5x). It is a small port of
+  `far_search.cc`'s crop tracking, sweep schedule and time guard, because that file is tied to the 971
+  detector's upscaling and structures.
+- **TXMAN1** (`tests/napa-eval` section 6, base = GPU detector with far search, 39,844 sightings; one A78AE
+  thread):
+
+  | | Sightings | Bad | Range p99 | ms/frame mean (p95) |
+  | --- | --- | --- | --- | --- |
+  | NAPA min 32 | 34,625 | 12.0% | 7.31 m | 0.49 (0.61) |
+  | NAPA min 16 | 44,954 (+12.8%) | 11.5% | 7.89 m | 2.34 (2.70) |
+  | NAPA far search | 43,057 (+8.1%) | 11.2% | 7.86 m | 1.25 (1.64) |
+  | AprilTag 3 decimate 2 | 38,916 | 11.6% | 7.73 m | 17.2 (21.8) |
+
+  Median in-frame error and static jitter are the GPU detector's. The p75 in-frame tail is ~0.2 px worse.
+- **Live on the Jetson** (`tests/object-detection/run.sh live` with `TAGS_ON_CPU=0/1`, 2 Thriftiest cams at
+  1280x800 122 fps, clocks auto, 60 s each, NVJPG decode in both, no tags in view):
+
+  | | Tag latency p50 / p95 | GPU | PhotonVision CPU | Board power | tj |
+  | --- | --- | --- | --- | --- | --- |
+  | GPU detector, tags only | 19.7 / 23.2 ms | 33% | 1.85 cores | 7.7 W | 71 °C |
+  | NAPA on CPU, tags only | 19.9 / 21.9 ms | 4% | 1.82 cores | 7.2 W | 72 °C |
+  | GPU detector + yolo11n at 30 fps | 18.4 / 24.2 ms | 63% | 2.00 cores | 10.4 W | 74 °C |
+  | NAPA on CPU + yolo11n at 30 fps | 19.1 / 21.0 ms | 42% | 2.23 cores | 9.9 W | 74 °C |
+
+  - With NAPA, YOLO's batches took 10.3 ms instead of 12.9 ms, and their queue wait dropped from 4.4 to 2.7 ms.
+  - The p95 tag latency is ~1-3 ms better, because the CPU detector doesn't wait behind TensorRT for the GPU.
+  - Cost: up to ~0.2 cores (min 16, every frame, no tags in view). Expect more with tags and clutter; the
+    replay's 2.3 ms per frame is ~0.28 cores per camera at 122 fps.
+  - Not yet measured live with tags in view.
+- **SystemCore / CM5:** the same library is the CPU detector the 2027 robot should use, with min 16, or with far
+  search when CPU is short. Confirm on a real CM5 (`tests/napa-eval` section 4 caveats).
 
 #### The decode in float (`detector-18`, off by default)
 
