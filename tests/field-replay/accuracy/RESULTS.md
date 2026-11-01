@@ -198,3 +198,20 @@ bad (base 4,143). Static jitter unchanged (0.084 → 0.085 px, n.s.).
 - **Verdict: don't build it.** +5% sightings (+1,400 over far search) for ~+50% detect time and a
   detector rework, with no range gain. The far search already gets the small/far tags more cheaply
   and more accurately.
+
+## Checkpoint 6: NAPA and AprilTag 3 on the CPU (2026-11-01)
+
+The full study is in `tests/napa-eval/README.md`. The same judge was run against the installed GPU
+detector with far search on (`d15s_far`, 39,844 sightings), over all 13 sessions:
+
+| Variant | Sightings | Common in-frame p50 / p75 change (CI) | Gained: median in-frame | Jitter | CPU ms/frame (A78AE, 1 thread) |
+|---|---|---|---|---|---|
+| NAPA min_tag_px 32 (its default) | 34,625 | +0.018 (n.s.) / +0.22 (+0.09..+0.32) | 6.79 px (poor) | 0.084 | 0.48 |
+| NAPA min_tag_px 16 | 44,954 | +0.012 (n.s.) / +0.18 (+0.08..+0.28) | 2.23 px | 0.085 | 2.38 |
+| AprilTag 3, decimate 2 | 38,916 | −0.010 (−0.026..0.000) / +0.06 (n.s.) | 16.5 px (poor) | 0.073 | 17.2 |
+| AprilTag 3, decimate 1 | 42,182 | −0.010 (n.s.) / +0.08 (n.s.) | 1.52 px | 0.070 | ~62 (20.8 with 4 threads) |
+
+- NAPA min 16 has the median accuracy and jitter of the GPU detector and AprilTag, a slightly worse
+  tail, and the most sightings, and it is 7x faster than AprilTag decimate 2.
+- Recommendation: NAPA (min 16, hamming 1) for CPU targets.
+- Flat tiles are only ~40% of real frames, so tile compaction is not worth building in the GPU detector.

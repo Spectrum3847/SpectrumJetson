@@ -1,0 +1,36 @@
+327:=== d15s_far vs napa: size and range (far sightings included; good / bad by robot pose, in-frame)
+328-  only d15s_far: 7083 (good 5550, bad 703); side px p10/p50/p90 20.6/33.3/60.3, range m p50/p90/max 3.56/7.17/9.24; in-frame 3645 checked, 191 bad, p50 1.35 px
+329-  only napa: 1864 (good 1100, bad 426); side px p10/p50/p90 21.2/34.8/70.8, range m p50/p90/max 3.05/6.66/8.60; in-frame 787 checked, 176 bad, p50 6.79 px
+330-  d15s_far: 39844 sightings, good 29043, bad 4242; good side p1 18.5 px, min 15.7; range p99 7.72 m, max 9.24 m
+331-  napa: 34625 sightings, good 23640, bad 4162; good side p1 20.2 px, min 16.5; range p99 7.31 m, max 8.60 m
+332-
+333:=== d15s_far vs napa22: size and range (far sightings included; good / bad by robot pose, in-frame)
+334-  only d15s_far: 1982 (good 1459, bad 252); side px p10/p50/p90 21.1/31.3/63.0, range m p50/p90/max 3.90/7.17/8.26; in-frame 695 checked, 28 bad, p50 1.24 px
+335-  only napa22: 3032 (good 2013, bad 557); side px p10/p50/p90 18.6/30.5/65.7, range m p50/p90/max 3.53/7.71/9.41; in-frame 1526 checked, 264 bad, p50 4.39 px
+336-  d15s_far: 39844 sightings, good 29043, bad 4242; good side p1 18.5 px, min 15.7; range p99 7.72 m, max 9.24 m
+337-  napa22: 40894 sightings, good 29432, bad 4873; good side p1 17.7 px, min 15.4; range p99 7.90 m, max 9.41 m
+338-
+339:=== d15s_far vs napa16: size and range (far sightings included; good / bad by robot pose, in-frame)
+340-  only d15s_far: 584 (good 311, bad 157); side px p10/p50/p90 23.2/46.0/159.6, range m p50/p90/max 2.89/5.50/8.26; in-frame 219 checked, 10 bad, p50 2.43 px
+341-  only napa16: 5694 (good 4254, bad 829); side px p10/p50/p90 19.6/32.4/58.0, range m p50/p90/max 3.47/7.27/9.40; in-frame 3184 checked, 353 bad, p50 2.23 px
+342-  d15s_far: 39844 sightings, good 29043, bad 4242; good side p1 18.5 px, min 15.7; range p99 7.72 m, max 9.24 m
+343-  napa16: 44954 sightings, good 33371, bad 5171; good side p1 17.4 px, min 15.4; range p99 7.89 m, max 9.40 m
+344-
+345:=== d15s_far vs napa_h3: size and range (far sightings included; good / bad by robot pose, in-frame)
+346-  only d15s_far: 361 (good 146, bad 141); side px p10/p50/p90 28.7/82.4/299.1, range m p50/p90/max 1.39/4.24/8.26; in-frame 142 checked, 6 bad, p50 2.40 px
+347-  only napa_h3: 7635 (good 5771, bad 1048); side px p10/p50/p90 18.1/29.4/55.2, range m p50/p90/max 3.85/7.78/9.68; in-frame 4386 checked, 476 bad, p50 2.36 px
+348-  d15s_far: 39844 sightings, good 29043, bad 4242; good side p1 18.5 px, min 15.7; range p99 7.72 m, max 9.24 m
+349-  napa_h3: 47118 sightings, good 35196, bad 5457; good side p1 16.5 px, min 14.2; range p99 8.06 m, max 9.68 m
+350-
+351:=== d15s_far vs at3_d2: size and range (far sightings included; good / bad by robot pose, in-frame)
+352-  only d15s_far: 1597 (good 1255, bad 151); side px p10/p50/p90 21.0/24.6/45.6, range m p50/p90/max 4.89/7.23/8.71; in-frame 495 checked, 18 bad, p50 1.14 px
+353-  only at3_d2: 669 (good 316, bad 240); side px p10/p50/p90 19.2/32.3/78.8, range m p50/p90/max 2.28/7.10/8.75; in-frame 342 checked, 123 bad, p50 16.46 px
+354-  d15s_far: 39844 sightings, good 29043, bad 4242; good side p1 18.5 px, min 15.7; range p99 7.72 m, max 9.24 m
+355-  at3_d2: 38916 sightings, good 27889, bad 4522; good side p1 18.5 px, min 15.4; range p99 7.73 m, max 9.15 m
+356-
+357:=== d15s_far vs at3_d1: size and range (far sightings included; good / bad by robot pose, in-frame)
+358-  only d15s_far: 1213 (good 714, bad 225); side px p10/p50/p90 21.7/49.1/141.2, range m p50/p90/max 2.70/5.46/8.71; in-frame 458 checked, 24 bad, p50 3.27 px
+359-  only at3_d1: 3551 (good 2735, bad 486); side px p10/p50/p90 21.1/34.1/54.8, range m p50/p90/max 3.23/7.00/9.43; in-frame 2027 checked, 217 bad, p50 1.52 px
+360-  d15s_far: 39844 sightings, good 29043, bad 4242; good side p1 18.5 px, min 15.7; range p99 7.72 m, max 9.24 m
+361-  at3_d1: 42182 sightings, good 31339, bad 4627; good side p1 18.3 px, min 15.8; range p99 7.77 m, max 9.43 m
+362-ALLDONE
