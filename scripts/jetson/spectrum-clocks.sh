@@ -9,19 +9,24 @@
 #   - spectrum-clocks-guard (every 15 s): `guard` below.
 #
 #   spectrum-clocks throttle   CPU and GPU min to their lowest step, max to THROTTLE_CPU_KHZ /
-#                              THROTTLE_GPU_HZ (default 1190.4 / 612 MHz). Saves the locked maxima
-#                              in /run/spectrum-clocks-throttled first; while that file exists
+#                              THROTTLE_GPU_HZ (default 1190.4 / 612 MHz). Creates the flag
+#                              /run/spectrum-clocks-throttled; while that file exists
 #                              spectrum-clocks-guard leaves the clocks alone. Does nothing when the
 #                              mode is "full".
-#   spectrum-clocks full       Back to min = max = the saved maxima (what jetson_clocks set),
-#                              written straight to sysfs (milliseconds); /usr/bin/jetson_clocks if
-#                              nothing was saved. Removes the flag. Safe to run any time.
+#   spectrum-clocks full       Back to what jetson_clocks sets, written straight to sysfs (ms):
+#                              GPU and every CPU policy min = max = the highest available
+#                              frequency (read from the hardware every time, never from a saved
+#                              file: a value saved while already lowered left the robot at 612 MHz,
+#                              2026-11-01), EMC min = EMC max, all CPU idle states disabled, deep's
+#                              cores online. Then checks every domain and logs loudly (journal,
+#                              priority err) and falls back to /usr/bin/jetson_clocks if any is
+#                              short. Removes the flags. Safe to run any time.
 #   spectrum-clocks deep       The deep idle tier (photonvision-99: no robot connected, no web UI
 #                              client or stream viewer for 5 min; or PhotonVision stopped 5 min):
 #                              throttle, then CPU max DEEP_CPU_KHZ (729.6 MHz), GPU max
 #                              DEEP_GPU_HZ (306 MHz), EMC min to its lowest step (dynamic instead
 #                              of locked at 3199 MHz), CPU idle states (WFI, c7) on, and cores
-#                              DEEP_OFFLINE_CPUS (2 3 4) offline. Saved in /run/spectrum-clocks-deep.
+#                              DEEP_OFFLINE_CPUS (2 3 4) offline. Flag /run/spectrum-clocks-deep.
 #                              Not in mode full or shallow.
 #                              Restore (full, or throttle back to the shallow tier): clocks first
 #                              (ms), then EMC and idle states (ms), then the cores (~tens of ms).
@@ -72,15 +77,8 @@ throttle() { # [cpu_khz gpu_hz]: the caps (default the shallow tier's)
   [[ $(mode) == full ]] && { echo "mode is full: not throttling"; return 0; }
   # From deep back to the shallow tier: cores, EMC, idle states back first.
   [[ -z ${1:-} && -f $DEEP ]] && undeep
-  if [[ ! -f $FLAG ]]; then
-    # The maxima to go back to: what jetson_clocks locked, before we lower anything. Only when they
-    # are locked (min = max): clocks lowered some other way (by hand) leave the flag empty, and
-    # `full` runs jetson_clocks instead.
-    if unlocked; then : >"$FLAG"; else {
-      [[ -n $G ]] && echo "gpu $(cat "$G/max_freq")"
-      for c in "${CPUS[@]}"; do echo "cpu $c $(cat "$c/scaling_max_freq")"; done
-    } >"$FLAG.tmp" && mv "$FLAG.tmp" "$FLAG"; fi
-  fi
+  # Only a marker: `full` reads the maxima from the hardware, so nothing lowered is ever saved.
+  [[ -f $FLAG ]] || : >"$FLAG"
   if [[ -n $G ]]; then
     local av; av=$(cat "$G/available_frequencies")
     set_pair "$G" min_freq max_freq "$(lowest "$av")" "$(at_most "$av" "$gpu_cap")"
@@ -92,37 +90,60 @@ throttle() { # [cpu_khz gpu_hz]: the caps (default the shallow tier's)
   done
 }
 
-# Something below its maximum lock: the GPU or a CPU with min < max.
-unlocked() {
-  [[ -n $G && $(cat "$G/min_freq") -lt $(cat "$G/max_freq") ]] && return 0
-  local c
-  for c in "${CPUS[@]}"; do [[ -r $c/scaling_min_freq && $(cat "$c/scaling_min_freq") -lt $(cat "$c/scaling_max_freq") ]] && return 0; done
-  return 1
+highest() { local v t=; for v in $1; do [[ $v =~ ^[0-9]+$ ]] && (( v > ${t:-0} )) && t=$v; done; echo "$t"; }  # builtins: ms
+
+# GPU and every CPU policy: min = max = the highest available frequency.
+lock_max() {
+  local p top
+  if [[ -n $G ]]; then top=$(highest "$(cat "$G/available_frequencies")"); set_pair "$G" min_freq max_freq "$top" "$top"; fi
+  for p in /sys/devices/system/cpu/cpufreq/policy*; do
+    [[ -r $p/scaling_available_frequencies ]] || continue
+    top=$(highest "$(cat "$p/scaling_available_frequencies")")
+    [[ -n $top ]] || top=$(cat "$p/cpuinfo_max_freq")
+    set_pair "$p" scaling_min_freq scaling_max_freq "$top" "$top"
+  done
+}
+
+# What is short of full, one line per domain; empty when everything is at its maximum.
+short_of_max() {
+  local p top f
+  if [[ -n $G ]]; then
+    top=$(highest "$(cat "$G/available_frequencies")")
+    [[ $(cat "$G/min_freq") == "$top" && $(cat "$G/max_freq") == "$top" ]] || echo "GPU min $(cat "$G/min_freq") max $(cat "$G/max_freq"), want $top"
+  fi
+  for p in /sys/devices/system/cpu/cpufreq/policy*; do
+    [[ -r $p/scaling_available_frequencies ]] || continue
+    top=$(highest "$(cat "$p/scaling_available_frequencies")")
+    [[ $(cat "$p/scaling_min_freq") == "$top" && $(cat "$p/scaling_max_freq") == "$top" ]] || echo "${p##*/} min $(cat "$p/scaling_min_freq") max $(cat "$p/scaling_max_freq"), want $top"
+  done
+  [[ -r $EMC/min_freq && $(cat "$EMC/min_freq") != "$(cat "$EMC/max_freq")" ]] && echo "EMC min $(cat "$EMC/min_freq"), want $(cat "$EMC/max_freq")"
+  for f in /sys/devices/system/cpu/cpu[0-9]*/cpuidle/state[0-9]*/disable; do
+    [[ -r $f && $(cat "$f") != 1 ]] && { echo "idle state enabled: $f"; break; }
+  done
+  for p in $DEEP_OFFLINE_CPUS; do
+    [[ -r /sys/devices/system/cpu/cpu$p/online && $(cat "/sys/devices/system/cpu/cpu$p/online") != 1 ]] && echo "cpu$p offline"
+  done
 }
 
 full() {
-  if [[ -f $DEEP && ! -s $FLAG ]]; then undeep; fi
-  if [[ ! -s $FLAG ]]; then
-    # Nothing saved: jetson_clocks, unless already locked.
-    rm -f "$FLAG"
-    if unlocked; then /usr/bin/jetson_clocks; fi
-    return 0
+  local t0=$EPOCHREALTIME t1 bad
+  lock_max                 # clocks first (ms)
+  t1=$EPOCHREALTIME
+  undeep                   # EMC, idle states, cores
+  lock_max                 # a policy whose cores were all offline is back now
+  rm -f "$FLAG" "$DEEP"
+  bad=$(short_of_max)
+  if [[ -n $bad ]]; then
+    logger -p daemon.err -t spectrum-clocks "FULL FAILED, not at max: ${bad//$'\n'/; } - running jetson_clocks"
+    echo "full: NOT at max: $bad" >&2
+    /usr/bin/jetson_clocks
+    bad=$(short_of_max)
+    if [[ -n $bad ]]; then
+      logger -p daemon.crit -t spectrum-clocks "STILL NOT AT MAX after jetson_clocks: ${bad//$'\n'/; }"
+      echo "full: still not at max: $bad" >&2; return 1
+    fi
   fi
-  local ok=1 kind a b t0=$EPOCHREALTIME t1
-  while read -r kind a b; do
-    case $kind in
-      gpu) [[ -n $G ]] && { set_pair "$G" min_freq max_freq "$a" "$a" || ok=0; } ;;
-      cpu) set_pair "$a" scaling_min_freq scaling_max_freq "$b" "$b" || ok=0 ;;
-    esac
-  done <"$FLAG"
-  rm -f "$FLAG"
-  # Clocks are back (milliseconds); now the deep tier's slower parts.
-  if [[ -f $DEEP ]]; then
-    t1=$EPOCHREALTIME
-    undeep
-    echo "full: clocks in $(ms "$t0" "$t1") ms, then EMC/idle states/cores in $(ms "$t1" "$EPOCHREALTIME") ms"
-  fi
-  (( ok )) || /usr/bin/jetson_clocks
+  echo "full: clocks in $(ms "$t0" "$t1") ms, all in $(ms "$t0" "$EPOCHREALTIME") ms"
 }
 
 ms() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.1f", (b - a) * 1000 }'; }
@@ -130,47 +151,45 @@ ms() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.1f", (b - a) * 1000 }'; }
 # photonvision-99: the deep idle tier, on top of throttle.
 deep() {
   [[ $(mode) != auto ]] && { echo "mode is $(mode): not going deep"; return 0; }
-  if [[ ! -f $DEEP ]]; then
-    {
-      [[ -r $EMC/min_freq ]] && echo "emc $(cat "$EMC/min_freq")"
-      local f
-      for f in /sys/devices/system/cpu/cpu[0-9]*/cpuidle/state*/disable; do
-        [[ $(cat "$f") == 1 ]] && echo "idle $f"
-      done
-    } >"$DEEP.tmp" && mv "$DEEP.tmp" "$DEEP"
-  fi
+  [[ -f $DEEP ]] || : >"$DEEP"   # a marker; undeep restores the maxima, not saved values
   throttle "$DEEP_CPU_KHZ" "$DEEP_GPU_HZ"
   if [[ -w $EMC/min_freq ]]; then lowest "$(cat "$EMC/available_frequencies")" >"$EMC/min_freq"; fi
   local f n
-  while read -r kind f; do [[ $kind == idle ]] && echo 0 >"$f"; done <"$DEEP"
+  for f in /sys/devices/system/cpu/cpu[0-9]*/cpuidle/state[0-9]*/disable; do [[ -w $f ]] && echo 0 >"$f"; done
   for n in $DEEP_OFFLINE_CPUS; do
     f=/sys/devices/system/cpu/cpu$n/online
-    if [[ -w $f && $(cat "$f") == 1 ]] && echo 0 >"$f"; then echo "offline cpu$n" >>"$DEEP"; fi
+    [[ -w $f && $(cat "$f") == 1 ]] && echo 0 >"$f"
   done
 }
 
+# Out of deep, to what jetson_clocks sets: EMC min = max and idle states disabled (sysfs, ms), then
+# deep's cores online (each ~10-50 ms). Runs whether or not deep's flag exists. A core coming online
+# gets its idle states disabled after, so they are written again.
 undeep() {
-  local kind a ok=1 t0=$EPOCHREALTIME t1
-  # EMC and idle states first (sysfs writes, ms), cores last (each ~10-50 ms).
-  while read -r kind a; do
-    case $kind in
-      emc) echo "$a" >"$EMC/min_freq" || ok=0 ;;
-      idle) echo 1 >"$a" || ok=0 ;;
-    esac
-  done <"$DEEP"
+  local f n ok=1 t0=$EPOCHREALTIME t1 on=0
+  [[ -w $EMC/min_freq ]] && { cat "$EMC/max_freq" >"$EMC/min_freq" || ok=0; }
+  for f in /sys/devices/system/cpu/cpu[0-9]*/cpuidle/state[0-9]*/disable; do
+    [[ -w $f && $(cat "$f") != 1 ]] && { echo 1 >"$f" || ok=0; }
+  done
   t1=$EPOCHREALTIME
-  while read -r kind a; do
-    [[ $kind == offline ]] && { echo 1 >"/sys/devices/system/cpu/$a/online" || ok=0; }
-  done <"$DEEP"
+  for n in $DEEP_OFFLINE_CPUS; do
+    f=/sys/devices/system/cpu/cpu$n/online
+    [[ -w $f && $(cat "$f") != 1 ]] && { echo 1 >"$f" && on=1 || ok=0; }
+  done
+  if (( on )); then
+    for f in /sys/devices/system/cpu/cpu[0-9]*/cpuidle/state[0-9]*/disable; do
+      [[ -w $f && $(cat "$f") != 1 ]] && { echo 1 >"$f" || ok=0; }
+    done
+  fi
   rm -f "$DEEP"
-  echo "undeep: EMC + idle states $(ms "$t0" "$t1") ms, cores $(ms "$t1" "$EPOCHREALTIME") ms"
+  (( on )) && echo "undeep: EMC + idle states $(ms "$t0" "$t1") ms, cores $(ms "$t1" "$EPOCHREALTIME") ms"
   (( ok ))
 }
 
 PV_SINCE=/run/spectrum-clocks-pv-inactive-since
 guard() {
   if [[ $(mode) == full ]]; then
-    if [[ -f $FLAG ]] || unlocked; then logger -t spectrum-clocks "mode full: locking the clocks"; full; fi
+    if [[ -f $FLAG || -f $DEEP || -n $(short_of_max) ]]; then logger -t spectrum-clocks "mode full: locking the clocks"; full; fi
     return 0
   fi
   if [[ $(mode) == shallow && -f $DEEP ]]; then logger -t spectrum-clocks "mode shallow: leaving deep idle"; throttle; fi
@@ -193,15 +212,10 @@ guard() {
     return 0
   fi
   if [[ -f $FLAG ]]; then return 0; fi   # PhotonVision lowered them on purpose (robot disabled)
-  local low=""
-  [[ -n $G && $(cat "$G/min_freq") -lt $(cat "$G/max_freq") ]] && low+=" GPU min $(( $(cat "$G/min_freq") / 1000000 )) MHz"
-  local c
-  for c in "${CPUS[@]}"; do
-    [[ $(cat "$c/scaling_min_freq") -lt $(cat "$c/scaling_max_freq") ]] && { low+=" CPU min $(( $(cat "$c/scaling_min_freq") / 1000 )) MHz"; break; }
-  done
+  local low; low=$(short_of_max)
   [[ -z $low ]] && return 0
-  logger -t spectrum-clocks "clocks were unlocked ($low ); locking again"
-  /usr/bin/jetson_clocks
+  logger -t spectrum-clocks "clocks were unlocked (${low//$'\n'/; }); locking again"
+  full
 }
 
 status() {
