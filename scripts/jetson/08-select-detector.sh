@@ -90,6 +90,10 @@ Without detector-18 built, level 5 falls back to refine 3 (detector-17, double-p
 2133 us wall, ~+340 us GPU); --gpu-level 5 --gpu-refine 3 forces that (bit-exact decode margins).
 Not on the ladder: JPEG decode runs on the NVJPG engines, not the GPU (--jpeg nvjpg); --jpeg turbo
 decodes on the CPU instead (~+0.16 cores per camera, measured 0.52 -> 0.85 cores for 2 cameras).
+The biggest lever of all, before any level: "Tag FPS max" (per pipeline, AprilTag tab; photonvision-100).
+Processing a camera at 60 instead of 122 fps halves its detector GPU, CPU and JPEG decode (skipped
+frames are never decoded) with no change to the camera mode or per-frame latency; e.g. 122 front, 60
+sides. Idle mode's lower rate still wins while disabled. Object models: "Object FPS max".
 EOF2
 }
 for a in "$@"; do [[ $a == list ]] && { level_list; exit 0; }; done

@@ -2378,6 +2378,15 @@ Individual flags given as well (`--gpu-refine`, `--graphs`, `--chain`, `--far`) 
   `GPU_REFINE=3` (`detector-17`); `--gpu-level 5 --gpu-refine 3` (bench `ladder` level `5d`) forces it.
 - **Recommended default:** level 5 (or 4 if the GPU is short) once the bench `ladder` step confirms it live (best wall time,
   −60% CPU on calibrated cameras). Until then 3.
+- **Before the ladder: Tag FPS max** (`photonvision-100`, per pipeline: AprilTag tab, and the
+  AprilTag + Object pipeline). It caps how many frames a second the camera processes without
+  changing the camera mode. Skipped frames are never grabbed, so they aren't decoded either. Every
+  per-frame cost (detector GPU, worker CPU, NVJPG or CPU decode) scales with it: 122 → 60 fps on a
+  side camera roughly halves that camera's share, which is far more than any ladder step frees. The
+  per-frame latency doesn't change (each processed frame is still the newest). Frames are taken on a
+  fixed schedule (every 1/max s), so 60 means 60, not ~48. Idle mode (30 fps) and deep idle (5 fps)
+  still apply; the lower rate wins. Default 0 = every frame (unchanged). Object Detection pipelines
+  have the same cap as "Object FPS max" (default 30 on the Jetson).
 - **Not on the ladder: JPEG decode.** `--jpeg nvjpg` decodes on the two NVJPG engines, which are not
   the GPU, so it doesn't compete with TensorRT. `--jpeg turbo` (or `echo turbo >
   /tmp/spectrum-jpeg-decoder`, live) moves it to the CPU: measured 0.52 → 0.85 cores for 2 cameras
@@ -2596,6 +2605,137 @@ thread):
   the layout every 8 ms saw each change between two reads; the slowest read took 0.3 ms.
 - **On a Jetson:** `tests/field-map/run.sh` (also in `tests/run-all.sh`) runs the same checks
   against the real service, plus every camera's fps through the swap. Not run yet.
+
+## Object detection (TensorRT, photonvision-100)
+
+2026-11-01, JetPack 7.2.1 / TensorRT 10.16.2 / CUDA 13.2. User guide: [OBJECT-DETECTION.md](OBJECT-DETECTION.md).
+Replaces the 2026 `photonvision-14` design (trtexec-built static engine, Java letterbox, BGR only, one
+engine per camera).
+
+### Design
+
+- **Native (`detector/trt_yolo.cu`, `trt_yolo.h`; JNI in `TensorRtYoloJNI.cu`; `libspectrumtrt.so`):**
+  - **ONNX in, engine cached.** `YoloEngine::Create` takes a YOLOv8/YOLO11 detect ONNX (Ultralytics,
+    `dynamic=True` recommended) or a ready `.engine`. ONNX is built with the TensorRT builder (FP16,
+    1 GiB workspace, an optimisation profile of batch 1..max at the requested input size when the
+    dims are dynamic). The engine goes to `<cache>/<stem>-<W>x<H>-b<max>-fp16-<hash>.engine`; the hash covers
+    the model bytes, size, batch, precision, `getInferLibVersion()` and the GPU (name, SM, SM count).
+    A cached engine that fails to load is deleted so the next start rebuilds it. INT8 isn't done (the
+    hook is the builder config; it needs a calibration set).
+  - **Build time is long:** 689 s for yolo11n 640x640 b1..4 and 780 s for 640x384, with the GPU
+    throttled to 306 MHz (PhotonVision was stopped, so spectrum-clocks went to deep idle). Expect
+    roughly half that at full clocks. PhotonVision builds on the model's service thread. Until the
+    engine is ready the object side returns nothing, and the tags carry on.
+  - **GPU preprocessing:** one kernel per frame letterboxes bilinearly into its batch slot (grey 114
+    padding, any input size including 640x384), normalises to 0..1, writes NCHW in the engine's input
+    type, and copies grey (1-channel, mono cameras) to R, G and B, or swaps BGR to RGB. Frames are uploaded with
+    `cudaMemcpy2DAsync` (~0.2 ms for a 1280x800 grey frame). `Image::on_device` skips the upload for
+    a frame already on the GPU. It isn't wired to the AprilTag detector's device buffer yet: the
+    detector library would have to export it, and its CUDA graphs reuse that buffer every frame.
+  - **GPU decode, CPU NMS:** a kernel takes each anchor's best class, applies the confidence
+    threshold and compacts the survivors (atomic counter, ≤2048 per frame). Only those candidates come
+    back, in one copy with no second sync, and per-class NMS runs on them on the CPU (≪0.1 ms).
+    End-to-end heads (`[B, K, 6]`, NMS in the model) are converted and filtered. Boxes come back in
+    source-frame pixels.
+  - **Lowest CUDA stream priority** (`cudaStreamCreateWithPriority`, the range's least,
+    `SPECTRUM_TRT_STREAM_PRIORITY` overrides). On Orin the range is 0..-5 and the default is 0, which
+    is already the least, so for the detector's kernels to win, its streams must be raised:
+    `detector-19` adds `SPECTRUM_TAG_STREAM_PRIORITY=high` (detector streams and the graph-capture
+    stream at the greatest priority). It's off by default and not yet measured. Even without it,
+    the 15-30 fps cases below cost the tags only 0.2-0.3 ms.
+  - Takes the AprilTag library's CUDA capture lock shared (`spectrum_cuda_lock_shared`) around
+    allocation, engine load and every batch, like the 2026 runner.
+- **Java (fork):**
+  - **`TensorRtService`:** one per (model, input size), shared by every camera using it. Cameras
+    `submit` a frame copy, and one worker thread takes the first one queued. It then waits up to
+    `SPECTRUM_OD_BATCH_MS` (2 ms) for more, stopping early once every registered camera has one queued
+    or `SPECTRUM_OD_MAX_BATCH` (4) is reached, and runs them as one batch. The queue drops frames past
+    2x the max batch. Every 10 s it logs `TensorRT <model>: N frames in M batches (b1:.. b2:..), detect
+    .. ms mean .. max per batch, queue wait .., dropped ..`.
+  - **`TensorRtModel` / `TensorRtObjectDetector`:** the `Model`/`ObjectDetector` backend (family
+    `TENSORRT`, extension `.onnx`). The backend is offered when `/usr/lib/libspectrumtrt.so` exists,
+    so the same jar runs on the SystemCore. Uploads through Settings > Object Detection skip the test
+    load (the build takes minutes). 12-install's ONNX comes with a `<model>.json` sidecar (labels,
+    size).
+  - **AprilTag + Object** (`AprilTagObjectPipeline`, type `AprilTagObject`, extends
+    `AprilTagCudaPipeline`): the tag side is unchanged and published at once. Up to `objectFpsMax`
+    times a second (fixed schedule, at most one frame in flight per camera), the grey frame is copied
+    and submitted. When it completes, the detections go through the Object Detection pipeline's
+    filter, sort and 2D-target pipes, then to `VisionModule`'s second `NTDataPublisher` on
+    **`<camera>-objects`**, stamped with that frame's own sequence ID and capture time.
+  - **Why a sibling table** rather than tags and objects in one `PhotonPipelineResult`: a result
+    has one capture timestamp. Objects arrive one inference after the frame's tags were published, so
+    holding the tags back would add 5-15 ms to every tag frame, and attaching objects to a later tag
+    result would date them wrong for fusion. The sibling table keeps both exact, needs no
+    PhotonLib/serde change (the hashes are untouched), and `PhotonCamera("<camera>-objects")` works
+    unchanged.
+  - **UI:** an "AprilTag + Object" pipeline type (offered when the TENSORRT backend is), an Objects
+    tab (model, Object FPS max, confidence, NMS IoU, max objects, class filter), Tag FPS max on the
+    AprilTag/AprilCudaTag tabs, and Object FPS max on the Object Detection tab.
+  - **Tag/Object FPS max** (`FrameRateCap`): enforced in `VisionRunner` before the grab, on a fixed
+    schedule, combined with IdleMode's period (the longer wins). With no cap, it's IdleMode exactly as
+    before.
+  - **Not done yet:** object boxes aren't drawn on the stream; -pose/-obb heads (the decode is
+    shaped for adding a head type: a third output layout in `Engine::Init`/`DecodeRaw`); INT8; feeding
+    the detector's device frame.
+
+### Measured (Orin Nano Super, MAXN_SUPER, GPU locked at 1020 MHz unless noted)
+
+**Engine alone** (`tests/object-detection/run.sh bench`, trt_yolo_bench, synthetic 1280x800 grey frames,
+300 calls back to back; GPU ~90%, VDD_IN 17-19 W, ≤74 °C during the run):
+
+| yolo11n FP16 | batch 1 | batch 2 | batch 4 | infer share |
+| --- | --- | --- | --- | --- |
+| 640x640 | 5.06 ms (p95 5.22) | 8.30 ms = 4.15/frame | 15.06 ms = 3.76/frame | 92% (upload 0.19, pre 0.10, decode 0.09 ms at b1) |
+| 640x384 | 3.51 ms (p95 3.53) | 5.28 ms = 2.64/frame | 8.83 ms = 2.21/frame | 91% |
+
+- **Batching:** b2 saves 18-25% per frame and b4 26-37%. 640x384 is 31% cheaper than 640x640 at b1
+  and 41% at b4.
+- **The same engines at a throttled GPU** (612 MHz): 7.63 / 12.5 / 22.2 ms (640x640) and 5.41 / 8.05
+  / 13.4 ms (640x384). At deep idle (306 MHz): 14.7 / 24.2 / 43.1 ms. Benchmark with the clocks
+  locked (`spectrum-clocks mode full` plus real maxima; see the gotcha below).
+- **Correctness:** Ultralytics' `bus.jpg` through the 640x640 engine gave the same 5 objects as
+  Ultralytics' own predict (bus 0.94 vs 0.94, people 0.90/0.85/0.83 vs 0.89/0.88/0.86, boxes within a
+  few px). The cut-off person scored 0.39 vs 0.62: Ultralytics predicts at a minimal-padding 480x640
+  input. Grey input found the same 5, with scores 0.01-0.1 lower.
+
+**Live, PhotonVision, 2 Thriftiest Cams at 1280x800 122 fps, AprilTag + Object with COCO yolo11n
+640x640** (`run.sh live`, 40 s per condition after 45 s settling; tag latency = capture to published,
+from VisionRunner's Loop timing):
+
+| Objects per camera | Tag fps | Tag latency median / p95 | Tag pipeline | TensorRT batches | GPU (tegrastats) | VDD_IN | Max temp |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| off (AprilTagCuda) | 121.3 | 14.2-14.8 / 15.2-15.7 ms | 0.9-1.0 ms | n/a | 18% | 9.0 W | 71 °C |
+| 15 fps | 121.3 | 14.7 / 15.7-16.4 ms | 1.2-1.4 ms | 30 fps total, 34% in pairs, 6.9-7.1 ms/batch, wait 2.5 ms | 29% | 10.5 W | 73 °C |
+| 30 fps | 121.3 | 14.3-15.3 / 15.9-16.3 ms | 1.2-1.3 ms | 60 fps, 10% pairs, 6.1-6.2 ms | 41% | 12.1 W | 77 °C |
+| every frame (~67 fps each) | 121.3 | 15.8 / 17.0-17.4 ms | 1.6-2.1 ms | 134 fps, 20% pairs, 6.6 ms | 69% | 15.6 W | **84 °C** |
+| Tag FPS max 60, no objects | 60.0 | 18.6-19.3 / 22.7-23.3 ms | 1.5 ms | n/a | 9% | 8.8 W | 78 °C |
+| Tag FPS max 60 + 15 fps objects | 60.0 | 18.8-19.3 / 22.9-23.2 ms | 1.4-1.5 ms | 30 fps, ~1% pairs, 5.3 ms | 23% | 10.2 W | 78 °C |
+
+- **Objects at 15-30 fps per camera cost the tags +0.2-0.5 ms median, +0.5 ms p95, and nothing
+  dropped.** Running every frame adds 1.3 ms and gets close to the 85 °C limit (84 °C with the bench
+  heatsink and fan). Keep Object FPS max at ≤30.
+- **Batching rarely happens live.** The two cameras free-run, unsynchronised, so frames seldom land
+  within 2 ms of each other (pairs: 34% at 15 fps, ~1% at 60 tag fps). Each batch ran ~6-7 ms because
+  it shares the GPU with the detector. Batching pays off with more cameras or higher object rates. A
+  wider window (`SPECTRUM_OD_BATCH_MS`) trades object latency for it.
+- **Object latency** (capture to published) ≈ the 2-3 ms queue wait + the 5-7 ms batch + publish,
+  so about 10 ms after the tags for the same frame.
+- **Tag FPS max 60 halves the detector's GPU** (18 → 9% for 2 cameras) and holds exactly 60.0 fps,
+  but **adds ~4.5 ms median / ~7.5 ms p95 tag latency**. After the scheduled wake-up, the grab
+  returns the frame cscore already has, which on average was captured half a camera period
+  (~4 ms) earlier. Fix (not done): drop a stale frame by its timestamp before decoding, or align the
+  schedule to frame arrivals. Until then, use Tag FPS max where the GPU matters more than ~5 ms
+  (side cameras).
+- **Gotcha:** `spectrum-clocks full` restores the *saved* maxima. If those were saved while
+  throttled, you stay at 612 MHz GPU / 1190 MHz CPU. To benchmark: write the devfreq/cpufreq maxima,
+  then `jetson_clocks`. Afterwards `spectrum-clocks mode auto` (done; PhotonVision left stopped).
+- **Tests:** the photon-core suite on the Jetson: 268 tests, 7 failures. All are native-library or
+  singleton initialisation failures in this JVM (`NTDataPublisherBlankResultTest`,
+  `VisionModuleCalibrationTest`, `VisionModuleManagerTest`, plus `PipelineManagerTest`,
+  `VisionSourceManagerTest`, `HardwareTest$CustomGPIOTest`, `FileSaveFrameConsumerTest` when run as
+  a whole suite). `PipelineManagerTest` and `VisionSourceManagerTest` fail identically on the
+  unmodified branch.
 
 ## Changes from the handoff
 

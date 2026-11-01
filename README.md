@@ -618,34 +618,35 @@ Details: [robot-vision/README.md](robot-vision/README.md#mount-check). To *measu
 
 ## Game-piece detection (TensorRT)
 
-*Measured on JetPack 6 (2026). On JetPack 7 it's deferred until we need it (TensorRT 10.16).*
+*JetPack 7 (2027), measured 2026-11-01. Full guide: [docs/OBJECT-DETECTION.md](docs/OBJECT-DETECTION.md).*
 
-PhotonVision's Object Detection pipeline runs YOLO models on the Jetson's GPU through TensorRT. That's our backend: `photonvision-14` plus `libspectrumtrt.so`, built from `detector/TensorRtYoloJNI.cu`. Robot code gets normal PhotonLib targets, with class and confidence.
+PhotonVision runs YOLO models (YOLOv8 / YOLO11, exported to ONNX) on the Jetson's GPU through TensorRT. That's our backend: `photonvision-100` in the fork plus `libspectrumtrt.so`, built from `detector/trt_yolo.cu`. Robot code gets normal PhotonLib targets, with class and confidence. It's all off until you pick one of the pipelines below.
 
-- **Install a model** from an ONNX export (built into a TensorRT engine on the Jetson; takes several minutes, so do it in the pit):
-  ```bash
-  ~/SpectrumJetson/scripts/jetson/12-install-yolo-model.sh ~/models/fuel.onnx "Fuel" Fuel
-  ```
-  Then give the camera a pipeline of type **Object Detection** and pick the model.
-- **The 2026 FUEL model** we started with is Team 2826 Wave Robotics' YOLO11n, the same one PhotonVision ships for other hardware. The models we have, their licenses and exports: [docs/GAME-PIECE-MODELS.md](docs/GAME-PIECE-MODELS.md).
-- **It works on our mono cameras.**
-  - The Object Detection pipeline doesn't ask for gray frames, so a mono camera's JPEG is decoded to a colour image whose three channels are identical. The model runs on that.
-  - With the hardware decoder on (`--jpeg nvjpg`), that colour decode runs on the Jetson's JPEG hardware too (`photonvision-18`): about 1.6 ms of CPU a frame instead of ~5.7 ms.
-  - The model was trained on colour photos, where FUEL is yellow, yet it found real FUEL balls on the bench surprisingly well.
-  - We judged that by eye on the stream. Detection rate at distance and false positives haven't been measured yet (Rewind recordings are good for that).
-  - Inference costs the same on gray or colour, so the speed numbers below hold for a colour camera too.
-- **Measured on the bench** (mono camera, 1280x800 in; measured with nothing else using the GPU):
+- **Two pipeline types:**
+  - **Object Detection**: the camera only looks for game pieces. "Object FPS max" (30 by default) caps how often the model runs.
+  - **AprilTag + Object**: one camera does both. Every frame still goes to the AprilTag detector, and the tags are published exactly as before, with no extra delay. Up to "Object FPS max" frames a second (15 by default) also go to the model. The game pieces show up as a **second camera** called `<camera>-objects`. In robot code: `new PhotonCamera("front-objects")`. Each result carries the time its own frame was taken.
+- **Tag FPS max** (AprilTag tab): process fewer frames on a camera without changing its mode, e.g. 122 on the front and 60 on the sides. This saves the most GPU of any setting: 60 fps halved the GPU use (18% to 9% for 2 cameras). The cost is latency: the median went from 14.5 to 19 ms, because the frame we pick has usually waited a few ms already. Idle mode's lower rate still applies while the robot is disabled.
+- **Install a model:** upload the `.onnx` in Settings > Object Detection, or run `scripts/jetson/12-install-yolo-model.sh model.onnx "Name" Label1,Label2 640 384` on the Jetson. The first time a model is used, the Jetson builds a TensorRT "engine" from it. That takes about **5-13 minutes**, so do it in the pit. After that it's cached and loads in under a second.
+- **One engine is shared by every camera.** Frames that arrive within 2 ms of each other run together as a batch, which costs less per frame. The model also runs at a lower GPU priority than the AprilTag detector.
+- **Speed (YOLO11n, FP16, GPU at full clock, nothing else running):**
 
-  | | AprilTag camera beside it | AprilTag detect (avg / worst) | GPU | PhotonVision CPU |
+  | Input | 1 frame | 2 frames | 4 frames |
+  | --- | --- | --- | --- |
+  | 640x640 | 5.1 ms | 8.3 ms (4.2 each) | 15.1 ms (3.8 each) |
+  | 640x384 (fits our 16:10 cameras) | 3.5 ms | 5.3 ms (2.6 each) | 8.8 ms (2.2 each) |
+
+- **With 2 cameras at 122 fps doing AprilTag + Object (YOLO11n 640x640):**
+
+  | Objects per camera | Tag latency median / p95 | GPU | Board power | Hottest |
   | --- | --- | --- | --- | --- |
-  | FUEL capped at 30 fps (default) | 122 fps | 1.62 / 3.75 ms (same as without FUEL) | 11–30% | 107% |
-  | FUEL uncapped (76 fps) | 122 fps | 1.96 / 28 ms | 29–44% | 176% |
+  | none (tags only) | 14.5 / 15.5 ms | 18% | 9.0 W | 71 °C |
+  | 15 fps | 14.7 / 16.0 ms | 29% | 10.5 W | 73 °C |
+  | 30 fps | 14.8 / 16.1 ms | 41% | 12.1 W | 77 °C |
+  | every frame (~67 fps) | 15.8 / 17.1 ms | 69% | 15.6 W | 84 °C |
 
-  - **Object Detection pipelines are capped at 30 fps by default** (`SPECTRUM_OD_FPS_LIMIT`; a robot-set FPS limit takes precedence). At 30 fps they cost the AprilTag cameras nothing measurable.
-  - **Raising the cap:** the hardware colour decode saves CPU, but uncapped FUEL also pushed the AprilTag camera's worst detect time to 28 ms by sharing the GPU, and hardware decode doesn't change that. Measure the AprilTag worst case before running game pieces faster than 30 fps.
-  - **Don't build TensorRT engines while measuring.** A `trtexec` build uses the GPU hard for ~8 minutes and made our first measurements look like FUEL doubled the AprilTag detect time. It didn't.
-- **When the GPU runs short: the GPU offload ladder.** `08-select-detector.sh gpu --gpu-level N` moves AprilTag work between the GPU and the CPU with one number (`--gpu-level list` explains each). 5: corner refinement and tag decoding both on the GPU (least CPU, ~2% of a core per camera, but ~4% more GPU per camera and ~0.2 ms slower). 4: refinement on the GPU, decoding on the CPU (~5% of a core per camera, ~1% more GPU, the fastest). 3: both on the CPU (~13% of a core per camera; today's default). 2: also turns the far-tag search off (frees ~3% GPU, only while no camera sees tags well; loses long range). If a TensorRT model makes the AprilTag cameras' worst detect times jump, step down one level at a time and measure again. Levels 1 and 0 don't free any GPU; don't use them. We plan to make 4 the default once the bench session's `ladder` step confirms it. Numbers per calibrated camera at 122 fps; details in [TECHNICAL.md](docs/TECHNICAL.md#gpu-offload-ladder-08-select-detectorsh---gpu-level-n-2026-10-31).
-- **Which camera:** a colour camera should do even better (FUEL is yellow), and a mono Thriftiest Cam works too. With 4 Thriftiest Cams on USB-A, a 5th USB 2.0 camera fits only capped (the USB-C port shares the same budget; see Performance), or use a USB 3 camera.
+  At 15-30 objects a second per camera, the tags hardly notice (+0.2-0.3 ms). Don't run "every frame": it adds 1.3 ms to the tags and runs hot.
+- **Train your own model** on our cameras' frames (from Rewind recordings), with about half the training images turned gray so one model works on both mono and colour cameras: [docs/OBJECT-DETECTION.md](docs/OBJECT-DETECTION.md). The 2026 FUEL models are in [docs/GAME-PIECE-MODELS.md](docs/GAME-PIECE-MODELS.md). Their 2026 engines don't load on JetPack 7, so re-install them from the ONNX.
+- **When the GPU runs short:** first lower Tag FPS max on the side cameras, then try the GPU offload ladder (`08-select-detector.sh gpu --gpu-level list`). [TECHNICAL.md](docs/TECHNICAL.md#gpu-offload-ladder-08-select-detectorsh---gpu-level-n-2026-10-31) explains both.
 
 ## Known issues
 
