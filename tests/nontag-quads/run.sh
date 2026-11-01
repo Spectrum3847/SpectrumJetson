@@ -34,4 +34,4 @@ for m in "$DATA"/replay/TXMAN1_*; do
       echo "TIMEOUT/failure: $name (see $dst.log)" >&2
   done
 done
-echo done
+echo "done"
