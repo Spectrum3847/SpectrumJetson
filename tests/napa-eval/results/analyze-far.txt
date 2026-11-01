@@ -1,0 +1,18 @@
+=== d15s_far vs napa16: size and range (far sightings included; good / bad by robot pose, in-frame)
+  only d15s_far: 584 (good 311, bad 157); side px p10/p50/p90 23.2/46.0/159.6, range m p50/p90/max 2.89/5.50/8.26; in-frame 219 checked, 10 bad, p50 2.43 px
+  only napa16: 5694 (good 4254, bad 829); side px p10/p50/p90 19.6/32.4/58.0, range m p50/p90/max 3.47/7.27/9.40; in-frame 3184 checked, 353 bad, p50 2.23 px
+  d15s_far: 39844 sightings, good 29043, bad 4242; good side p1 18.5 px, min 15.7; range p99 7.72 m, max 9.24 m
+  napa16: 44954 sightings, good 33371, bad 5171; good side p1 17.4 px, min 15.4; range p99 7.89 m, max 9.40 m
+
+=== d15s_far vs napafar: size and range (far sightings included; good / bad by robot pose, in-frame)
+  only d15s_far: 1737 (good 1157, bad 319); side px p10/p50/p90 21.1/50.4/99.3, range m p50/p90/max 2.61/6.53/9.24; in-frame 956 checked, 57 bad, p50 1.88 px
+  only napafar: 4950 (good 3710, bad 690); side px p10/p50/p90 19.7/31.6/55.0, range m p50/p90/max 3.57/7.27/9.26; in-frame 2638 checked, 307 bad, p50 2.41 px
+  d15s_far: 39844 sightings, good 29043, bad 4242; good side p1 18.5 px, min 15.7; range p99 7.72 m, max 9.24 m
+  napafar: 43057 sightings, good 31584, bad 4832; good side p1 17.6 px, min 15.7; range p99 7.86 m, max 9.26 m
+
+=== d15s_far vs napafar12: size and range (far sightings included; good / bad by robot pose, in-frame)
+  only d15s_far: 1737 (good 1157, bad 319); side px p10/p50/p90 21.1/50.4/99.3, range m p50/p90/max 2.61/6.53/9.24; in-frame 956 checked, 57 bad, p50 1.88 px
+  only napafar12: 4950 (good 3710, bad 690); side px p10/p50/p90 19.7/31.6/55.0, range m p50/p90/max 3.57/7.27/9.26; in-frame 2638 checked, 307 bad, p50 2.41 px
+  d15s_far: 39844 sightings, good 29043, bad 4242; good side p1 18.5 px, min 15.7; range p99 7.72 m, max 9.24 m
+  napafar12: 43057 sightings, good 31584, bad 4832; good side p1 17.6 px, min 15.7; range p99 7.86 m, max 9.26 m
+All d15s_far sightings: 39844, good 29043, bad 4242, unknown 6559; while enabled: good 24102, bad 3958

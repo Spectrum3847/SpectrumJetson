@@ -17,9 +17,9 @@ Cortex-A78AE at 1.73 GHz (spectrum-clocks full), standing in for the CM5.
 | File | What |
 |---|---|
 | `napa_replay.cc` | NAPA or AprilTag 3 (CPU) on a Rewind session. Frames decoded as detector-replay decodes them; writes detector-replay's CSV, so the judge and analyze read it as just another variant |
-| `build.sh` | Builds it on the Jetson: clones NAPA (pinned) and uses `~/build/apriltag-src`. `napa_replay_stats` is NAPA with tile counters added |
-| `run.sh` | Accuracy replays of all TXMAN1 sessions (`out/<variant>/`), with variants napa, napa22, napa16, napa_h3, at3_d2, at3_d1 |
-| `timing.sh`, `timing.py` | Per-frame time, pinned to 4 cores, 4,517 frames (Q17 session 2 and Q24, every 4th frame) |
+| `build.sh` | Builds it on the Jetson from the vendored NAPA (`third_party/napa`, same commit), `detector/napa/napa_far.cc` and `~/build/apriltag-src`. `napa_replay_stats` is NAPA with tile counters added |
+| `run.sh` | Accuracy replays of all TXMAN1 sessions (`out/<variant>/`), with variants napa, napa22, napa16, napa_h3, at3_d2, at3_d1, and (named on the command line) napafar, napafar12: `--backend napafar` runs `detector/napa/napa_far.cc`, what PhotonVision's NAPA backend runs, one detector per camera fed its frames in order |
+| `timing.sh`, `timing.py` | Per-frame time, pinned to 4 cores, 4,517 frames (Q17 session 2 and Q24, every 4th frame; napafar cases every frame, 18,057). `timing.sh DATA OUT CASE...` runs only those cases |
 | `tiles.sh`, `tiles.py` | Share of tiles that are not flat on real frames (the GPU idea) |
 | `motion.py` | Recall and corner agreement against the GPU detector, by image motion and robot speed |
 | `results/` | Judge, motion, range and timing outputs from this run |
@@ -231,8 +231,8 @@ spend ~850 µs of CPU per TXMAN frame, mostly `RefineEdges` (19%) and `UnDistort
 that reaches the CPU. NAPA reads the border and quiet ring and makes a 2-bit-slack decode before
 refining, and spends refinement only on quads that pass. In our pipeline that would mean testing the
 border and code on the GPU's fitted quad first, then running `RefineEdges`, undistortion and the final
-decode only on survivors. How many of our quads are non-tags, and so how much this saves, needs a quad
-count per frame. That is a separate study.
+decode only on survivors. The quad count is in `../nontag-quads/README.md`: 95% of the quads are
+non-tags, and an early decode would save ~350 µs of worker CPU per busy frame.
 
 ## Recommendation
 
@@ -257,3 +257,36 @@ count per frame. That is a separate study.
    costs (sorts, `BlobDiff`) already skip them, so compaction would save ~50–80 µs a frame (3–5% GPU).
    The useful NAPA idea is the early cheap decode before `RefineEdges`/undistort on the CPU side, worth
    a quad-count study first.
+
+## 6. NAPA in PhotonVision and its far search (2026-11-01)
+
+NAPA is now a CPU AprilTag backend of the fork (`detector/napa/`, `libspectrum-napa-apriltag.so`, built by
+`scripts/jetson/07-build-napa-detector.sh`; see `docs/TECHNICAL.md` "NAPA: AprilTags on the CPU"). It
+has its own far search (`detector/napa/napa_far.cc`). This is a small port of `far_search.cc`'s ideas, because
+that file is tied to the 971 detector:
+- the full frame at min 32 every frame;
+- min 16 only in tracking crops (6x the side, at least 96 px) around tags under 48 px seen in the last 0.5 s;
+- min 16 in one horizontal band (of 4, overlapping by 64 px) at most 60 times a second, and never sooner
+  than 5x the last band's time after it (the time guard).
+
+On all TXMAN1 sessions, scored as in section 2-3, with timing on one thread as in section 4:
+
+| Variant | Sightings | Lost (median, >20.4) | Gained (median, >20.4) | Common in-frame p50 / p75 change | Bad | Good side p1 / min | Range p99 / max | ms/frame mean (p95) |
+|---|---|---|---|---|---|---|---|---|
+| GPU (base, d15s_far) | 39,844 | | | | 10.6% | 18.5 / 15.7 | 7.72 / 9.24 | GPU |
+| NAPA min 32 | 34,625 | 7,083 | 1,864 (6.79) | +0.018 / +0.22 | 12.0% | 20.2 / 16.5 | 7.31 / 8.60 | 0.49 (0.61) |
+| NAPA min 16 | 44,954 | 584 (2.43, 9) | 5,694 (2.23, 340) | +0.012 / +0.18 | 11.5% | 17.4 / 15.4 | 7.89 / 9.40 | 2.34 (2.70) |
+| **NAPA far (32 + 16)** | **43,057 (+8.1%)** | 1,737 (1.88, 54) | 4,950 (2.41, 300) | +0.014 / +0.17 | **11.2%** | 17.6 / 15.7 | 7.86 / 9.26 | **1.25 (1.64)** |
+| NAPA far (32 + 12) | 43,057 | same | same | same | 11.2% | same | same | 1.25 (1.63) |
+
+- The far search keeps 82% of min 16's gain over min 32 (8,432 of 10,329 sightings), at 53% of min 16's
+  time. Static jitter is unchanged (0.084 px), and so is in-frame accuracy (p75 CI excludes 0 as for every
+  NAPA setting).
+- It loses 1,153 more GPU sightings than min 16 does. These are small tags in parts of the frame that
+  weren't being swept or tracked when they first appeared.
+- Far min 12 is identical to 16. NAPA's grid stride is `min_tag_px * 3 / 32`, 1 px for both, so there is
+  nothing lower to search.
+- **Which to use:** min 16 full frame when the CPU can afford 2.3 ms per frame per camera (most CPU
+  targets at ≤ 4 cameras). Far search when it can't, or at high frame rates: 1.25 ms per frame.
+
+Outputs: `results/judge-far.txt`, `results/analyze-far.txt` (size/range part), `results/timing-far.txt`.

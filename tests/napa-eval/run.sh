@@ -21,10 +21,12 @@ declare -A OPTS=(
   [napa22]="--backend napa --min-tag 22 --hamming 1"    # the README's smallest tag
   [napa16]="--backend napa --min-tag 16 --hamming 1"    # stride 1: every pixel
   [napa_h3]="--backend napa --min-tag 16 --hamming 3"   # NAPA's recommended hamming (3, connected errors)
+  [napafar]="--backend napafar --base-min 32 --far-min 16"    # detector/napa far search: 32 full frame, 16 crops/sweeps
+  [napafar12]="--backend napafar --base-min 32 --far-min 12"  # same with 12 in crops/sweeps
   [at3_d2]="--backend at3 --decimate 2"                 # PhotonVision CPU settings, decimate 2
   [at3_d1]="--backend at3 --decimate 1"                 # PhotonVision's default decimate 1
 )
-ORDER=(napa napa22 napa16 napa_h3 at3_d2 at3_d1)
+ORDER=(napa napa22 napa16 napa_h3 at3_d2 at3_d1)  # napafar, napafar12: name them
 (($#)) && ORDER=("$@")
 tj() { timeout 5 tegrastats --interval 1000 2>/dev/null | head -1 | grep -o 'tj@[0-9.]*' | cut -d@ -f2; }
 wait_turn() {

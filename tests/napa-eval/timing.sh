@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Per-frame CPU detect time, NAPA vs AprilTag 3, ON THE JETSON, pinned to 4 cores (the SystemCore's CM5
 # has 4 Cortex-A76): every 4th frame of TXMAN1 Q17 (session 2) and Q24 (all), 1280x800.
-#   tests/napa-eval/timing.sh [DATA] [OUT_DIR]     then: python3 tests/napa-eval/timing.py OUT_DIR
+#   tests/napa-eval/timing.sh [DATA] [OUT_DIR] [CASE...]     then: python3 tests/napa-eval/timing.py OUT_DIR
 # Clocks should be at full (sudo spectrum-clocks mode full; mode auto after). Waits for no other replay and
 # tj < 85 C before each case; 1 h deadline (prints TIMEOUT). Cases:
 #   <det>_t1   one frame at a time, one thread          (latency, one camera)
@@ -13,7 +13,7 @@ DATA=${1:-/data/scratch/txman1}
 OUT=${2:-$WORK/timing}
 if [[ -z ${NAPA_UNDER_TIMEOUT:-} ]]; then
   rc=0
-  NAPA_UNDER_TIMEOUT=1 timeout --kill-after=30 3600 "$0" "$DATA" "$OUT" || rc=$?
+  NAPA_UNDER_TIMEOUT=1 timeout --kill-after=30 3600 "$0" "$DATA" "$OUT" "${@:3}" || rc=$?
   [[ $rc == 124 ]] && echo "TIMEOUT: timing didn't finish in 1 hour" >&2
   exit "$rc"
 fi
@@ -28,8 +28,12 @@ declare -A CASES=(
   [at3_d2_t4]="--backend at3 --decimate 2 --nthreads 4"
   [at3_d2_p4]="--backend at3 --decimate 2 --nthreads 1 --parallel 4"
   [at3_d1_t4]="--backend at3 --decimate 1 --nthreads 4"
+  # detector/napa far search: every frame (its tracking and sweep schedule run on the recording's clock)
+  [napafar_t1]="--backend napafar --base-min 32 --far-min 16 --every 1"
+  [napafar12_t1]="--backend napafar --base-min 32 --far-min 12 --every 1"
 )
 ORDER=(napa_t1 napa_p4 napa16_t1 napa16_p4 at3_d2_t1 at3_d2_t4 at3_d2_p4 at3_d1_t4)
+(($# > 2)) && ORDER=("${@:3}")   # cases to run, e.g. napafar_t1 napafar12_t1
 tj() { timeout 5 tegrastats --interval 1000 2>/dev/null | head -1 | grep -o 'tj@[0-9.]*' | cut -d@ -f2; }
 for c in "${ORDER[@]}"; do
   for _ in $(seq 360); do
@@ -43,7 +47,7 @@ for c in "${ORDER[@]}"; do
   : >"$OUT/$c.csv"
   for s in "${SESSIONS[@]}"; do
     # shellcheck disable=SC2086
-    taskset -c 0-3 timeout 900 "$WORK/napa_replay" "$s" ${CASES[$c]} --every 4 --times "$OUT/$c.tmp" >/dev/null ||
+    taskset -c 0-3 timeout 900 "$WORK/napa_replay" "$s" --every 4 ${CASES[$c]} --times "$OUT/$c.tmp" >/dev/null ||
       echo "TIMEOUT/failure: $c $s" >&2
     if [[ -s $OUT/$c.csv ]]; then tail -n +2 "$OUT/$c.tmp" >>"$OUT/$c.csv"; else cat "$OUT/$c.tmp" >"$OUT/$c.csv"; fi
   done

@@ -4,6 +4,11 @@
 //   napa_replay SESSION_DIR --backend napa|at3 [--out OUT.csv] [--times T.csv] [--log] [--min-tag N]
 //               [--hamming N] [--contrast N] [--border N] [--decimate D] [--nthreads N] [--parallel P]
 //               [--every N] [--max-frames N] [--tile-stats]
+//               [--base-min N] [--far-min N] [--bands N] [--sweeps S] [--fixed-sweep-ms MS]
+// --backend napafar: detector/napa/napa_far.cc with its far search on (base pass --base-min 32 every frame,
+//   crops and sweep bands at --far-min 16), one detector per camera fed that camera's frames in order with
+//   their recording times; the time guard uses --fixed-sweep-ms (0.5) so runs repeat. Rows found by crops
+//   or sweeps have source "far".
 //
 // Frames: every frame of each camera folder, decoded to gray with libjpeg-turbo exactly as detector-replay
 // (detector/rewind_reader.h); frame numbers match detector-replay's. Decode is not timed.
@@ -27,11 +32,13 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "napa/napa_far.h"
 #include "rewind_reader.h"
 
 extern "C" {
@@ -49,6 +56,7 @@ struct Det {
   int id;
   double margin;
   double p[8];
+  bool far = false;
   double side() const {
     double s = 0;
     for (int k = 0; k < 4; ++k) s += std::hypot(p[2 * k] - p[2 * ((k + 1) % 4)], p[2 * k + 1] - p[2 * ((k + 1) % 4) + 1]);
@@ -61,6 +69,9 @@ struct Opts {
   int min_tag = 32, hamming = 1, contrast = 20, border = 22, nthreads = 1;
   double decimate = 2;
   bool tile_stats = false;
+  // --backend napafar: detector/napa/napa_far (what PhotonVision's NAPA backend runs), far search on.
+  int base_min = 32, far_min = 16, bands = 4;
+  double sweeps = 60, fixed_sweep_ms = 0.5;
 };
 
 struct Worker {
@@ -68,8 +79,10 @@ struct Worker {
   napa_detector *napa = nullptr;
   apriltag_detector_t *td = nullptr;
   apriltag_family_t *tf = nullptr;
+  std::map<std::string, std::unique_ptr<napa_far::Detector>> far;  // napafar: one per camera, as live
   explicit Worker(const Opts &opts) : o(opts) {
-    if (o.backend == "napa") {
+    if (o.backend == "napafar") {
+    } else if (o.backend == "napa") {
       napa = napa_create();
     } else {
       td = apriltag_detector_create();
@@ -89,9 +102,24 @@ struct Worker {
       tag36h11_destroy(tf);
     }
   }
-  std::vector<Det> Detect(std::vector<uint8_t> &g, int w, int h) {
+  std::vector<Det> Detect(std::vector<uint8_t> &g, int w, int h, const std::string &cam = "", int64_t us = 0) {
     std::vector<Det> out;
-    if (napa) {
+    if (o.backend == "napafar") {
+      auto &d = far[cam];
+      if (!d) {
+        d.reset(new napa_far::Detector("tag36h11"));
+        napa_far::Config c;
+        c.max_hamming = o.hamming, c.min_contrast = o.contrast, c.min_border_cells = o.border;
+        c.far = true, c.base_min_tag_px = o.base_min, c.far_min_tag_px = o.far_min, c.sweep_bands = o.bands;
+        c.sweeps_per_s = o.sweeps, c.fixed_sweep_ms = o.fixed_sweep_ms;
+        d->SetConfig(c);
+      }
+      for (const auto &t : d->Detect(g.data(), w, h, w, us)) {
+        Det e{t.id, t.margin, {}, t.far};
+        for (int k = 0; k < 8; ++k) e.p[k] = t.p[k] + 0.5;  // to AprilTag's convention, as detector-replay
+        out.push_back(e);
+      }
+    } else if (napa) {
       napa_params p{o.min_tag, o.hamming, o.contrast, o.border, 25};
       napa_detection d[128];
       const int n = napa_detect(napa, g.data(), w, h, w, &p, d, 128);
@@ -178,13 +206,18 @@ int main(int argc, char **argv) {
     else if (a == "--every") every = std::max(1, std::atoi(v)), ++i;
     else if (a == "--max-frames") max_frames = std::atol(v), ++i;
     else if (a == "--tile-stats") o.tile_stats = true;
+    else if (a == "--base-min") o.base_min = std::atoi(v), ++i;
+    else if (a == "--far-min") o.far_min = std::atoi(v), ++i;
+    else if (a == "--bands") o.bands = std::atoi(v), ++i;
+    else if (a == "--sweeps") o.sweeps = std::atof(v), ++i;
+    else if (a == "--fixed-sweep-ms") o.fixed_sweep_ms = std::atof(v), ++i;
     else {
       std::cerr << "unknown option " << a << "\n";
       return 2;
     }
   }
-  if (o.backend != "napa" && o.backend != "at3") {
-    std::cerr << "--backend napa or at3\n";
+  if (o.backend != "napa" && o.backend != "at3" && o.backend != "napafar") {
+    std::cerr << "--backend napa, napafar or at3\n";
     return 2;
   }
   struct Item {
@@ -213,6 +246,8 @@ int main(int argc, char **argv) {
     times.open(times_path);
     times << "camera,frame,ms,ntags" << (o.tile_stats ? ",gpu_active,napa_active0,napa_active1" : "") << "\n";
   }
+  std::map<std::string, int> cam_index;
+  for (size_t i = 0; i < cams.size(); ++i) cam_index[cams[i]] = static_cast<int>(i);
   std::vector<std::unique_ptr<Worker>> workers;
   for (int i = 0; i < parallel; ++i) workers.emplace_back(new Worker(o));
 
@@ -245,16 +280,19 @@ int main(int argc, char **argv) {
     std::vector<Res> res(n);
     std::atomic<size_t> next{0};
     std::vector<std::thread> th;
+    const bool per_cam = o.backend == "napafar";  // far search keeps state: each camera's frames in order
     for (int t = 0; t < parallel; ++t)
       th.emplace_back([&, t] {
-        for (size_t k; (k = next++) < n;) {
+        size_t own = 0;
+        for (size_t k; (k = per_cam ? own++ : next++) < n;) {
+          if (per_cam && cam_index.at(items[c0 + k].cam) % parallel != t) continue;
           if (!ok[k]) continue;
           const auto &f = items[c0 + k].f;
 #ifdef NAPA_STATS
           for (int l = 0; l < 8; ++l) napa_stat_tot[l] = napa_stat_act[l] = 0;
 #endif
           const auto a = std::chrono::steady_clock::now();
-          res[k].d = workers[t]->Detect(gray[k], f.width, f.height);
+          res[k].d = workers[t]->Detect(gray[k], f.width, f.height, items[c0 + k].cam, f.jetson_us);
           res[k].ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count();
           res[k].ok = true;
 #ifdef NAPA_STATS
@@ -277,7 +315,7 @@ int main(int argc, char **argv) {
         seen.push_back(d.id), ++kept;
         if (out.is_open()) {
           out << it.cam << ',' << it.f.index << ',' << it.f.jetson_us << ',' << d.id << ',' << d.margin << ','
-              << d.side() << ",normal";
+              << d.side() << (d.far ? ",far" : ",normal");
           for (double v : d.p) out << ',' << v;
           out << '\n';
         }
