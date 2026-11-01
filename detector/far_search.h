@@ -48,6 +48,12 @@ struct Det {
 struct Config {
   bool enabled = true;
   double sweeps_per_s = 30;  // full-size searches a second, across all cameras
+  // The time guard (next full-size search waits 5x the last one's time) normally uses the measured
+  // time: live, that's the point (a slow scene or a busy GPU mustn't eat the frame rate), and it
+  // makes which frames get searched depend on timing. A value > 0 uses this fixed cost instead, so
+  // the decisions depend only on the frames and their timestamps: detector-replay's default, so a
+  // replay is repeatable run to run (tests/regression).
+  double fixed_sweep_ms = 0;
 };
 
 void SetConfig(const Config &c);

@@ -3,12 +3,16 @@
 // search (far_search.h) deciding on each frame exactly as it does live: its good-view / starved policy spans all cameras, so this replays
 // them together, on the recording's own clock.
 //
-//   detector-replay SESSION_DIR [--out OUT.csv] [--budget N] [--off] [--every N] [--threads N]
+//   detector-replay SESSION_DIR [--out OUT.csv] [--budget N] [--sweep-ms X] [--off] [--every N] [--threads N]
 //              [--calib CAMERA=fx,fy,cx,cy,k1,k2,p1,p2,k3,k4,k5,k6]... [--mwbd N] [--mse X]
 //              [--exclude ID,ID...] [--mcp N] [--fullres | --half | --scale S] [--edge N] [--graphs]
 //
 // SESSION_DIR: a Rewind session (one folder per camera, docs/REWIND.md). --budget: full-size
-// searches a second (default 30, as live). --off: the far search switched off, for a baseline.
+// searches a second (default 30, as live). --sweep-ms X: the far search's time guard (the next
+// full-size search waits 5x the last one's time) on a fixed X ms per search (default 16, what a
+// 1280x800 search of a real field takes: TXMAN1 replays; a rendered scene takes ~6), so a replay is
+// repeatable run to run; 0 = the measured time, as live, which makes which frames get searched
+// depend on how fast the GPU happened to be. --off: the far search switched off, for a baseline.
 // --every N: every Nth frame of each camera (the policy's timings stay on the recording's clock).
 // --calib: a camera's lens calibration by folder name; without one, no undistortion (as in
 // PhotonVision before a calibration). --exclude: PhotonVision's excluded tags, which don't count
@@ -266,7 +270,7 @@ double EnvOr(const char *name, double fallback) {
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   if (argc < 2) {
-    std::cerr << "usage: detector-replay SESSION_DIR [--out OUT.csv] [--budget N] [--off] [--every N] [--threads N]"
+    std::cerr << "usage: detector-replay SESSION_DIR [--out OUT.csv] [--budget N] [--sweep-ms X] [--off] [--every N] [--threads N]"
                  " [--calib CAMERA=fx,fy,cx,cy,k1,k2,p1,p2,k3,k4,k5,k6]... [--mwbd N] [--mse X]"
                  " [--exclude ID,ID...]\n";
     return 2;
@@ -276,6 +280,7 @@ int main(int argc, char **argv) {
                                : fs::path(argv[1]).lexically_normal();
   std::string out_path;
   double budget = 30;
+  double sweep_ms_fixed = 16;
   bool off = false, trace = false, fullres = false, half = false, graphs = false;
   int mcp = -1;
   int edge = 0;
@@ -291,6 +296,7 @@ int main(int argc, char **argv) {
     const char *v = i + 1 < argc ? argv[i + 1] : "";
     if (a == "--out") out_path = v, ++i;
     else if (a == "--budget") budget = std::atof(v), ++i;
+    else if (a == "--sweep-ms") sweep_ms_fixed = std::atof(v), ++i;
     else if (a == "--off") off = true;
     else if (a == "--trace") trace = true;
     else if (a == "--graphs") graphs = true;
@@ -436,7 +442,7 @@ int main(int argc, char **argv) {
   for (auto &c : cams)
     std::printf("  %s: %zu frames %dx%d%s\n", c.name.c_str(), c.frames.size(), c.width, c.height,
                 calibs.count(c.name) ? ", calibrated" : "");
-  far_search::SetConfig({!off, budget});
+  far_search::SetConfig({!off, budget, sweep_ms_fixed});
   far_search::SetExcluded(excluded);
 
   std::ofstream out;

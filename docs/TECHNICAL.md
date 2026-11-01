@@ -1733,8 +1733,12 @@ when the robot is short of a good pose:
   they're 24 px or more in the normal search's results or unseen for 300 ms. The moment any
   camera has a good view, no searches or crops, and the tracks are dropped.
 - **Guards:** after a full-size search taking T, the next waits at least 5 T (at most ~20% of the
-  time, however slow the scene makes them). The shared detector is built on the first frame
-  (~200 ms), not on the first search. Far-search detectors have their own tag family: adding a
+  time, however slow the scene makes them). Live, T is measured, so which frames get a full-size
+  search depends on timing by design (a slow scene or a busy GPU spaces them out). detector-replay
+  uses a fixed T instead (`--sweep-ms X`, default 16: a 1280x800 search of a real field, TXMAN1;
+  ~6 ms on a rendered scene; 0 = measured), so replays and tests/regression are repeatable: with
+  measured T the same session gave different far sightings run to run (2026-11-01). The shared
+  detector is built on the first frame (~200 ms), not on the first search. Far-search detectors have their own tag family: adding a
   family to a detector stores that detector's decode table in it, so sharing the camera's would
   overwrite and on destroy free the camera detector's table. The detection mask is applied to
   far tags by their centre. No OpenCV functions (PhotonVision's JVM has its own OpenCV; a second

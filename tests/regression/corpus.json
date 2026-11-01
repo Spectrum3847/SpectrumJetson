@@ -19,8 +19,8 @@
       "about": "Rendered 4-camera field-calibration drive (tools/fieldcal), real lens calibration, truth.json has the true tag poses; 2628 frames",
       "blessed": {
         "commit": "ab6e086beb257bc9fecdfbab0a139292f39ab198",
-        "date": "2026-10-31",
-        "detections": 3312
+        "date": "2026-11-01",
+        "detections": 3305
       },
       "bytes": 348301720,
       "files": 11,
@@ -30,8 +30,8 @@
       "about": "far_search_test session: CamA sees near tags the first and last second and a 14 px far tag all along",
       "blessed": {
         "commit": "ab6e086beb257bc9fecdfbab0a139292f39ab198",
-        "date": "2026-10-31",
-        "detections": 347
+        "date": "2026-11-01",
+        "detections": 363
       },
       "bytes": 9401216,
       "files": 4,
