@@ -2,7 +2,8 @@
 # Robot-readiness tuning for the Jetson. Run ON THE JETSON; asks for sudo once.
 # Safe to re-run. Reboot afterwards to get the boot-time and persistence benefits.
 #
-#   1. No automatic updates   - apt must not update NVIDIA/Java packages mid-event
+#   1. No automatic updates   - apt must not update NVIDIA/Java packages mid-event; also unneeded
+#                               desktop services off (printing, Docker, Bluetooth, ModemManager, ...)
 #   2. snapd off              - its first-boot "seeding" took 45 s of every boot (no snaps used)
 #   3. Headless               - boot to multi-user (no GNOME desktop on a robot)
 #   4. Clocks locked at boot  - jetson_clocks after nvpmodel, before PhotonVision
@@ -164,13 +165,13 @@ UNNEEDED_UNITS=(
   ModemManager.service            # cellular modems; probes serial/USB devices
   fwupd.service fwupd-refresh.timer  # firmware updates over the internet
   kerneloops.service              # kernel crash reporter
-  udisks2.service upower.service  # desktop disk automount / battery status
+  upower.service                  # battery status (no battery)
   nvargus-daemon.service          # CSI camera daemon; our cameras are USB (V4L2), NVJPG doesn't use it
-  avahi-daemon.service avahi-daemon.socket  # mDNS (.local names); we connect by IP, PV has its own mDNS
   motd-news.timer update-notifier-download.timer update-notifier-motd.timer  # login banner / update checks
   man-db.timer                    # man page index rebuild
   anacron.timer anacron.service   # catch-up cron (runs daily jobs after boot)
   e2scrub_all.timer               # weekly ext4 metadata scrub (heavy disk I/O)
+  # Kept on purpose: avahi-daemon (.local names), udisks2 (USB drives).
 )
 for u in "${UNNEEDED_UNITS[@]}"; do
   systemctl list-unit-files "$u" --no-legend 2>/dev/null | grep -q . || continue
