@@ -53,6 +53,46 @@ ms: the ±60 ms scans agree with the fine scans.
 The minimum is shallow. The residual improves only 1–5% (9.8 → 9.7 px), so treat this as weak
 evidence. A deliberate spin test on the bench (a still tag, a gyro-logged turn) would pin it down.
 
+**Camera delay from rotation** (`camera_delay.py`, 2026-11-01). The frame-to-frame method above
+is weak by design: in a steady turn a time shift moves both frames' bearings alike and cancels.
+This one compares each tag's **absolute bearing** in the image (tag centre, undistorted, turned
+into the robot frame by the mount) with the bearing the robot's heading predicts, over segments
+(one camera and tag, contiguous frames, up to 3 s) whose turn rate changes by 0.8+ rad/s and peaks
+at 1+ rad/s, translation under 3 m/s (handled by odometry in the prediction). Each segment's
+constant offset is removed (mount yaw, heading offset, tag placement), so only the timing explains
+bearing against turn rate. Scan ±40 ms at 0.5 ms; 95% CIs from 1000 bootstraps over segments.
+Fast turns while seeing a tag are rare in these matches: at >2 rad/s only 44 segments qualified,
+too few, so the thresholds were lowered. Full output: `/data/scratch/txman1/replay/camera_delay_{gyro,odom}.txt`.
+
+| Pooled, 545 segments, 15,227 sightings | orin-left | orin-right | both |
+|---|---|---|---|
+| heading = integrated gyro yaw rate (`/Swerve/GyroYawRateRadPerSec`) | +10.6 ms (+1.2..+12.3) | +10.3 (+1.3..+21.6) | **+10.4 (+4.6..+12.0)** |
+| heading = logged odometry pose | +7.1 (+5.4..+10.1) | +8.5 (+4.5..+11.8) | **+8.1 (+5.6..+10.8)** |
+
+Per match and camera the CIs are mostly ±10–30 ms (Q17-left +25.6, Q24-right −7.8 with CIs
+spanning ±30): single matches don't pin it. The minimum is still shallow (residual 12–15% below
+its worst in ±40 ms). In these logs the gyro rate is recorded ~4 ms after the odometry heading's
+own rate (Q17 5 ms, the rest 4–4.5 ms), which matches the ~2 ms gap between the two rows.
+
+What the recordings' timestamps include: PhotonVision `dev-v2026.1.1-27-gd8c9e8e1`, built
+2026-10-01, so after `hwtimestamps` (09-30) and the mid-exposure shift (09-24). Frame intervals
+in `frames.csv` sit within ±0.03 ms of a multiple of 8.245 ms, so the camera-clock stamps were on.
+Rewind's `robot_us` is the frame's **arrival** stamp (camera clock: roughly when the camera starts
+sending), not the shifted result time. The exposure was 5 ms (`exposure_time_absolute` 50). So the
+image's middle is at `robot_us − 2.5 ms − D`, D being the camera's own delay
+(`SPECTRUM_CAMERA_DELAY_US`). If the logged pose shows the robot as it was L ms before its log
+timestamp, the measured shift is **S = L − 2.5 − D**, so **D = L − 2.5 − S ≈ L − 11 ms** (odometry)
+to L − 13 ms (gyro). Time-sync error adds to L the same way.
+
+So the replay can't give D without the robot's log latency L, and the robot code isn't in this
+repo. D = 2.5 ms (Team 100's rotating-disc Thriftiest MJPEG figure, our default now) fits if the
+pose lags its log timestamp by ~13–15 ms: plausible for a 10 ms logging loop plus CAN signal age,
+but unverified. D = 0 would need L ≈ 10.5–13. Nothing here contradicts 2.5 ms, and nothing here
+can confirm it: the field data measures total pipeline-plus-log latency (+8 to +10 ms, CI about
+±3 ms pooled), not the camera. For the robot what matters is that total, against whatever clock
+its pose buffer uses. The bench spin test (a still tag, gyro timestamps from the Phoenix signal
+itself, not the log loop) is still the way to measure D.
+
 **−0.5 px.** Not measurable here. With and without the shift, the robot-pose error differs by
 <0.4 px against 50–120 px of pose noise. A uniform 0.5 px shift is also absorbed by the in-frame
 solve.

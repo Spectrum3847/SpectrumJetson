@@ -65,8 +65,16 @@
 #                               EMC dynamic, CPU idle states on (all cores stay online).
 #                               `sudo spectrum-clocks mode full` keeps them full, `mode shallow`
 #                               never goes deep; `status`.
+#  17. Camera delay           - SPECTRUM_CAMERA_DELAY_US=2500 in PhotonVision's environment: each
+#                               frame's timestamp moves this much earlier on top of half the
+#                               exposure (the camera's own delay before it sends). 2.5 ms is Team
+#                               100's rotating-disc measurement of the Thriftiest Cam in MJPEG
+#                               (team100/all26 config_thrifty_mjpeg.py extra_delay_ms), a starting
+#                               value until our own spin test. CAMERA_DELAY_US=N overrides it.
+#                               Applies at PhotonVision's next start (no restart here).
 #
-# Usage: [FAN=quiet|full|off] [RT=on|off] 09-robot-tuning.sh [--undo]   (no FAN/RT: keep the saved choice)
+# Usage: [FAN=quiet|full|off] [RT=on|off] [CAMERA_DELAY_US=N] 09-robot-tuning.sh [--undo]
+#        (no FAN/RT: keep the saved choice; no CAMERA_DELAY_US: 2500)
 set -euo pipefail
 # Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
 [[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
@@ -84,6 +92,9 @@ PANIC_CONF=/etc/sysctl.d/90-spectrum-panic.conf
 PV_RESTART_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-restart.conf
 PV_OPENCV_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-opencv.conf
 PV_CLOCKS_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-clocks.conf
+PV_DELAY_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-camera-delay.conf
+CAMERA_DELAY_US=${CAMERA_DELAY_US:-2500}
+[[ $CAMERA_DELAY_US =~ ^[0-9]+$ ]] || { echo "CAMERA_DELAY_US must be whole microseconds" >&2; exit 1; }
 CLOCKS_HELPER=/usr/local/bin/spectrum-clocks
 USB_TMPFILES=/etc/tmpfiles.d/90-spectrum-usb.conf
 TCP_CONF=/etc/sysctl.d/90-spectrum-tcp.conf
@@ -114,7 +125,7 @@ sudo -n true 2>/dev/null || sudo -v   # ask for the password only if sudo needs 
 
 if [[ ${1:-} == --undo ]]; then
   sudo rm -f "$APT_CONF" "$UDEV_RULE" "$SYSCTL_CONF" "$JOURNALD_CONF"
-  sudo rm -f "$WATCHDOG_CONF" "$PANIC_CONF" "$PV_RESTART_CONF" "$PV_OPENCV_CONF" "$USB_TMPFILES"
+  sudo rm -f "$WATCHDOG_CONF" "$PANIC_CONF" "$PV_RESTART_CONF" "$PV_OPENCV_CONF" "$PV_DELAY_CONF" "$USB_TMPFILES"
   sudo rm -f "$TCP_CONF"
   sudo sysctl -q net.ipv4.tcp_retries2=15
   echo 5000 | sudo tee /sys/module/usbcore/parameters/initial_descriptor_timeout >/dev/null
@@ -436,6 +447,20 @@ if [[ $(cat "$PV_OPENCV_CONF") != "$opencv_before" ]] && systemctl cat photonvis
   sudo systemctl restart photonvision
 fi
 
+echo "==> 17. Camera delay: SPECTRUM_CAMERA_DELAY_US=$CAMERA_DELAY_US"
+sudo tee "$PV_DELAY_CONF" >/dev/null <<CONF
+# SpectrumJetson: frame timestamps move this much earlier on top of half the exposure: the
+# camera's own delay from the end of exposure to sending the frame (USBFrameProvider).
+# 2500 = Team 100's rotating-disc measurement of the Thriftiest Cam in MJPEG (team100/all26,
+# raspberry_pi/app/camera/config/config_thrifty_mjpeg.py extra_delay_ms = 2.5), a starting
+# value until our own spin test (tests/field-replay/RESULTS.md "Camera delay from rotation").
+# Override: CAMERA_DELAY_US=N scripts/jetson/09-robot-tuning.sh. Applies at the next start.
+[Service]
+Environment=SPECTRUM_CAMERA_DELAY_US=$CAMERA_DELAY_US
+CONF
+sudo systemctl daemon-reload
+echo "    takes effect at PhotonVision's next start"
+
 echo "==> 10. USB enumeration retries time out after 1 s, not 5 s"
 sudo tee "$USB_TMPFILES" >/dev/null <<'CONF'
 # SpectrumJetson: a USB device that stops answering holds up the others on its hub while the
@@ -523,4 +548,5 @@ echo "  cooling: $(sudo "$FAN_HELPER" status) (Settings > Robot state)"
 echo "  low-jitter cameras (spectrum-rt): $(cat /etc/spectrum-rt 2>/dev/null || echo off)"
 echo "  clocks while disabled (spectrum-clocks): $(cat /etc/spectrum-clocks-mode 2>/dev/null || echo auto)"
 echo "  photonvision: Restart=$(systemctl show photonvision -p Restart --value), $(systemctl show photonvision -p Environment --value | tr ' ' '\n' | grep -c OPENCV_THREAD_POOL) OpenCV pool settings"
+echo "  camera delay: $(systemctl show photonvision -p Environment --value | tr ' ' '\n' | sed -n 's/^SPECTRUM_CAMERA_DELAY_US=//p') us"
 echo "Reboot to apply the boot changes: sudo reboot"

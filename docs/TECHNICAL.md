@@ -1631,8 +1631,10 @@ inside "N: name". Suite: 5 tests, 1.5 min, all passing.
   the SCR it sends) to the host clock. The Thriftiest Cam sends both. On the stamp's meaning: it's
   0.74 ms before the first-packet stamp on average, so it marks roughly when the camera starts
   sending, not the start of exposure. `photonvision-13`'s half-exposure correction is unchanged,
-  and the camera's delay from the end of exposure to sending is still unmeasured
-  (`SPECTRUM_CAMERA_DELAY_US`, the robot spin test).
+  and the camera's delay from the end of exposure to sending is set to 2500 µs by default
+  (`SPECTRUM_CAMERA_DELAY_US`, `09-robot-tuning.sh` step 17: Team 100's rotating-disc figure for
+  the Thriftiest Cam in MJPEG), pending our own robot spin test. The TXMAN1 rotation replay
+  (tests/field-replay/RESULTS.md) can't separate it from the robot's log latency.
 - **Measured** (`tests/uvc-timestamps/run.sh`: v4l2-ctl, PhotonVision stopped, one or all
   cameras):
 

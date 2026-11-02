@@ -380,7 +380,7 @@ The numbers come from our camera driver, which counts each camera's bytes and la
 
 `scripts/jetson/usb-bandwidth.py` shows the same from the command line: what each camera reserves, which ports failed and why, and the cap command to fix it. The health check runs it too.
 
-**Timestamps mark mid-exposure** (`photonvision-13`): the Jetson subtracts half the exposure from every frame's timestamp, so the robot shouldn't. The camera's own delay (readout and JPEG, before its first packet) is still to be measured on the robot with the spin-in-front-of-a-tag test, and set as `SPECTRUM_CAMERA_DELAY_US`. Frames are timestamped by the camera's own clock (see **Steadier timestamps** below).
+**Timestamps mark mid-exposure** (`photonvision-13`): the Jetson subtracts half the exposure from every frame's timestamp, so the robot shouldn't. On top of that, `SPECTRUM_CAMERA_DELAY_US` (the camera's own delay, readout and JPEG, before it sends) is **2500 µs by default** (`09-robot-tuning.sh`, step 17; `CAMERA_DELAY_US=N` overrides): Team 100's rotating-disc measurement of the Thriftiest Cam in MJPEG, a starting value until our own spin test. The TXMAN1 replays (rotation method, [tests/field-replay/RESULTS.md](tests/field-replay/RESULTS.md)) put the whole camera-to-log shift at +8 to +10 ms (95% CI about ±3 ms); that fits 2.5 ms if the robot's logged pose lags by ~13–15 ms, which the replay can't check. Frames are timestamped by the camera's own clock (see **Steadier timestamps** below).
 
 What other teams' vision systems do (Austin's AOS as run by 1868, 4646 and 254, 971's bos and cos, 6328's Northstar, EagleEye, Code Orange's MLTag, 4533's Whacknet), what an ideal system would have, the full profiling story, and future work: [docs/VISION-RESEARCH.md](docs/VISION-RESEARCH.md).
 
@@ -816,7 +816,7 @@ The detailed technical reference, with exact versions, commits and measurements,
 - [ ] **Recalibrate both cameras** with the full-screen view, covering the edges and corners ([Calibrating well](#calibrating-well)); until then, import the refits in `calibrations/*-refit.json`.
 - [ ] **Field calibration** on a real field: the event's tag positions and every camera's mount ([Field calibration](#field-calibration-the-event-fields-real-tags-and-every-cameras-mount)). The field layout is the other half of the remaining error.
 - [ ] **Replay the robot side:** the pose estimator (EKF) and the multi-camera solver (`MultiCameraSolver` in `robot-vision/`, one pose from every corner of every camera; 0.2 cm median in sim) against the TXMAN1 recordings and logs.
-- [ ] **Timing spin test:** a still tag, the robot turning with the gyro logged, to settle the ~5–9 ms the match replays hint at and to measure the camera's own delay (`SPECTRUM_CAMERA_DELAY_US`).
+- [ ] **Timing spin test:** a still tag, the robot turning with the gyro's own sample timestamps logged, to check the default `SPECTRUM_CAMERA_DELAY_US=2500` (Team 100's figure) against our cameras. The match replays' rotation method gives +8 to +10 ms total but can't separate the camera from the robot's log latency.
 - [ ] **Faster far search** on JetPack 7 (5.9 ms a search, against 2.7 on JetPack 6), then turn it back on.
 - [ ] The rest of the fork's 2027 port ([SPECTRUM.md](https://github.com/Spectrum3847/photonvision/blob/spectrum-2027/SPECTRUM.md)).
 
