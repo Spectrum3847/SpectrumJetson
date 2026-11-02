@@ -22,6 +22,7 @@ import org.spectrum3847.vision.compat.Clock;
 import org.spectrum3847.vision.gate.GateContext;
 import org.spectrum3847.vision.gate.GateSet;
 import org.spectrum3847.vision.gate.Gates;
+import org.spectrum3847.vision.health.MountCheck;
 import org.spectrum3847.vision.health.VisionHealth;
 import org.spectrum3847.vision.heading.RobotMotionHistory;
 import org.spectrum3847.vision.io.CameraIO;
@@ -71,6 +72,8 @@ public class VisionSystem {
     private final VisionLogger logger;
     private final VisionHealth health;
     private final VisionStats stats = new VisionStats();
+    private final MountCheck mountCheck;
+    private double lastIntrinsicsCheck = Double.NEGATIVE_INFINITY;
     private final DoubleSupplier clock;
     private VisionUpdate last;
 
@@ -103,6 +106,8 @@ public class VisionSystem {
                 : null;
         logger = b.logger != null ? b.logger : new NetworkTablesVisionLogger("SpectrumVision", field);
         health = b.health ? new VisionHealth(clock.getAsDouble()) : null;
+        mountCheck = b.mountCheck ? new MountCheck(field, b.health) : null;
+        if (health != null) health.setMountCheck(mountCheck);
     }
 
     public static Builder builder(AprilTagFieldLayout field) {
@@ -158,6 +163,7 @@ public class VisionSystem {
             gates.accepted(a.observation(), ctx);
         }
         last = new VisionUpdate(now, frames, accepted, rejected);
+        if (mountCheck != null) updateMountCheck(now, frames, accepted);
         stats.record(last);
         logger.log(last, stats);
         if (health != null) {
@@ -167,6 +173,22 @@ public class VisionSystem {
             health.update(now, ctx.enabled(), inputs, loop, topReason(rejected));
         }
         return last;
+    }
+
+    private void updateMountCheck(double now, List<FrameObservation> frames, List<VisionUpdate.Accepted> accepted) {
+        // Calibrations can arrive after start: look for missing ones every 5 s.
+        if (now - lastIntrinsicsCheck >= 5) {
+            lastIntrinsicsCheck = now;
+            for (var cam : cameras) {
+                if (mountCheck.hasIntrinsics(cam.name())) continue;
+                cam.io().calibration().ifPresent(k -> mountCheck.intrinsics(cam.name(), k[0], k[1]));
+            }
+        }
+        if (currentEstimate != null) mountCheck.addEstimatorPose(now, currentEstimate.get());
+        for (var a : accepted) mountCheck.addAccepted(a.observation().timestampSeconds(), a.observation().camera());
+        var mounts = new LinkedHashMap<String, Transform3d>();
+        for (var cam : cameras) if (cam.enabled()) mounts.put(cam.name(), cam.robotToCamera());
+        mountCheck.update(now, frames, mounts, motion);
     }
 
     private static String topReason(List<VisionUpdate.Rejected> rejected) {
@@ -197,6 +219,14 @@ public class VisionSystem {
     /** The dashboard alerts' settings (thresholds are public fields); null if health is off. */
     public VisionHealth health() {
         return health;
+    }
+
+    /**
+     * The camera-mount check (null if off): {@link MountCheck#reports()} for a pre-match checklist,
+     * {@link MountCheck#reset()} after fixing a mount. README, "Mount check".
+     */
+    public MountCheck mountCheck() {
+        return mountCheck;
     }
 
     public List<VisionCamera> cameras() {
@@ -230,6 +260,7 @@ public class VisionSystem {
         private boolean readJetsonExcludedTags = true;
         private VisionLogger logger;
         private boolean health = true;
+        private boolean mountCheck = true;
         private DoubleSupplier clock = Clock::now;
 
         private Builder(AprilTagFieldLayout field) {
@@ -312,6 +343,12 @@ public class VisionSystem {
         /** Dashboard alerts (default on). */
         public Builder health(boolean on) {
             health = on;
+            return this;
+        }
+
+        /** The camera-mount check (default on; README, "Mount check"). */
+        public Builder mountCheck(boolean on) {
+            mountCheck = on;
             return this;
         }
 

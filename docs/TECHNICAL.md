@@ -7,6 +7,20 @@ for Spectrum 3847/8515. Boots from NVMe, with no SD card.
 Technical reference for the setup. For the student-friendly overview, start with the [README](../README.md). Original brief: [HANDOFF-jetson-flash.md](HANDOFF-jetson-flash.md).
 Where this document disagrees with the brief, this document wins (see *Changes from the handoff*).
 
+**Names (renamed 2026-10-31).** The GPU detector's pieces used to be named after where the code
+came from (FRC 971's `frc971/bos` repo). They now say what they are; the old names still work, and
+older sections and logs below may use them:
+
+| Old | New |
+| --- | --- |
+| `lib971apriltag.so` | `libspectrum-gpu-apriltag.so` (08 links the old name to it for older jars) |
+| `07-build-bos-detector.sh`, `~/build/bos-detector` | `07-build-gpu-detector.sh` (old name is a stub), `~/build/gpu-detector` (07 moves the old folder) |
+| `patches/bos-NN-*.patch` | `patches/detector-NN-*.patch` (same numbers) |
+| `08-select-detector.sh bos` / `4143` | `gpu` / `gpu-4143` (old words accepted, with a note) |
+| `SPECTRUM_971_*` env, `/tmp/spectrum-971-*` switches, drop-in `971.conf` | `SPECTRUM_DETECTOR_*`, `/tmp/spectrum-detector-*`, `detector.conf` (old names still read; 08 rewrites the drop-in) |
+| log lines `971 stats`, `971 library loaded`, `971 jpeg`, `971 jpeg decoder:`, `971 detector hN` | `detector stats`, `detector loaded`, `jpeg decoder`, `jpeg decoder mode:`, `detector hN` (the scripts read both) |
+| `far_replay` | `detector-replay` (`detector/detector_replay.cc`) |
+
 ## Target
 
 | | |
@@ -91,12 +105,10 @@ Settings shared by the scripts live in [config.env](../config.env).
 - **Harmless flash warnings:** "backup GPT table is corrupt", missing
   `/dev/mmcblk0boot0` (there's no eMMC), "Skip writing ... no image is specified".
 - The whole flash took about 7 minutes on a 16-core host.
-- **The shop network (`spectrum3847` Wi-Fi) blocks `frcmaven.wpi.edu`.** Fortinet
-  FortiGuard DNS filtering resolves it to a block page (`2620:101:9000:53::55`, cert
-  `CN = Fortiguard SDNS Blocked Page`), so Java reports a PKIX/SSL error. Gradle builds
-  that need WPILib artifacts (the PhotonVision fork, GradleRIO robot code) must run on
-  another network, or the domain needs allowlisting. GitHub and
-  maven.photonvision.org are not blocked.
+- **`frcmaven.wpi.edu` works from the shop** (checked 2026-10-30). On 2026-10-01 a
+  Fortinet FortiGuard DNS filter returned a block page for it (cert
+  `CN = Fortiguard SDNS Blocked Page`), and Java reported a PKIX/SSL error. If Gradle
+  fails that way again, check with `curl -I https://frcmaven.wpi.edu` before working around it.
 
 ## Vision stack: 2026 CUDA fork on the Jetson, 2027 robot code
 
@@ -128,7 +140,7 @@ and GCC 13 (Ubuntu 24.04), while JetPack 6 has GCC 11.
 | Piece | Version | Built on | Script |
 |---|---|---|---|
 | allwpilib | `v2026.2.1` (not `main`: `wpi/jni_util.h` moved) | Jetson, `-j4` (more OOMs on wpimath); **17 min** in MAXN SUPER | `scripts/jetson/04-build-allwpilib.sh` |
-| GpuDetectorJNI | `FRC-Team-4143` `ef9fc1e`, CUDA arch 87 → `/usr/lib/lib971apriltag.so` | Jetson | `scripts/jetson/05-build-gpudetector.sh` |
+| GpuDetectorJNI | `FRC-Team-4143` `ef9fc1e`, CUDA arch 87 → `/usr/lib/libspectrum-gpu-apriltag.so` | Jetson | `scripts/jetson/05-build-gpudetector.sh` |
 | PhotonVision fork jar | `d8c9e8e`, Java 17 target | Laptop (Node 22, pnpm 10, Temurin 17, as in CI) | `scripts/host/03-build-photonvision-fork.sh` |
 | Java runtime | **17** for the fork (the PV 2027 installer made 25 the default) | systemd drop-in `photonvision.service.d/java17.conf` | `scripts/jetson/06-install-fork-jar.sh <jar>` |
 
@@ -144,7 +156,7 @@ bundled OpenCV 4.10. That's fine while `cv::Mat`'s layout is unchanged, but frag
 ## First CUDA results (2026-09-23)
 
 One Thriftiest Cam, 1280×800 MJPEG, AprilTagCuda pipeline. Timing comes from
-`gpudetector-02-timing-stats.patch` (`971 stats …` lines in `journalctl -u photonvision`).
+`gpudetector-02-timing-stats.patch` (`detector stats …` lines in `journalctl -u photonvision`).
 
 | Stage | Cost | Limit |
 |---|---|---|
@@ -194,15 +206,15 @@ One Thriftiest Cam, 1280×800 MJPEG, AprilTagCuda pipeline. Timing comes from
 - `mashed26/GpuDetectorJNI` has a better JNI layer (handle map, proper destroy,
   CCCL 3), but a different Java API, so it isn't a drop-in replacement.
 
-## Detector builds: which lib971apriltag.so is which
+## Detector builds: which libspectrum-gpu-apriltag.so is which
 
 Both expose the same Java API, so the PhotonVision fork jar works with either.
-Swap by installing one to `/usr/lib/lib971apriltag.so` and restarting `photonvision`.
+Swap by installing one to `/usr/lib/libspectrum-gpu-apriltag.so` and restarting `photonvision`.
 
 | Build | Source | Script | Status |
 |---|---|---|---|
 | **4143 + patches** (fallback) | FRC-Team-4143/GpuDetectorJNI `ef9fc1e` (≈971 code of 2024-08) + `patches/gpudetector-0{1,2,3}` | `05-build-gpudetector.sh` (installs) | Running; leak, handle and stale-error fixes applied |
-| **bos / Austin's current** (**installed**, robot config) | frc971/bos `62e93b4` `third_party/971apriltag` = RealtimeRoboticsGroup/aos `frc/orin` detector as of `8736ba62` (2026-03-30) + 971's `absl::Status` returns + `patches/bos-01` to `bos-04`; JNI in `detector/` | `07-build-bos-detector.sh` then `08-select-detector.sh bos --mwbd 20` | A/B tested and fault tested (below) |
+| **bos / Austin's current** (**installed**, robot config) | frc971/bos `62e93b4` `third_party/971apriltag` = RealtimeRoboticsGroup/aos `frc/orin` detector as of `8736ba62` (2026-03-30) + 971's `absl::Status` returns + `patches/detector-01` to `detector-04`; JNI in `detector/` | `07-build-gpu-detector.sh` then `08-select-detector.sh gpu --mwbd 20` | A/B tested and fault tested (below) |
 
 aos is the upstream source of truth. The only detector change in aos since bos
 imported it (2026-04-03) is `c1c3b4607` (M_PI → std::numbers::pi, cosmetic).
@@ -221,7 +233,7 @@ imported it (2026-04-03) is `c1c3b4607` (M_PI → std::numbers::pi, cosmetic).
 | **bos** | **20** | 83 | 61.2 | **1.79 ms** | 1.00 | 118.5 |
 
 - **Selected for the robot: bos, `min_white_black_diff` 20**
-  (`08-select-detector.sh bos --mwbd 20`). The detector is 30–40% faster, with
+  (`08-select-detector.sh gpu --mwbd 20`). The detector is 30–40% faster, with
   identical detection and margins. FPS is capture-bound either way.
 - **Decision margin tracks exposure:** about 44 at 3 ms vs about 118 at 8.3 ms. With
   PhotonVision's default cutoff of 35, short exposures under shop lights sit close to
@@ -298,7 +310,7 @@ JVM (`tests/jvm-check.sh`, 2 cameras at ~90 fps): 28 MB peak heap of 512 MB, 0 G
 - **Bug:** with zero candidate blobs, `num_selected_blobs_host == 0`, and `FitLines` computed
   `kBlocks = 0` and launched `<<<0, 128>>>`. That invalid configuration surfaced in the
   peak-filter `cub::DeviceSelect::If` (apriltag.cc:1013) as status 101 on every frame.
-  `bos-02-empty-frame.patch` returns no detections early and guards `FitLines`.
+  `detector-02-empty-frame.patch` returns no detections early and guards `FitLines`.
   `tests/detector-frame-sizes/run.sh`: blank frames at 1280x800, 640x480, 320x240, 800x600
   and 1280x720 all failed before; all pass after. Noise frames always passed.
 - **Watchdog:** on failure, the JNI calls `cudaDeviceSynchronize()`. It exits (for a systemd
@@ -431,7 +443,7 @@ Full write-up in [VISION-RESEARCH.md](VISION-RESEARCH.md).
   | Board power (VDD_IN) | 9.6 W | 9.6 | 9.7 | 9.8 |
 
   PhotonVision itself used 0.73 cores. Detect time avg / worst: 0.98 / 2.03 and 0.95 / 3.06 ms (Thriftiest Cams), 1.21 / 2.25 and 0.85 / 1.87 ms (global-shutter). GPU and tj at 55.6 °C (fan on NVIDIA's quiet profile). About 368 frames/s in total cost ~17% GPU against ~12% for 2 cameras (244 frames/s), so the GPU has plenty of headroom; the two NVJPG engines, at ~37% each, are the busiest hardware. With tags in view the detector does more work per frame (quad fitting, refinement), so expect somewhat more GPU than this empty-scene figure.
-- **CUDA wait mode** (`SPECTRUM_971_CUDA_SYNC` or `/tmp/spectrum-971-cuda-sync`), measured with the decode fix:
+- **CUDA wait mode** (`SPECTRUM_DETECTOR_CUDA_SYNC` or `/tmp/spectrum-detector-cuda-sync`), measured with the decode fix:
 
   | Mode | CPU | Detect time |
   |---|---|---|
@@ -470,7 +482,7 @@ Full write-up in [VISION-RESEARCH.md](VISION-RESEARCH.md).
   | `block` | 4 | 6.31 | 5.89 |
   | `auto` | 7 | 6.31 | 5.92 |
 
-  32 queues may be worth ~0.5 ms (CUDA funnels every stream into 8 hardware queues by default, so one camera's kernels can wait behind another's even with the GPU only ~31% busy); `block` makes no difference. GPU ~31% in every run, and CPU tracked the detect times rather than the settings. **Both are the defaults because neither hurts:** `block` (the library's default) and 32 queues (`08-select-detector.sh --gpu-connections`, default 32, written to `971.conf`). The load line shows both ("CUDA wait block, GPU connections 32"), and `health-check.sh` warns if they differ. Proving an effect this small would take many alternating restarts (both settings are read only when CUDA starts). Detector threads (`SPECTRUM_971_THREADS`, or `/tmp/spectrum-971-threads`, applied live within 2 s; default 6) made no clear difference either.
+  32 queues may be worth ~0.5 ms (CUDA funnels every stream into 8 hardware queues by default, so one camera's kernels can wait behind another's even with the GPU only ~31% busy); `block` makes no difference. GPU ~31% in every run, and CPU tracked the detect times rather than the settings. **Both are the defaults because neither hurts:** `block` (the library's default) and 32 queues (`08-select-detector.sh --gpu-connections`, default 32, written to `971.conf`). The load line shows both ("CUDA wait block, GPU connections 32"), and `health-check.sh` warns if they differ. Proving an effect this small would take many alternating restarts (both settings are read only when CUDA starts). Detector threads (`SPECTRUM_DETECTOR_THREADS`, or `/tmp/spectrum-detector-threads`, applied live within 2 s; default 6) made no clear difference either.
   - **Dashboard streams count.** With 4 streams open in a browser, the same settings ran at ~4 ms average and ~7.7 ms typical worst, and PhotonVision used ~2.0 cores instead of ~1.45. Close the dashboard before measuring.
 - **Detector threads with a tag in view** (2026-09-24, block + 32 queues, one hand-held tag seen by both Thriftiest Cams on every frame, 4 dashboard streams open). The thread count was switched live, cycling 6/2/3/4/1 threads; each segment was 3 s to settle and 7 s measured, over 3 rounds:
 
@@ -501,12 +513,12 @@ Tested: snapshots with no viewer (the websocket `saveInputSnapshot`/`saveOutputS
 
 ### Hardware JPEG decode: NVJPG (2026-09-24)
 
-The camera JPEGs can be decoded on the Orin Nano's two NVJPG engines instead of the CPU, both gray (AprilTags) and colour (game pieces, driver mode, calibration). It's switched on with `08-select-detector.sh bos --mwbd 20 --jpeg nvjpg`, with libjpeg-turbo as the fallback. The research and the pitfalls are in [VISION-RESEARCH.md](VISION-RESEARCH.md).
+The camera JPEGs can be decoded on the Orin Nano's two NVJPG engines instead of the CPU, both gray (AprilTags) and colour (game pieces, driver mode, calibration). It's switched on with `08-select-detector.sh gpu --mwbd 20 --jpeg nvjpg`, with libjpeg-turbo as the fallback. The research and the pitfalls are in [VISION-RESEARCH.md](VISION-RESEARCH.md).
 
 - **How it works (gray).** It's the same Java call, `decodeMjpegGray`, so no jar change was needed for AprilTag cameras. The detector library hands each JPEG to `libspectrumnvjpg.so` (`detector/NvJpgDecoder.cc`):
   - libnvjpeg decodes into its own buffer (`IsVendorbuf`), and CUDA copies the Y plane into PhotonVision's Mat (0.24 ms).
   - libnvjpeg cycles through 4 buffers behind one fd number. Each gets its own CUDA registration, keyed by its dmabuf inode.
-  - It's a separate library because libnvjpeg exports libjpeg-turbo's function names. `lib971apriltag.so` loads it with `dlopen(RTLD_DEEPBIND)`.
+  - It's a separate library because libnvjpeg exports libjpeg-turbo's function names. `libspectrum-gpu-apriltag.so` loads it with `dlopen(RTLD_DEEPBIND)`.
   - There's one decoder per camera thread.
   - **MJPEG mode (`cinfo.mjpeg_decode = TRUE`) is required.** Without it, libnvjpeg leaked ~250 KB every frame: PhotonVision grew to 5.6 GB and was OOM-killed twice (2026-09-24). NVIDIA's own NvJPEGDecoder class sets it. With it, each decoder takes ~180 MB once and then stays flat: 8 minutes in PhotonVision with 2 cameras, ~116,000 frames, RSS 1.078 → 1.092 GB.
 - **How it works (colour, `photonvision-18`).** When the hardware decoder is on, `USBFrameProvider` takes the camera's raw JPEG for colour frames too, and calls `decodeMjpegBgr`. The hardware decodes to Y/Cb/Cr planes, then a CUDA kernel (`detector/nvjpg_bgr.cu`) converts them to BGR with libjpeg's own arithmetic ("fancy" chroma upsampling and the jdcolor.c tables). So the pixels are identical to cscore's decode, and the safety-net check can be exact. Only 4:2:2 JPEGs, which UVC cameras send, use the hardware; others go to libjpeg-turbo. With the decoder off (`hardwareJpegDecode()` false), colour frames stay on cscore's own path.
@@ -523,32 +535,32 @@ The camera JPEGs can be decoded on the Orin Nano's two NVJPG engines instead of 
 - **Memory cost:** ~180 MB per camera (libnvjpeg's decoder). With 4 cameras, PhotonVision should sit near 1.5 GB instead of ~0.7 GB.
 - **Safety net.**
   - A frame the hardware can't decode goes to libjpeg-turbo. After a decode error the decoder is re-created.
-  - Every 240 hardware frames per camera (~2 s), a low-priority thread decodes the same JPEG with libjpeg-turbo and compares every pixel. Any difference turns the hardware decoder off until PhotonVision restarts (`971 jpeg: HARDWARE DECODE DIFFERS`). Frames libjpeg-turbo warns about (corrupt ones) aren't compared.
+  - Every 240 hardware frames per camera (~2 s), a low-priority thread decodes the same JPEG with libjpeg-turbo and compares every pixel. Any difference turns the hardware decoder off until PhotonVision restarts (`jpeg decoder: HARDWARE DECODE DIFFERS`). Frames libjpeg-turbo warns about (corrupt ones) aren't compared.
   - A CUDA error in the decoder also turns it off. The detector's watchdog handles a broken context as before.
   - `health-check.sh` shows the decoder in use, its checks, fallbacks and any difference. It also warns when PhotonVision uses over 2.5 GB, or was OOM-killed since boot.
-- **Logs.** A `971 jpeg` line every 10 s: frames/s and ms for each decoder, fallbacks, and checks since start, plus a `colour:` clause when colour frames were decoded.
+- **Logs.** A `jpeg decoder` line every 10 s: frames/s and ms for each decoder, fallbacks, and checks since start, plus a `colour:` clause when colour frames were decoded.
 - **Tested.**
   - `tests/jpeg-hw/run.sh`: every frame of the Rewind recordings identical to libjpeg-turbo, in gray and in BGR; bad input (truncated, corrupted, garbage, not a JPEG, wrong size, empty), each followed by a good frame that decodes on the hardware; format changes; 4 decoders at once; and memory growth (fails over 64 MB). **Run it after every L4T update.**
   - Colour content: our cameras are mono, so `tests/jpeg-hw/make-colour-recordings.py` pans across real colour photos already on the Jetson (Ubuntu wallpapers, OpenCV samples) and writes 4:2:2 recordings at quality 50/80/95 plus 4:2:0 and 4:4:4 ones. All 2,038 colour 4:2:2 frames came out identical to libjpeg-turbo; 4:2:0 and 4:4:4 were refused, as they should be. **Re-run it with a real colour camera's Rewind recording when one arrives.**
   - Safety net: `touch /tmp/spectrum-jpeg-fault` changes one pixel of every hardware frame. The next check caught it, the hardware turned off, and both cameras stayed at 122 fps.
-  - Sticky CUDA fault (`echo sticky > /tmp/spectrum-971-fault-every`): the decoder fell back to libjpeg-turbo, the watchdog restarted PhotonVision after 1 s, and it came back on the hardware.
+  - Sticky CUDA fault (`echo sticky > /tmp/spectrum-detector-fault-every`): the decoder fell back to libjpeg-turbo, the watchdog restarted PhotonVision after 1 s, and it came back on the hardware.
 - **Switches.**
   - `SPECTRUM_JPEG_DECODER=nvjpg`, set by `08-select-detector.sh --jpeg nvjpg`. Without it, libjpeg-turbo.
   - A/B without a restart: `echo turbo > /tmp/spectrum-jpeg-decoder` (or `nvjpg`). It's read every 2 s; `rm` it to go back to the setting.
-- **Rollback.** `08-select-detector.sh bos --mwbd 20` without `--jpeg` goes back to libjpeg-turbo, and colour frames go back to cscore. The libraries from before are `/usr/lib/lib971apriltag.so.pre-nvjpg` (before any hardware decode) and `*.pre-colour` (before the colour path and the leak fix).
+- **Rollback.** `08-select-detector.sh gpu --mwbd 20` without `--jpeg` goes back to libjpeg-turbo, and colour frames go back to cscore. The libraries from before are `/usr/lib/libspectrum-gpu-apriltag.so.pre-nvjpg` (before any hardware decode) and `*.pre-colour` (before the colour path and the leak fix).
 - **Measured and dropped: the detector reading the decoder's buffer directly.** bos's `Detect(host, device)` takes a GPU pointer, and detections were identical on 2,856 frames. Against this path it skips the copy into PhotonVision's Mat (0.27 ms) and the detector's upload (0.16 ms). But the detector's first kernel reads the decoder's buffer 3x slower (0.21 against 0.07 ms), and its CPU step reads that uncached buffer too (+0.13 ms). Net: ~0.15 ms and ~0.1 ms of CPU a frame, plus ~0.15 ms more from PhotonVision skipping its full-size copies. Not worth a PhotonVision patch. (End-to-end totals in the harness were noisy: our test decodes queued behind PhotonVision's live decodes on the same engines. The per-step times above are consistent between runs.)
 - **Not done yet:** 4 real cameras, and a real colour camera.
 
 ### CUDA error handling (bos build)
 
-- `patches/bos-01-nonfatal-cuda.patch`: `CHECK_CUDA` throws instead of `LOG(FATAL)`.
+- `patches/detector-01-nonfatal-cuda.patch`: `CHECK_CUDA` throws instead of `LOG(FATAL)`.
   The JNI skips the frame and rebuilds the detector on the next one.
 - If frames fail continuously for 1 s, the JNI calls `_exit(1)` and systemd restarts
   PhotonVision. It uses `_exit`, not `abort()`: SIGABRT went through the JVM crash
   handler and Apport, which took 28 s and wrote a 156 MB `/var/crash` report.
 - The service runs Java with `-XX:-CreateCoredumpOnCrash` (06-install-fork-jar.sh),
   so real native crashes also restart quickly.
-- Measured with fault injection (`echo N > /tmp/spectrum-971-fault-every`):
+- Measured with fault injection (`echo N > /tmp/spectrum-detector-fault-every`):
   - **1 error per 100 frames:** no restart, 99% of frames still detected, ~59 fps.
   - **Every frame failing:** exits after 1.7 s, detecting again 6.2 s later. That is
     about 8 s total, vs about 62 s before the fixes.
@@ -577,7 +589,7 @@ Robot-side use is in [issue #10](https://github.com/Spectrum3847/2026-FM-SystemC
 
 - Topics the hardware doesn't have aren't published.
 - The JPEG topics need the detector library with `nativeJpegStatus` (rebuild with 07, then
-  `08-select-detector.sh bos --mwbd 20`).
+  `08-select-detector.sh gpu --mwbd 20`).
 - The hardware decoder (`--jpeg nvjpg`) leaked memory inside PhotonVision until it was switched to
   libnvjpeg's MJPEG mode (2026-09-24, see Hardware JPEG decode). While it's off, `jpegDecoder` reads
   `libjpeg-turbo`.
@@ -737,8 +749,8 @@ only goes out when it changes.
 - **Checked:** TopLeft → TopRight (identical settings) copied 22 fields, and the object-detection
   fields were skipped. Copying a pipeline onto itself, or an unknown group, returns 400.
 
-**Detector `max_line_fit_mse`** (`SPECTRUM_971_MAX_LINE_FIT_MSE`, `08-select-detector.sh --mse N`).
-- **Default 10** (AprilTag's), shown in the "971 library loaded" line.
+**Detector `max_line_fit_mse`** (`SPECTRUM_DETECTOR_MAX_LINE_FIT_MSE`, `08-select-detector.sh --mse N`).
+- **Default 10** (AprilTag's), shown in the "detector loaded" line.
 - **What it does:** the GPU line-fit filter rejects a quad if any side's fit error is above it (bos
   `apriltag.cc` → `line_fit_filter.cc`).
 - **Upstream #2138** lowers PhotonVision's CPU detector to 2.5, so tags cut off at the image edge
@@ -1041,7 +1053,7 @@ on the Jetson. The user guide is in the README; how the solver works is in
   - **Solve:** `nice -n 10 python3 -m fieldcal solve` from `/opt/spectrum/fieldcal`, with the
     current PhotonVision layout, the 971 replay (`FIELDCAL_971_DETECT`), and robot code's mounts
     as `--cad`.
-    - It inherits PhotonVision's `SPECTRUM_971_*` settings.
+    - It inherits PhotonVision's `SPECTRUM_DETECTOR_*` settings.
     - Output goes to `/opt/photonvision/fieldcal/runs/<recording>/`.
     - "Stop and solve" waits 1.5 s so the recorders finish their files.
   - **Mounts:**
@@ -1259,7 +1271,7 @@ came back.
   Focus card shows each cell against its own best since Reset.
 - **Checked:** TopLeft returned readings about 5 times a second at 1280x800.
 
-### Four Thriftiest Cams: CUDA's lock and per-frame event timing (2026-09-29, `bos-03`)
+### Four Thriftiest Cams: CUDA's lock and per-frame event timing (2026-09-29, `detector-03`)
 
 First run with 4 Thriftiest Cams (TopLeft, TopRight, BottomLeft, BottomRight; all 1280x800 MJPEG at
 122 fps, no tags in view, no dashboard streams, hardware JPEG decode on). PhotonVision used 2.2 cores
@@ -1288,34 +1300,34 @@ and the GPU sat at 40–45%, against 0.8 cores and 17% on 2026-09-26 (two camera
   `cudaEventSynchronize` and `cudaEventElapsedTime` on each, for a `VLOG(1)` timing report that is
   never printed. 16 of those events are recorded only for that report. That's ~60 calls per frame
   that take the shared lock for no result.
-- **The fix, `patches/bos-03-no-per-frame-event-timing.patch`:** the timing-only events are
-  recorded, and the report runs, only with `VLOG(1)` on or `1` in `/tmp/spectrum-971-event-timing`
+- **The fix, `patches/detector-03-no-per-frame-event-timing.patch`:** the timing-only events are
+  recorded, and the report runs, only with `VLOG(1)` on or `1` in `/tmp/spectrum-detector-event-timing`
   (re-read every 2 s, for A/B tests). The 7 events that are real sync points are unchanged.
 - **Measured live, 4 cameras, alternating 3 times, 10 s each:**
 
   | | Detect | PhotonVision CPU | Wakeups | GPU |
   |---|---|---|---|---|
   | Before (timing on) | 3.08 ms | 1.84 cores | 13,700/s | 36.5% |
-  | **`bos-03`** | **2.19 ms** | **1.48** | 12,000/s | 34.8% |
-  | `bos-03` + GPU lock | 2.14 ms | 1.33 | 10,250/s | 35.6% |
+  | **`detector-03`** | **2.19 ms** | **1.48** | 12,000/s | 34.8% |
+  | `detector-03` + GPU lock | 2.14 ms | 1.33 | 10,250/s | 35.6% |
 
   The same ~0.9 ms came off with 3 cameras (2.77 → 1.89 ms).
-- **GPU lock** (`detector/GpuDetectorJNI.cc`, `SPECTRUM_971_GPU_LOCK=1` or `1` in
-  `/tmp/spectrum-971-gpu-lock`, re-read every 2 s; **off by default**): one camera's `Detect()` at a
-  time, so the cameras queue once per frame instead of on every CUDA call. With `bos-03` it saves
-  another ~0.15 cores and costs no latency; before `bos-03` it saved 0.3 cores but added 0.3 ms.
-  The stats line shows `gpu lock wait` when it's on. **Measured before `bos-05`:** with the
+- **GPU lock** (`detector/GpuDetectorJNI.cc`, `SPECTRUM_DETECTOR_GPU_LOCK=1` or `1` in
+  `/tmp/spectrum-detector-gpu-lock`, re-read every 2 s; **off by default**): one camera's `Detect()` at a
+  time, so the cameras queue once per frame instead of on every CUDA call. With `detector-03` it saves
+  another ~0.15 cores and costs no latency; before `detector-03` it saved 0.3 cores but added 0.3 ms.
+  The stats line shows `gpu lock wait` when it's on. **Measured before `detector-05`:** with the
   first-stage graph, holding this lock across the graph recording could deadlock every camera
   (this camera waiting for the exclusive capture lock, another holding the shared lock while
   waiting for this one). Since the 2026-10-01 audit it's taken only after the recording; it's
-  still off by default, and health-check warns when `/tmp/spectrum-971-gpu-lock` is set.
-- **The GPU load is real work.** `nsys profile --trace=cuda` (8 s, 3,866 frames, with `bos-03`):
+  still off by default, and health-check warns when `/tmp/spectrum-detector-gpu-lock` is set.
+- **The GPU load is real work.** `nsys profile --trace=cuda` (8 s, 3,866 frames, with `detector-03`):
   0.65 ms of kernels and 0.13 ms of copies and memsets per frame, 31.6 kernel launches and ~58 CUDA
   calls in all. 0.78 ms × 483 fps ≈ 37%, what GR3D shows. Two kernels are 42% of it, and both work
   on the whole image whatever the scene: the first `cub::DeviceSelect::If` (149 µs, compacting the
   mostly-empty `BlobDiff` output) and `BlobDiff` (121 µs).
 - **Restart-to-restart noise is at least partly the scene.** After the cameras were replugged, the
-  same code without `bos-03` gave 2.8 ms and 1.84 cores instead of 4.4 ms and 2.2. The detector's
+  same code without `detector-03` gave 2.8 ms and 1.84 cores instead of 4.4 ms and 2.2. The detector's
   work after `BlobDiff` depends on how many candidate blobs each camera sees, so where the cameras
   point matters. Compare configurations in one run, alternating, as above.
 - **Also seen:** TopRight came up at 320x240 after one of the restarts (`health-check.sh` FAIL, one
@@ -1324,12 +1336,12 @@ and the GPU sat at 40–45%, against 0.8 cores and 17% on 2026-09-26 (two camera
 - **Batching the 4 cameras into one pass was ruled out:** they free-run, so a batch waits up to
   8 ms for the slowest frame.
 
-#### Fused `BlobDiff` (`bos-04`)
+#### Fused `BlobDiff` (`detector-04`)
 
 - **What:** `BlobDiffCompact` writes only the boundary points, straight into the compacted
   array: each block counts its points in shared memory and takes one global `atomicAdd`. It
   replaces `BlobDiff` writing all 4 slots of every pixel (~1M points, 8 MB at 1280x800) plus
-  `cub::DeviceSelect::If` reading them all back. `0` in `/tmp/spectrum-971-fused-blobdiff`
+  `cub::DeviceSelect::If` reading them all back. `0` in `/tmp/spectrum-detector-fused-blobdiff`
   (re-read every 2 s) goes back to the original pair; on by default.
 - **Order:** the points arrive in a different order. The first sort only orders by blob pair
   (bits 24–63), and nothing after it depends on the order within a pair except the angle sort of
@@ -1337,7 +1349,7 @@ and the GPU sat at 40–45%, against 0.8 cores and 17% on 2026-09-26 (two camera
   bits, which are unique), so the result depends only on which points exist.
 - **Checked:** `fieldcal_detect` over the synthetic 4-camera recording and the bench sessions
   0006–0009 and 0011 (~5,000 frames, 3,567 tag detections): the CSVs are **byte-identical** fused,
-  unfused, and against the Sep 24 build (`bos-01`/`-02` only).
+  unfused, and against the Sep 24 build (`detector-01`/`-02` only).
 - **Measured live** (4 cameras, alternating 3 times, 10 s each):
 
   | | GPU | Detect | PhotonVision CPU |
@@ -1358,7 +1370,7 @@ and the GPU sat at 40–45%, against 0.8 cores and 17% on 2026-09-26 (two camera
   place. So the GPU copy is used only on the same thread, for a frame of the same size whose 64
   sampled pixels match the decoded frame's. Every 240 such frames per camera (~2 s), the GPU copy
   is read back and compared in full. Any difference turns it off until PhotonVision restarts
-  (`971 GPU input: ... DIFFERS`). `0` in `/tmp/spectrum-971-gpu-input` turns it off live. The
+  (`971 GPU input: ... DIFFERS`). `0` in `/tmp/spectrum-detector-gpu-input` turns it off live. The
   stats line shows `gpu input N%`; it's 100% on all 4 cameras.
 - **Measured live** (alternating 3 times): detect **1.32 ms** against 1.55, PhotonVision CPU 1.26
   cores against 1.34, GPU unchanged (27%: the GPU-to-GPU copy replaced the upload). No
@@ -1369,11 +1381,11 @@ and the GPU sat at 40–45%, against 0.8 cores and 17% on 2026-09-26 (two camera
 | | Detect | PhotonVision CPU | GPU |
 |---|---|---|---|
 | Start (2026-09-29) | 4.4 ms | 2.2 cores | 40–43% |
-| + `bos-03` | 2.2 ms | 1.5 | 35% |
-| + `bos-04` | 1.9 ms | 1.4 | 28% |
+| + `detector-03` | 2.2 ms | 1.5 | 35% |
+| + `detector-04` | 1.9 ms | 1.4 | 28% |
 | + GPU input | 1.3 ms | 1.26 | 27% |
-| + first-stage graph (`bos-05`) | 1.2 ms | 1.23 | 25.6% |
-| + `bos-06`, `photonvision-37` (no gray copy); 10 clean restarts | **1.23 ms** | **1.14** | **25.7%** |
+| + first-stage graph (`detector-05`) | 1.2 ms | 1.23 | 25.6% |
+| + `detector-06`, `photonvision-37` (no gray copy); 10 clean restarts | **1.23 ms** | **1.14** | **25.7%** |
 
 Board power 9.9 W at the end, against 11.6 W at the start; tj 54.7 °C (fan on the quiet
 profile).
@@ -1397,7 +1409,7 @@ above them, every camera seeing every tag on every frame, no streams, 3 × 8 s e
 #### CUDA wait mode again, and splitting JPEG decode between hardware and CPU
 
 Same scene as the tag tests (cameras facing the ceiling lights, no tag), 4 cameras.
-- **CUDA wait mode** (`/tmp/spectrum-971-cuda-sync`, read when PhotonVision starts). Cycled
+- **CUDA wait mode** (`/tmp/spectrum-detector-cuda-sync`, read when PhotonVision starts). Cycled
   block, spin, yield twice, one restart each, 2 × 10 s after each start settled:
 
   | Mode | Detect (round 1 / 2) | Typical worst (1 / 2) | CPU |
@@ -1423,11 +1435,11 @@ Same scene as the tag tests (cameras facing the ceiling lights, no tag), 4 camer
   on the earlier plain scene), and freeing NVJPG gained only 0.1 ms. The CPU-decoded cameras also
   lose GPU input (an upload again), and the decode threads compete with the detection threads
   (cross-core wakeups 12k → 24k a second), so detection got 0.7–1.1 ms slower.
-- **New: `frame age at result`** in each `971 stats` line: capture (the first USB packet) to the
+- **New: `frame age at result`** in each `detector stats` line: capture (the first USB packet) to the
   end of detection, per camera. 13.5 ms here ≈ 8.1 (the camera sending the frame) + 3.0 (decode) +
   2.2 (detection); add half the exposure for mid-exposure to result.
 
-#### Detection masks drawn on the stream (`photonvision-40`, `bos-07`)
+#### Detection masks drawn on the stream (`photonvision-40`, `detector-07`)
 
 - **Why:** facing the shop's ceiling lights cost ~10 points of GPU and 0.6 ms before any tag was in
   view (above). On a field, the upper part of some cameras' views is arena lighting and truss.
@@ -1441,14 +1453,14 @@ Same scene as the tag tests (cameras facing the ceiling lights, no tag), 4 camer
   image fractions and edits a `DetectionMask` ({mode, boxes: [{x, y, w, h}]}, 0–1, on the image as
   displayed, i.e. after rotation). The setting lives on `AdvancedPipelineSettings`, so any advanced
   pipeline can use it; `VisionModuleChangeSubscriber.setProperty` converts it with Jackson.
-- **AprilCudaTag (GPU, `bos-07`):** `GpuDetectorJNI.setMask(handle, mode, boxes[])` (called by
+- **AprilCudaTag (GPU, `detector-07`):** `GpuDetectorJNI.setMask(handle, mode, boxes[])` (called by
   `AprilTagDetectionCudaPipe.setMask` from the pipeline's parameters, only when the mask changed).
   The library turns it into a keep/ignore image at the detector's half size. `ApplyMask` turns
   ignored pixels into "no contrast" (127) right after thresholding, so no blob, edge or tag is found
   there. It's part of the first-stage graph; switching the mask on or off records the graph again
   (at most once a second per detector; meanwhile the steps run one by one). Moving or resizing boxes
   only copies new bytes into the same GPU buffer. An "only inside" mask with no boxes does nothing.
-  Log: `971 detector hN: mask ignoring N box(es)`.
+  Log: `detector hN: mask ignoring N box(es)`.
 - **Object detection:** detections whose centre is ignored are dropped before PhotonVision's own
   filters.
 - **Checked** (`fieldcal_detect --mask`, synthetic TopLeft, 814 tags): ignoring the left half
@@ -1470,7 +1482,7 @@ a mask box added from one browser appeared live on another.
 
 #### Unplugging a camera, and cold boots, with 4 cameras (2026-09-29)
 
-All on the finished build (patches up to `photonvision-44`, `bos-07`). Logs recorded with
+All on the finished build (patches up to `photonvision-44`, `detector-07`). Logs recorded with
 `journalctl -f` and the kernel log.
 - **TopRight pulled for ~10 s, then plugged back into the same port:**
   - Frames stopped at the kernel's "USB disconnect". cscore retried opening it every 0.3 s.
@@ -1619,8 +1631,10 @@ inside "N: name". Suite: 5 tests, 1.5 min, all passing.
   the SCR it sends) to the host clock. The Thriftiest Cam sends both. On the stamp's meaning: it's
   0.74 ms before the first-packet stamp on average, so it marks roughly when the camera starts
   sending, not the start of exposure. `photonvision-13`'s half-exposure correction is unchanged,
-  and the camera's delay from the end of exposure to sending is still unmeasured
-  (`SPECTRUM_CAMERA_DELAY_US`, the robot spin test).
+  and the camera's delay from the end of exposure to sending is set to 2500 µs by default
+  (`SPECTRUM_CAMERA_DELAY_US`, `09-robot-tuning.sh` step 17: Team 100's rotating-disc figure for
+  the Thriftiest Cam in MJPEG), pending our own robot spin test. The TXMAN1 rotation replay
+  (tests/field-replay/RESULTS.md) can't separate it from the robot's log latency.
 - **Measured** (`tests/uvc-timestamps/run.sh`: v4l2-ctl, PhotonVision stopped, one or all
   cameras):
 
@@ -1637,7 +1651,7 @@ inside "N: name". Suite: 5 tests, 1.5 min, all passing.
   `11-uvcvideo-payload-cap.sh --install` (its own file, so the Camera Matching page's
   `payload_cap` rewrites never touch it). The parameter is also writable at run time; streams
   opened after the change use it (restart PhotonVision). `health-check.sh` checks it. Frame age
-  in the `971 stats` lines reads 0.5-1 ms higher, as the stamps are earlier and truer.
+  in the `detector stats` lines reads 0.5-1 ms higher, as the stamps are earlier and truer.
 - The fake robot result reader needed PhotonVision's own type string (`photonstruct:...`) to
   subscribe, and a topics-only subscription for the topics to be announced to it at all.
 
@@ -1721,8 +1735,12 @@ when the robot is short of a good pose:
   they're 24 px or more in the normal search's results or unseen for 300 ms. The moment any
   camera has a good view, no searches or crops, and the tracks are dropped.
 - **Guards:** after a full-size search taking T, the next waits at least 5 T (at most ~20% of the
-  time, however slow the scene makes them). The shared detector is built on the first frame
-  (~200 ms), not on the first search. Far-search detectors have their own tag family: adding a
+  time, however slow the scene makes them). Live, T is measured, so which frames get a full-size
+  search depends on timing by design (a slow scene or a busy GPU spaces them out). detector-replay
+  uses a fixed T instead (`--sweep-ms X`, default 16: a 1280x800 search of a real field, TXMAN1;
+  ~6 ms on a rendered scene; 0 = measured), so replays and tests/regression are repeatable: with
+  measured T the same session gave different far sightings run to run (2026-11-01). The shared
+  detector is built on the first frame (~200 ms), not on the first search. Far-search detectors have their own tag family: adding a
   family to a detector stores that detector's decode table in it, so sharing the camera's would
   overwrite and on destroy free the camera detector's table. The detection mask is applied to
   far tags by their centre. No OpenCV functions (PhotonVision's JVM has its own OpenCV; a second
@@ -1763,7 +1781,7 @@ when the robot is short of a good pose:
   Settings > Robot state; `GpuDetectorJNI.setFarSearch` / `farSearchStatus` (retried at most every
   5 s until the library is loaded). `/api/robotState` has the counters; `health-check.sh` reports
   it. Browser test `far-search.spec.ts`: the status, and no searches while off.
-- **`bos-08`, found by replaying recordings:** one frame of session 0008 (TopRight 174, a busy
+- **`detector-08`, found by replaying recordings:** one frame of session 0008 (TopRight 174, a busy
   bench scene) made a full-size search run for minutes (still going at 80 s; `fieldcal_detect
   --upscale 2`, which doesn't use the far search, hung on it too). In `RefineEdges`,
   `nsamples = max(16, edge length / 8)` is unbounded: a candidate quad with a corner far outside
@@ -1774,7 +1792,7 @@ when the robot is short of a good pose:
   reach it). Frame 174 at full size now takes a few ms; normal-size results are unchanged (0007:
   305 sightings before and after; bench test passes). Live, one such frame would have frozen a
   camera's thread: the time guard spaces searches out but can't stop one that has started.
-- **Replay: `far_replay`** (`detector/far_replay.cc`, `tests/far-search/replay.sh`). A whole Rewind
+- **Replay: `detector-replay`** (was `far_replay`; `detector/detector_replay.cc`, `tests/far-search/replay.sh`). A whole Rewind
   session, every camera merged in recording-time order, through per-camera detectors with
   PhotonVision's settings and the far search deciding on each frame on the recording's clock (its
   policy spans cameras, so they replay together). `--off` for a baseline, `--calib CAMERA=...`,
@@ -1785,7 +1803,7 @@ when the robot is short of a good pose:
   `detector/rewind_reader.h`, shared with `fieldcal_detect`.
   - **Known-answer check** (`replay.sh`): `far_search_test --write-session` writes a synthetic
     session (CamA: near tags for the first and last second, a moving 14 px tag all along; CamB:
-    none; JPEG quality 85). `far_replay` finds the far tag on 14 frames the normal search missed,
+    none; JPEG quality 85). `detector-replay` finds the far tag on 14 frames the normal search missed,
     all inside the no-good-view window (1.25-2.0 s), and nothing extra with `--off`.
   - **The five bench recordings** (2026-09-24, no far tags in them): all replay in 1-8 s; full-size
     searches 4.5-10 ms each (the replay shares the GPU with the live cameras); the only slow frame
@@ -1793,7 +1811,7 @@ when the robot is short of a good pose:
   - **Deadlines:** `replay.sh` gives each session 60 s + 1 s per 100 frames and reports TIMEOUT as
     a failure. The first run used a flat 15 min per session, which hid the stalled frame for 6 min.
 - **Not tested yet:** real far tags (on a field, or a long hallway). The library before the far
-  search is at `/usr/lib/lib971apriltag.so.before-far-search` on the Jetson.
+  search is at `/usr/lib/libspectrum-gpu-apriltag.so.before-far-search` on the Jetson.
 
 #### Tag contrast and the Gain slider (`photonvision-54`)
 
@@ -2002,7 +2020,7 @@ went back to the old value. Now it updates the store.
 
 For comparison, one camera alone took 1.45 ms and 7% GPU at the start.
 
-#### First stage as one CUDA graph (`bos-05`)
+#### First stage as one CUDA graph (`detector-05`)
 
 - **What:** `GpuDetector::RecordFirstStageGraph` records the fixed-size first stage once per
   detector: the labels memset, threshold and decimate (4 kernels), labeling (5 kernels), the
@@ -2010,7 +2028,7 @@ For comparison, one camera alone took 1.45 ms and 7% GPU at the start.
   it as one graph: 13 CUDA calls a frame become 1. `FirstStageGraphWanted` asks for a new
   recording if the input's GPU buffer or `min_white_black_diff` changes (at most 8 per detector
   slot, then it runs ungraphed). Used only with the fused `BlobDiff`, a gray image and no event
-  timing; `0` in `/tmp/spectrum-971-graph` goes back to launching the steps one by one.
+  timing; `0` in `/tmp/spectrum-detector-graph` goes back to launching the steps one by one.
 - **Recording must happen with no other CUDA work in the process.** The first version recorded
   inside `Detect()`, on the first frame. When all 4 cameras started at once, that broke CUDA
   calls on the other threads, which aren't allowed while any stream is capturing:
@@ -2022,19 +2040,19 @@ For comparison, one camera alone took 1.45 ms and 7% GPU at the start.
 
   That happened on 4 of 10 starts. The A/B tests had missed it, because they switched the graph on
   live, after startup. Now `processimage` records it holding `CudaCaptureLock` exclusively.
-  Every CUDA path in `lib971apriltag.so` holds that lock shared: detect, gray and colour decode,
+  Every CUDA path in `libspectrum-gpu-apriltag.so` holds that lock shared: detect, gray and colour decode,
   create and destroy. So does the TensorRT library, through `spectrum_cuda_lock_shared` /
   `spectrum_cuda_unlock_shared`, found with `dlopen(RTLD_NOLOAD)`. The lock is a
   writer-preferring `pthread_rwlock` (`PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`), since with
   8 threads taking it shared, glibc's default would let a recording wait indefinitely. Each
-  recording logs `971 detector hN: first-stage graph recorded`. `fieldcal_detect` (one thread)
+  recording logs `detector hN: first-stage graph recorded`. `fieldcal_detect` (one thread)
   records right before its first `Detect()`.
-- **The line-fit scan's stream (`bos-06`).** `cub::DeviceScan::InclusiveScanByKey` in `Detect()`
+- **The line-fit scan's stream (`detector-06`).** `cub::DeviceScan::InclusiveScanByKey` in `Detect()`
   had no stream argument, so it ran on the legacy default stream. That stream waits for every
   other blocking stream in the process, and holds them up, so each camera's line-fit scan waited on
   the other cameras' GPU work. Now it runs on the detector's own stream.
-- **Checked:** the same replay as `bos-04`, 3,567 detections, byte-identical with the graph on
-  and off (with `bos-06`), and against the original build.
+- **Checked:** the same replay as `detector-04`, 3,567 detections, byte-identical with the graph on
+  and off (with `detector-06`), and against the original build.
 - **`fieldcal_detect` hung** during that replay once the CPU was busy. Its decode threads waited
   only for a ring slot to read free, and a slot also reads free while another thread is still
   decoding the frame one ring earlier into it. Two threads then filled the same slot, one
@@ -2044,6 +2062,483 @@ For comparison, one camera alone took 1.45 ms and 7% GPU at the start.
 - **Measured live** (alternating 3 times): GPU **25.6%** against 27.6% (the gaps between 13 small
   launches), detect 1.20 against 1.23 ms, CPU unchanged (1.23 cores). The remaining CPU isn't
   launch overhead any more (below).
+
+#### The rest of `Detect()` as CUDA graphs too (`detector-11`)
+
+- **Why:** after `detector-05`, perf (2 cameras, 122 fps, no tags in view) still put ~29% of the camera
+  threads' CPU inside libcuda, plus nvgpu ioctls in the kernel; the detector's own code was ~1%.
+  nsys on `graph_bench` (below) showed why. Per `Detect()`, after the first-stage graph: 32 kernel
+  launches, 17 memsets, 5–6 copies back, 6 event records and 6 waits for the GPU: ~67 CUDA calls,
+  at ~10–15 µs of CPU each on this GPU (each launch is a submission through the nvgpu driver).
+  In a graph a kernel costs ~0.3 µs (40 empty kernels: 174 µs launched one by one, 32 µs as one
+  graph, launch and wait included). A memset or copy node in a graph still costs 3–8 µs.
+- **What:** the stages after the first become two graphs. Stage 2: the boundary-point sort, blob
+  extents, extent filter and point filter. Stage 3: the angle sort, line fits, peaks, peak sort,
+  peak extents and quad fits, and the fit quads straight into pinned memory. The host still waits
+  3 times a frame (point count, selected-point count, fit-quad count), against 6.
+  - **Sizes:** CUB picks its grids from the item count, which the host only learns by waiting.
+    So each graph is recorded for a size bucket (1024 up, ~25% steps), and the real counts stay
+    on the GPU. Entries past the real count are padding: sort keys of all ones (they sort after
+    every real key, and the radix sort is stable, so the real entries end up exactly where they
+    were), points the filters drop, and one extra run in a reduce-by-key that a 1-thread kernel
+    takes off the count. `FitLines` and `FitQuads` read their counts on the GPU and the blocks past
+    them return at once. The blob-extent scan is a one-block `cub::BlockScan` over the real quad
+    count (`cub::DeviceScan` over the bucket cost 36 µs instead of 7). Every scan and reduction is
+    integer, so all outputs for the real entries are the same as the one-by-one path's.
+  - **Memset and copy nodes as kernels:** after recording, each memset node and each small copy
+    becomes a kernel node (`CopiesAsKernels`; CUB's own memsets, the counts' copies back). That
+    took the CPU from ~400 to ~330 µs a frame. The first-stage graph gets the same treatment.
+  - **Recording:** like the first-stage graph, only while no other thread uses CUDA. `Detect()`
+    never records. When a bucket's graph is missing, that frame runs step by step and asks for it.
+    `processimage` then records the missing ones under the exclusive `CudaCaptureLock`, at most
+    once a second per camera (`StageGraphsWanted` / `RecordStageGraphs`). A detector needs a few
+    dozen at most; a recording takes ~0.3 ms plus ~0.35 ms to instantiate.
+  - **Switch:** `SPECTRUM_DETECTOR_GRAPHS=0` in the environment switches it off at start. `0` in
+    `/tmp/spectrum-detector-graphs` switches it off live (re-read every 2 s), for A/B tests. Off, or
+    with event timing, or without the first-stage graph, `Detect()` runs as before.
+- **`detector/graph_bench.cc`:** decodes a camera folder's frames once, then times `Detect()` as
+  the JNI bridge runs it: blocking sync, the frame copied into the detector's fixed buffer, graphs
+  recorded between frames. It reports the calling thread's CPU time
+  (`CLOCK_THREAD_CPUTIME_ID`) and wall time per call, and writes every detection with `%a`
+  (exact) floats. Build it with `cmake --build ~/build/gpu-detector --target graph_bench`.
+- **Same results:** byte-identical detections (id, hamming, decision margin, corners, centre) to
+  the build before `detector-11`, with the graphs on and off, on all 10 regression cameras. That's
+  2,182 detections at `min_white_black_diff` 20, and 3 cameras again at 5.
+- **Measured** (`graph_bench`, 150 frames x 2 timed loops, interleaved off/on x 6, PhotonVision
+  running 2 cameras meanwhile). Medians of the 6 runs' medians:
+
+  | Recording | CPU p50 (p95), off → on | Detect wall p50 (p95), off → on |
+  | --- | --- | --- |
+  | ceiling-4cam TopLeft (busy, no tags) | 1550 (1958) → **345 (416) µs** | 3.22 (4.94) → **2.02 (3.24) ms** |
+  | fieldcal-synth TopLeft (tags) | 1027 (1664) → **267 (382) µs** | 1.54 (3.47) → **1.28 (2.50) ms** |
+  | synthetic-near-far CamA (tags) | 1202 (1740) → **306 (386) µs** | 2.61 (4.00) → **1.61 (2.40) ms** |
+
+  Spread of the 6 runs' CPU medians: 251–376 µs on, 945–1587 µs off; they don't overlap. That's
+  about 4x less CPU per frame and 0.25–1.2 ms off each `Detect()`. Not yet measured live in
+  PhotonVision.
+
+  GPU time per `Detect()` (nsys): 695 → 728 µs on the busy ceiling camera (+5%: the padded sorts,
+  mostly the peak sort, which now runs CUB's multi-pass sort over the bucket instead of its
+  single-tile one), 366 + ~40 µs of memsets → 384 µs with tags.
+
+#### Edge border: drop tags at the image edge early (`detector-12`)
+
+- **What:** `SPECTRUM_DETECTOR_EDGE_BORDER_PX=N` (`08-select-detector.sh --edge N`; default 0 = off)
+  drops a candidate whose blob comes within N pixels of the image edge. It happens in the GPU
+  blob filter (`SelectBlobs`, next to the pixel-count, area and border-polarity checks), so an
+  edge tag never gets line fit, quad fit, decode or edge refinement. Like AOS's `pixel_border`
+  (50 px, `frc/orin/gpu_apriltag.cc`), which checks the final corners after detection.
+- **Units:** full-resolution pixels. The blob extents are already in full-resolution
+  coordinates even though this stage runs on the half-resolution image
+  (`QuadBoundaryPoint::x()` = 2 x decimated x + step), so N is compared directly: a blob is kept
+  only if `min_x, min_y >= N` and `max_x <= width - 1 - N`, `max_y <= height - 1 - N`.
+- **Stricter than AOS's N:** the blob box is the outline of the tag's black border, a pixel or
+  two outside the fitted corners, so N here drops slightly more than the same N on corners
+  (removed tags had corners 12 to N px from the edge). Rarely the other way: 6 of 3,556 kept
+  tags had a fitted corner up to 1.2 px inside N (the fitted lines reach past the blob).
+- **Fixed per process:** read once from the environment (shown in the "detector loaded" line)
+  and set on each detector when it is built (`GpuDetector::SetEdgeBorder`). The value lives in
+  the filter functor, which is baked into the recorded stage graphs (`detector-11`); `SetEdgeBorder`
+  drops the recorded graphs when the value changes, so they are recorded again.
+- **Not covered:** the far-tag search's crops (`far_search.cc`) don't use it, so it can still
+  find an edge tag (fieldcal-synth: the far search adds 161 sightings at 25 px and 169 at 50, against 106 with it off).
+- **Tools:** `detector-replay --edge N` (normal search only; with `--half`, N/2 rounded up in the small
+  frame; ignored with `--fullres`), `graph_bench --edge N`.
+- **Off = unchanged:** with 0 (and with no setting), byte-identical to the build before `detector-12`:
+  `graph_bench` `%a` output on all 10 regression cameras (3,556 detections, `--mwbd 20`), and
+  `detector-replay` CSVs on the 3 corpus sessions.
+- **Effect on the regression corpus** (`graph_bench`, normal search): 25 px drops 68 of 3,556
+  detections, 50 px drops 169, all on fieldcal-synth (the ceiling and synthetic-near-far
+  sessions have no edge tags). Every other detection is byte-identical.
+- **Cost:** four integer compares in a filter that already runs per blob, no new kernels or
+  copies; per-frame CPU and wall time didn't change beyond the noise (other jobs were running).
+  The saving is the line fit, quad fit, decode and refine of each dropped tag, which only shows
+  with tags at the edge.
+
+#### One wait for the GPU per frame: chained stages (`detector-13`, 2026-10-31)
+
+- **Per-frame map** (`graph_bench`, nsys `--cuda-graph-trace=node`, full clocks, PhotonVision
+  stopped; ceiling-4cam TopLeft = busy, no tags; TXMAN1 Q17 orin-left with its calibration):
+  - After `detector-11`, `Detect()` waited for the GPU 3 times (point count, stage-2 counts, fit
+    quads). Each wait cost **~100-120 µs** between the GPU's last op and the thread running again
+    (blocking sync through nvgpu). Within a frame the GPU sat idle ~460 µs (ceiling) between
+    the stages while the thread woke up and launched the next graph.
+  - GPU per frame (nsys-inflated): ceiling ~1.2 ms, TXMAN ~1.7 ms. Radix sort onesweep kernels
+    are 21-25% (19 passes a frame: 5 for the boundary sort, 8 for the angle sort over the full
+    64-bit key, 6 for the peak sort), `BlobDiffCompact` ~14%, labeling ~10%, the graphs' fill
+    kernels (26 a frame) ~5%.
+  - CPU after the last wait: 150 µs (ceiling) to 320 µs (TXMAN) of wall time. The decode workers
+    use ~850 µs of CPU per TXMAN frame, mostly `RefineEdges` and `UnDistort` (perf: 19% + 13% of
+    the process, `quad_decode_index` 5%).
+- **What:** stages 2 and 3 are launched right behind stage 1 with buckets guessed from the
+  recent counts. The guess is the largest count lately (decaying ~3% a frame) plus 1/8, rounded up
+  to a bucket. `Detect()` then waits once. Any bucket at least as large as the real count gives
+  exactly the same output (`detector-11`'s padding), so afterwards the host only checks that each
+  count fit. When one didn't (~4% of frames on the busy recordings, mostly as a scene gets busier),
+  stages 2 and 3 run again with the right buckets, as before. A new 1-thread kernel
+  (`GuardStage3`) makes stage 3 process nothing when its input doesn't fit its buckets (without
+  it, a too-small guess read padding indices: illegal memory access). Guessed graphs are
+  requested and recorded like any other stage graph (`StageGraphsWanted`). Until one is
+  recorded, that frame runs as before.
+- **Switch:** `SPECTRUM_DETECTOR_CHAIN=0` (environment, at start) or `0` in
+  `/tmp/spectrum-detector-chain` (live, re-read every 2 s) goes back to 3 waits. Default on: the
+  output is the same.
+- **Same results:** `graph_bench --out` (`%a`), this build against the build before, on every
+  regression camera and 4 TXMAN1 cameras (Q17 0002, Q24 0006, left/right, with calibration),
+  600 frames each: identical, 4,321 detections. `detector-replay --off` (which doesn't use the
+  graphs) is identical too.
+- **Measured** (`graph_bench`, 150 frames x 2 timed loops, chain off/on interleaved x 6, full
+  clocks, PhotonVision stopped; medians of the runs' medians, µs; "process" = all threads,
+  including the decode workers):
+
+  | Recording | thread CPU off → on | Detect wall off → on | process CPU off → on |
+  | --- | --- | --- | --- |
+  | ceiling-4cam TopLeft | 322 → **162** | 1514 → **1352** | 475 → 316 |
+  | fieldcal-synth TopLeft | 301 → **154** | 974 → **813** | 427 → 279 |
+  | synthetic-near-far CamA | 317 → **156** | 1050 → **884** | 443 → 286 |
+  | TXMAN1 Q17 orin-left (calib) | 362 → **201** | 2143 → **1977** | 1201 → 1047 |
+
+  About half of the calling thread's CPU and ~160 µs of each `Detect()`. GPU time +1% (the
+  guessed buckets are a little larger). Not yet measured live in PhotonVision.
+- **Tried, not kept:** skipping the worker pool on frames with no quads (same output, no
+  measurable gain) and decoding up to 4 quads on the calling thread (more calling-thread CPU,
+  no wall gain).
+- **What's left, by size:** (1) the decode workers' `RefineEdges`/`UnDistort`, ~0.6-0.7 ms of CPU
+  per busy calibrated frame: see `detector-15`. (2) The sorts: per-blob sorts were tried and
+  were slower (below). (3) The one remaining wait still costs ~110 µs of wake-up; spinning would buy that back
+  for ~0.3 ms of CPU a frame, so it isn't worth it. (4) Pre-existing: on the graph path, the
+  "Impossible increase in markers" check reads the pinned point count before any wait, so it
+  sees the previous frame's count (fixed in `detector-14`).
+- **Tools:** `graph_bench` now takes `--calib fx,fy,cx,cy,k1..k6` (the CPU tail as a calibrated
+  camera runs it) and `--threads N`, and prints the whole process's CPU too.
+
+#### Per-blob sorts: tried, slower (2026-10-31)
+
+- **Idea:** stage 3's angle and peak sorts order by blob first, and both arrays already arrive
+  grouped by blob, so sorting each blob's run alone gives exactly the same order with fewer passes
+  than the radix sort over the whole bucket (8 + 6 onesweep passes, ~21-25% of the GPU time).
+- **Result:** bit-identical detections on all 14 cameras, but slower. `cub::DeviceSegmentedSort`
+  copies counts back and waits inside (6 copies a frame), which breaks the stage 3 graph.
+  TXMAN Q17: thread CPU 200 → 1980 µs and wall 1969 → 2518 µs, even though GPU busy fell
+  ~120 µs. `cub::DeviceSegmentedRadixSort` can go in a graph, but it gives each blob one block,
+  so big blobs take long: wall 2.9 → 6.6 ms. Trimming the sorts' bit ranges saves no pass. Not
+  kept.
+
+#### The point-count check after the wait (`detector-14`)
+
+- On the graph path, `Detect()` checked "Impossible increase in markers" (the first stage's point
+  count against its buffer) before waiting for the GPU, so it read the previous frame's count.
+  The check now runs after the first wait: in `DetectGraphStages`, in `DetectChainedStages`, and
+  in the step-by-step fallback after its copy. The check is unchanged off the graph path.
+  Detections are identical (TXMAN Q17 left, 600 frames, with chaining on and off, and with the
+  graphs off).
+
+#### RefineEdges on the GPU (`detector-15`, off by default)
+
+- **What:** `SPECTRUM_DETECTOR_GPU_REFINE=1` (at start) or `1` in `/tmp/spectrum-detector-gpu-refine`
+  (live) runs the edge refinement (`RefineEdges` with `UnDistort`/`ReDistort`) as one kernel after
+  the quads are fit: one block per quad, one warp per edge. The quads go in, and the refined
+  corners come out, through pinned memory the kernel reads and writes directly (CPU and GPU share
+  DRAM: no copies). Then the worker threads only decode. It costs one more wait for the GPU per
+  frame that has quads. The edge search and undistortion run in float (Orin's GPU runs double
+  at a fraction of float's rate: the kernel took 314 µs a frame in double, ~70 µs in float).
+  The sums and the line fits stay in double. Corners move by up to ~1e-4 px against the CPU's.
+- **Accuracy** (`judge.py`, all 6 TXMAN1 matches, 13 sessions, `--off --mwbd 20 --mse 10` with each
+  camera's calibration; GPU against CPU refinement, same build):
+  - in-frame p50 1.282 → 1.279 px (paired CI −0.010..+0.001), p90 9.133 → 9.133 (CI −0.112..+0.105);
+    per sighting 28% better, 28% worse, 44% same, median paired difference 0.0000 px.
+  - static jitter median 0.084 → 0.085 px (CI −0.001..+0.002), 32 tag-stretches.
+  - sightings 38,489 → 38,482: 20 lost (10 checkable, median 4.95 px in-frame error), 13 gained (4
+    checkable, median 5.38 px), all mostly poor sightings. Smoothness 1.144 → 1.145.
+  - No worse.
+- **Measured** (`graph_bench`, 150 frames x 2 timed loops, CPU/GPU interleaved x 6, full clocks,
+  PhotonVision stopped, `detector-13` on; µs, medians of the runs' medians):
+
+  | Recording | process CPU (all threads) | Detect wall | calling-thread CPU |
+  | --- | --- | --- | --- |
+  | TXMAN1 Q17 orin-left (calib, busy) | 1049 → **537** | 1975 → 2027 | 199 → 290 |
+  | TXMAN1 Q24 orin-right (calib) | 1018 → **478** | 1911 → 1889 | 188 → 280 |
+  | fieldcal-synth TopLeft (no calib) | 280 → 329 | 812 → 943 | 154 → 248 |
+  | ceiling-4cam TopLeft (no calib) | 313 → 343 | 1355 → 1481 | 159 → 259 |
+
+  On busy calibrated cameras it halves the CPU per frame (−0.5 ms of worker CPU) for about the
+  same wall time. Without a calibration (refinement is cheap) it costs ~+130 µs of wall time and
+  a little CPU, for the extra wait. GPU +~70 µs a frame (nsys, TXMAN Q17).
+  - A polling wait instead of blocking was tried: ~−20 µs wall for +60 µs CPU. Not kept.
+- **Next step:** done in `detector-16` (below): no extra wait.
+- Off by default until reviewed. Off, the output is identical to `detector-14`.
+
+#### Corners and RefineEdges inside the stage 3 graph (`detector-16`, off by default)
+
+- **What:** `SPECTRUM_DETECTOR_GPU_REFINE=2` (read at start: it is recorded into the stage graphs)
+  ends stage 3's graph with two more kernels:
+  - `CornersFromFitQuads`: `UpdateFitQuads` with its area and angle checks, then
+    `AdjustPixelCenters`, one thread per fit quad.
+  - `detector-15`'s refinement kernel.
+  Both write into pinned memory, so `detector-15`'s extra wait is gone. The host takes the valid
+  corners in the fit quads' order and their refined corners, then only decodes.
+  - The image pointer, the calibration and an on/off flag are read from pinned memory each
+    frame, not baked into the graph.
+  - Without a lens calibration (all distortion coefficients 0) the flag is off: both kernels
+    return at once, and the CPU fits and refines as before. Its refinement is cheap there, and the
+    kernels cost ~+50 µs of wall time a frame (measured before this gate).
+  - `0` in `/tmp/spectrum-detector-gpu-refine` also turns the flag off, live.
+  - It needs the stage graphs (`detector-11`). A frame that runs step by step uses the CPU.
+- **Same results with it off:** identical to `detector-15` on all 14 cameras (`graph_bench --out`).
+  With it on, uncalibrated cameras are identical too (fieldcal-synth, synthetic-near-far).
+- **Accuracy** (`judge.py`, all TXMAN1, `detector-replay --graphs` so the in-graph path runs; against
+  CPU refinement):
+  - in-frame p50 1.283 → 1.278 px (CI −0.011..+0.000), p90 9.133 → 9.130 (CI −0.109..+0.102).
+  - static jitter 0.084 → 0.085 px (CI −0.001..+0.002).
+  - sightings 38,489 → 38,482 (20 lost, 13 gained), the same as `detector-15`. Corners match
+    `detector-15`'s to 2e-5 px.
+  - Not worse.
+- **Measured:** see the table under `detector-17` (`graph_bench`, 6 interleaved runs).
+- The judge's replays ran before the calibration gate, when frames outside the stage graphs used
+  `detector-15`'s refinement. Those frames now refine on the CPU. That changes 22 corners of the
+  38,482 sightings (by ≤0.1 px) and none of the sightings.
+- **`detector-replay --graphs`:** the normal search through the CUDA graphs, as PhotonVision runs it
+  (identical detections). Needed to replay anything that only runs inside the graphs.
+
+#### The decode in the graph too (`detector-17`, off by default)
+
+- **What:** `SPECTRUM_DETECTOR_GPU_REFINE=3` (read at start) is `detector-16` plus
+  `quad_decode_index` (apriltag.c) as a third kernel in stage 3's graph, one block (64 threads)
+  per quad. The block does the homography (`homography_compute2`, and `matd_inverse`'s singular
+  check), the border samples and gray models, the bit samples, the sharpening, the code, the
+  table lookup (the family's quick-decode table, copied to the GPU once), and the rotated H, centre
+  and corners.
+  - The samples are taken in parallel. One thread adds them up, in the CPU's order.
+  - The rotations' cos/sin come from the host.
+  - Results go to pinned memory. The host makes the `apriltag_detection_t`s, then reconciles
+    and sorts as before. The worker threads aren't used on that path.
+  - One tag family only, and only calibrated cameras (the same per-frame flag as `detector-16`).
+    Anything else, or a frame outside the stage graphs, decodes on the CPU as before.
+- **Same results:** with it off, identical to `detector-16`. On, against `detector-16` (`graph_bench --out`, %a, 600 frames, 10
+  calibrated cameras: fieldcal-synth x4 with their lens calibrations, TXMAN1 Q17/Q24/Q32 left and
+  right): **ids, hamming, decision margins and corners bit-identical** on all 5,550 detections.
+  Uncalibrated cameras are identical to the CPU path.
+- **Accuracy** (`judge.py`, all TXMAN1, `--graphs`; against CPU refinement): as `detector-16`.
+  - in-frame p50 1.282 → 1.278 (CI −0.010..+0.001); static jitter 0.084 → 0.085 (CI −0.001..+0.002).
+  - 38,482 sightings, the same set as `detector-16`.
+- **Speed:** the decode kernel is ~269 µs of GPU a frame on TXMAN Q17 (nsys). It was 340 µs
+  before the homography's eliminations and the two gray models were spread over the block's
+  threads (still bit-identical). It runs in double, as the CPU does, for identical results, and
+  the Orin GPU's double rate is low.
+- **Measured** (`graph_bench`, 150 frames x 2 timed loops, the three interleaved x 6, full clocks,
+  PhotonVision stopped; µs, medians of the runs' medians; thread CPU / Detect wall / process CPU):
+
+  | Recording | CPU refine and decode | `detector-16` (`=2`) | `detector-17` (`=3`) |
+  | --- | --- | --- | --- |
+  | TXMAN1 Q17 orin-left (calib, busy) | 200 / 1975 / 1045 | 172 / **1949** / 426 | **128** / 2133 / **132** |
+  | TXMAN1 Q24 orin-right (calib) | 189 / 1914 / 1019 | 168 / **1808** / 372 | **127** / 1970 / **131** |
+  | ceiling-4cam TopLeft (no calib) | 162 / 1360 / 317 | 164 / 1373 / 317 | 161 / 1388 / 317 |
+  | fieldcal-synth TopLeft (no calib) | 153 / 814 / 276 | 155 / 830 / 279 | 154 / 843 / 278 |
+
+  - `detector-16`: −60% process CPU on calibrated cameras, with the same or slightly better wall
+    time.
+  - `detector-17`: −87% process CPU (the worker threads aren't used), but ~+160 µs of wall time
+    over `detector-16` for the decode kernel.
+  - Uncalibrated cameras: +13..16 µs (`=2`) and +28 µs (`=3`) of wall time. The gated kernels are
+    still nodes in the graph. Recording separate graphs without them for uncalibrated cameras
+    would remove that.
+  - So: `=2` when wall time matters most, `=3` when the CPU runs out (more cameras). Both are
+    off by default until reviewed.
+
+#### GPU offload ladder (`08-select-detector.sh --gpu-level N`, 2026-10-31)
+
+One number for where the detector's work runs, from most GPU (5) to most CPU (0). When the GPU is
+the bottleneck (a TensorRT model beside the tag cameras), step **down** one level at a time: each
+step is ordered to free the most GPU for the least latency first. `--gpu-level list` prints it.
+Individual flags given as well (`--gpu-refine`, `--graphs`, `--chain`, `--far`) override the level.
+
+| Level | Settings | GPU per camera vs L3 | Process CPU per frame | Detect wall | Change |
+| --- | --- | --- | --- | --- | --- |
+| 5 | `GPU_REFINE=4` (`detector-18`, float decode), graphs, chain, far on | ~+160 µs/frame (~+2% GPU) | 134 µs (~2% core) | 1958 µs | restart |
+| 4 | `GPU_REFINE=2` (`detector-16`), graphs, chain, far on | ~+70 µs/frame (~+1%) | 426 µs (~5% core) | **1949 µs** | restart |
+| 3 | `GPU_REFINE` unset (CPU refine and decode), graphs, chain, far on: today's default | baseline | 1045 µs (~13% core) | 1975 µs | restart |
+| 2 | L3 + far search off | frees the far search, only while starved: 19.4 → 16.5% GPU, −0.4 W (5 cameras, live) | same | same (worst detect ~2 → ~1 ms while starved) | live |
+| 1 | L2 + chain off (`SPECTRUM_DETECTOR_CHAIN=0`) | ~−1% of the detector's GPU | +160 µs | +160 µs | env at start; `0` in `/tmp/spectrum-detector-chain` live |
+| 0 | L1 + graphs off (`SPECTRUM_DETECTOR_GRAPHS=0`) | ~0 (same kernels, more gaps) | ~+0.3-0.5 ms (estimate: ~67 CUDA calls at 10-15 µs, `detector-11`) | worse | env at start; `0` in `/tmp/spectrum-detector-graphs` live |
+
+- **Numbers:** `graph_bench` on TXMAN1 Q17 orin-left (calibrated, busy), the `detector-17` table;
+  GPU from nsys (decode kernel ~269 µs, refine kernel ~70 µs a frame; nsys inflates them, so
+  estimates). % of a core and % GPU are per camera at 122 fps (µs × 122 / 10⁶). The far-search row is
+  `photonvision-55`'s live A/B. Uncalibrated cameras run the CPU path at levels 3-5 alike
+  (+13..28 µs wall for the gated kernels at 4/5).
+- **Why this order:**
+  - 5 → 4 frees the decode kernel (~90 µs/frame in float) at the same latency, for +0.3 ms of
+    worker CPU that runs in parallel. So 5 beats 4 unless the GPU is what's short.
+  - 4 → 3 frees the refine kernel (~70 µs) for +0.6 ms CPU and about the same wall time.
+  - 3 → 2 frees the far search's GPU, but only while no camera has a good view (with one it is
+    already off), and costs range (tags under ~20 px). Last of the useful steps.
+  - 1 and 0 free no GPU work: graphs and chaining only cut CPU launch cost and GPU waits. **Never
+    worth stepping down to for a busy GPU**; they're for debugging.
+- **Level 5 is `detector-18`** (2026-10-31): the float decode gives detector-17's CPU (134 vs 132 µs)
+  at detector-16's wall time (1958 vs 2133 µs) and frees ~180 µs of decode kernel (269 → 87 µs);
+  same tags and corners on TXMAN1, margins within 0.5%. Without it built, level 5 falls back to
+  `GPU_REFINE=3` (`detector-17`); `--gpu-level 5 --gpu-refine 3` (bench `ladder` level `5d`) forces it.
+- **Recommended default:** level 5 (or 4 if the GPU is short) once the bench `ladder` step confirms it live (best wall time,
+  −60% CPU on calibrated cameras). Until then 3.
+- **Before the ladder: Tag FPS max** (`photonvision-100`, per pipeline: AprilTag tab, and the
+  AprilTag + Object pipeline). It caps how many frames a second the camera processes without
+  changing the camera mode. Skipped frames are never grabbed, so they aren't decoded either. Every
+  per-frame cost (detector GPU, worker CPU, NVJPG or CPU decode) scales with it: 122 → 60 fps on a
+  side camera roughly halves that camera's share, which is far more than any ladder step frees. The
+  per-frame latency doesn't change (each processed frame is still the newest). Frames are taken on a
+  fixed schedule (every 1/max s), so 60 means 60, not ~48. Idle mode (30 fps) and deep idle (5 fps)
+  still apply; the lower rate wins. Default 0 = every frame (unchanged). Object Detection pipelines
+  have the same cap as "Object FPS max" (default 30 on the Jetson).
+- **Off the ladder, below it: Tags on CPU (NAPA)** (`photonvision-101`, per pipeline: AprilTag + Object
+  and CUDA AprilTag tabs). The tags move entirely to the CPU, on NAPA (next section), and the GPU detector
+  isn't run, so the GPU is left to TensorRT. Live, with 2 cameras at 122 fps and yolo11n at 30 fps, GPU use went
+  from 63% to 42%, and tags only from 33% to 4%. Tag latency was the same or better, and about 0.2 cores more
+  CPU. Use it when Tag FPS max and the ladder aren't enough, or when objects matter more than the GPU detector's
+  extra range: GPU far search, masks and edge refinement don't apply.
+- **Not on the ladder: early non-tag reject** (`detector-20`, off by default): `SPECTRUM_DETECTOR_EARLY_REJECT=4`
+  + `SPECTRUM_DETECTOR_EARLY_MODE=border` checks each quad's border on its unrefined corners and skips
+  `RefineEdges` + decode for non-tags. At level 3 (CPU refine, calibrated) it saves ~520 µs of worker CPU a
+  frame (77%, ~6% of a core per camera at 122 fps) but loses 0.45% of sightings on TXMAN1, some of them
+  large tags. Opt-in only, not in `08-select-detector.sh` yet; no effect at levels 4/5. `tests/early-reject`.
+- **Not on the ladder: JPEG decode.** `--jpeg nvjpg` decodes on the two NVJPG engines, which are not
+  the GPU, so it doesn't compete with TensorRT. `--jpeg turbo` (or `echo turbo >
+  /tmp/spectrum-jpeg-decoder`, live) moves it to the CPU: measured 0.52 → 0.85 cores for 2 cameras
+  (~+0.16 cores per camera) and 2.0-2.9 ms per frame depending on the scene.
+- **Live or restart:** `GPU_REFINE` is read at start (recorded into the stage graphs); `0` in
+  `/tmp/spectrum-detector-gpu-refine` turns it off live. Graphs and chain: env at start; their
+  `/tmp` files can only turn them off, live (re-read every 2 s). Far search: PhotonVision's robot
+  state (Settings > Robot state, `POST /api/robotState {"farSearch": …}`), live and saved; `08`
+  sets it through the API when PhotonVision is up.
+- **Bench:** `tests/bench-session/run.sh ladder` walks `LADDER_LEVELS` (default `5 4 3 2`),
+  one restart per level, interleaved over `BENCH_ROUNDS`, with tags in view and a per-camera
+  calibration check. It replaced the `gpurefine` step (that name still runs it). Every
+  measurement now has power: tegrastats `VDD_IN` (board) and `VDD_CPU_GPU_CV` (CPU+GPU rail),
+  average and max, W.
+
+#### NAPA: AprilTags on the CPU (`photonvision-101`, `detector/napa`, 2026-11-01)
+
+NAPA (github.com/zwatx/NAPA, by **Zachary Wilson**, GPL-3.0-only with a section 7(b) credit term) is a
+sparse-sampling CPU AprilTag detector. `tests/napa-eval` evaluated it on all of TXMAN1, and it is now a
+backend of the fork:
+- **Library:** `third_party/napa` (v0.5.1, `de613ad`, unmodified) + `patches/napa-*.patch` (applied at build by
+  `scripts/jetson/napa-src.sh`) + `detector/napa/` → `libspectrum-napa-apriltag.so`
+  (`scripts/jetson/07-build-napa-detector.sh`; plain gcc, no CUDA/OpenCV/WPILib).
+  - `napa-01-early-slack`: the early decode's slack as a setting (`napa_set_early_slack`, `Config::early_slack`,
+    JNI `setEarlySlack`; default 2 = NAPA's). 2 is right on TXMAN1: 0 loses 0.8% of sightings, 3 gains 0.03%.
+    The fork's Java side and UI don't call it yet.
+  - `napa-02-speed`: aarch64 NEON 64-bit dark mask and tile min/max, and the stride-1 level reads the frame
+    in place (no copy). Detections byte-identical on all 13 TXMAN1 sessions; min 16 2.32 → **2.09 ms**
+    (−10%), far search 1.24 → **1.16 ms** (−6%), min 32 −3.5% (`tests/napa-profile`).
+  - Builds for the Jetson and SystemCore (aarch64; cross with WPILib's `aarch64-bookworm-linux-gnu`
+    toolchain) and for x86_64 (glibc 2.35, cross with `x86_64-linux-gnu-g++`). `napa_test` passes on all three.
+  - Install to `/usr/lib`. Without it, the NAPA options log once and keep the normal detector.
+- **Handles:** one per camera (`napa_far::Detector`), each with its own lock. NAPA has no internal threads, so
+  a camera's detect is one core's time. There is no "threads" setting: more cameras use more cores.
+- **Corners:** AprilTag's order (`p0` = tag (−1,1) ... `p3` = (−1,−1)) in OpenCV's pixel convention, with the
+  homography solved from the 4 corners and the centre from it. That is what the GPU detector's JNI returns, so
+  PhotonVision's single-tag pose, multi-tag, TagQuality and TagContrast paths take the results unchanged. NAPA
+  reports OpenCV's corner order, so the conversion is the permutation {1,0,3,2}. On a rendered tag the
+  corners are within 0.002 px (`napa_test`).
+- **Fork settings** (all off by default):
+  - AprilTag pipeline: **Detector: NAPA** (AprilTag 3 stays the default and the switch). Decimate, blur,
+    threads and refine edges are AprilTag 3's and don't apply. The low-CPU half-res decode keeps AprilTag 3.
+  - CUDA and AprilTag + Object pipelines: **Tags on CPU (NAPA)**.
+  - Both: **NAPA min tag px** (16), **NAPA max hamming** (1, which replaces the hamming filter),
+    **NAPA far search** (off), **NAPA far min tag px** (16).
+  - Tag FPS max and idle rates apply as before, and decision margin filters as before.
+  - The 7(b) credit is on the Settings > Device card and in `ExternalLicenses/NAPA-License`.
+- **Far search** (`napa_far.cc`): the full frame at min 32 every frame, and min 16 in tracking crops around
+  tags under 48 px (6x side) and in one capped sweep band (of 4, ≤ 60/s, time guard 5x). It is a small port of
+  `far_search.cc`'s crop tracking, sweep schedule and time guard, because that file is tied to the 971
+  detector's upscaling and structures.
+- **TXMAN1** (`tests/napa-eval` section 6, base = GPU detector with far search, 39,844 sightings; one A78AE
+  thread):
+
+  | | Sightings | Bad | Range p99 | ms/frame mean (p95) |
+  | --- | --- | --- | --- | --- |
+  | NAPA min 32 | 34,625 | 12.0% | 7.31 m | 0.49 (0.61) |
+  | NAPA min 16 | 44,954 (+12.8%) | 11.5% | 7.89 m | 2.34 (2.70) |
+  | NAPA far search | 43,057 (+8.1%) | 11.2% | 7.86 m | 1.25 (1.64) |
+  | AprilTag 3 decimate 2 | 38,916 | 11.6% | 7.73 m | 17.2 (21.8) |
+
+  Median in-frame error and static jitter are the GPU detector's. The p75 in-frame tail is ~0.2 px worse.
+- **Live on the Jetson, clocks auto** (`tests/object-detection/run.sh live` with `TAGS_ON_CPU=0/1`, 2 Thriftiest cams at
+  1280x800 122 fps, clocks auto, 60 s each, NVJPG decode in both, no tags in view):
+
+  | | Tag latency p50 / p95 | GPU | PhotonVision CPU | Board power | tj |
+  | --- | --- | --- | --- | --- | --- |
+  | GPU detector, tags only | 19.7 / 23.2 ms | 33% | 1.85 cores | 7.7 W | 71 °C |
+  | NAPA on CPU, tags only | 19.9 / 21.9 ms | 4% | 1.82 cores | 7.2 W | 72 °C |
+  | GPU detector + yolo11n at 30 fps | 18.4 / 24.2 ms | 63% | 2.00 cores | 10.4 W | 74 °C |
+  | NAPA on CPU + yolo11n at 30 fps | 19.1 / 21.0 ms | 42% | 2.23 cores | 9.9 W | 74 °C |
+
+  - With NAPA, YOLO's batches took 10.3 ms instead of 12.9 ms, and their queue wait dropped from 4.4 to 2.7 ms.
+  - The p95 tag latency is ~1-3 ms better, because the CPU detector doesn't wait behind TensorRT for the GPU.
+  - Cost: up to ~0.2 cores (min 16, every frame, no tags in view). Expect more with tags and clutter; the
+    replay's 2.3 ms per frame is ~0.28 cores per camera at 122 fps.
+  - Not yet measured live with tags in view.
+
+  - Same day, clocks auto (`spectrum-clocks` deep state, CPU 729 MHz, GPU 306 MHz); see the full-clock rerun below.
+
+- **Live at full clocks** (`spectrum-clocks mode full`: GPU 1020 MHz, CPU 1728 MHz, EMC 3199 MHz, checked
+  before every condition). 2 Thriftiest cams at 1280x800 122 fps, NVJPG decode, 60 s per condition, PhotonVision
+  restarted per condition (`run.sh live` rewrites the pipelines), conditions interleaved GPU / NAPA / far, 2
+  rounds, means of both. **No tags in view on the bench: this is the base cost**, not the cost with tags and clutter.
+  Logs: Jetson `~/SpectrumJetson/logs/napa-ab-full/` (driver `napa-ab-full.sh`).
+
+  | Condition | Tag latency p50 / p95 / max | Tag fps (per cam) | GPU | PhotonVision CPU | Top threads (cores) | YOLO batch / queue wait | VDD_IN | CPU_GPU_CV | tj max |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | GPU detector, tags only | 14.9 / 15.7 / 28.4 ms | 121.3 | 18% | 0.38 cores | decode 0.18, VisionRunner 0.09 | | 9.0 W | 2.75 W | 75 °C |
+  | NAPA min 16, tags only | 14.9 / 15.7 / 21.6 ms | 121.3 | 1% | 0.63 cores | VisionRunner 0.36, decode 0.19 | | 8.7 W | 2.56 W | 77 °C |
+  | NAPA far search, tags only | **13.8 / 15.0 / 20.3 ms** | 121.3 | 1% | 0.38 cores | decode 0.17, VisionRunner 0.13 | | **8.5 W** | **2.39 W** | 77 °C |
+  | GPU detector + yolo11n 30 fps | 14.8 / 16.1 / 28.2 ms | 121.3 | 42% | 0.67 cores | TensorRT 0.24, decode 0.19, VisionRunner 0.11 | 6.3 / 2.9 ms | 12.0 W | 4.58 W | 80 °C |
+  | NAPA min 16 + yolo11n 30 fps | 15.3 / 16.3 / 23.4 ms | 121.3 | 28% | 0.93 cores | VisionRunner 0.38, TensorRT 0.25, decode 0.21 | 6.1 / 2.9 ms | 12.0 W | 4.61 W | 79 °C |
+  | NAPA far + yolo11n 30 fps (extra) | 14.2 / 15.3 / 25.3 ms | 121.3 | 30% | 0.67 cores | TensorRT 0.23, decode 0.19, VisionRunner 0.15 | 5.5 / 3.6 ms | 11.4 W | 4.19 W | 80 °C |
+
+  - At full clocks NAPA min 16 is no faster than the GPU detector at p50/p95 (14.9 / 15.7 ms both), but its
+    max is lower (21.6 vs 28.4 ms). The far search is ~1 ms better at p50 and p95 than both.
+  - NAPA min 16 costs ~0.25 cores more than the GPU detector (VisionRunner threads 0.36 vs 0.09 cores). The far
+    search costs nothing measurable over the GPU detector (0.38 cores both) on an empty scene.
+  - GPU: tags take 18% of the GPU at 1020 MHz; NAPA takes it to 1%. With yolo11n: 42% vs 28-30%.
+  - YOLO batches are ~6 ms at full clocks (vs ~10-13 ms at auto) in every condition; the NAPA advantage on batch
+    time seen at auto clocks is gone (6.3 vs 6.1 ms; queue wait 2.9 both). Far + YOLO shows 5.5 ms batches.
+  - Power: NAPA min 16 saves ~0.3 W board / 0.2 W CPU_GPU_CV tags only, ~0 with YOLO; far saves ~0.5-0.6 W.
+  - Temps crept up through the run (tj 67 -> 80 °C, < 85), so round 2 reads slightly hotter for every condition.
+  - Top threads: "decode" is SpectrumDecoder (NVJPG JPEG decode, ~0.18 cores in all conditions), VisionRunner
+    is the two cameras' pipeline threads (where NAPA runs), TensorRT is the YOLO service thread.
+- **Profile** (`tests/napa-profile`): ~85% of NAPA's time on field frames is the run-length front end (tile
+  threshold, dark runs, union-find; 35k runs a frame at min 16), the edge fits and decodes under 10%.
+- **SystemCore / CM5:** the same library is the CPU detector the 2027 robot should use, with min 16, or with far
+  search when CPU is short. Confirm on a real CM5 (`tests/napa-eval` section 4 caveats).
+
+#### The decode in float (`detector-18`, off by default)
+
+- **What:** `SPECTRUM_DETECTOR_GPU_REFINE=4` is `detector-17` with the decode kernel in float
+  (`DecodeQuadsKernelF`): the homography, sampling, gray models and sharpening in float. It is
+  generated from the double kernel with every double made float. The decode kernel goes from
+  ~269 to **~87 µs** of GPU a frame (nsys, TXMAN Q17).
+- **Results against `detector-16`** (`graph_bench --out`, 600 frames, 12 cameras: fieldcal-synth x4
+  with calibration, synthetic-near-far, ceiling, TXMAN1 Q17/Q24/Q32 left and right):
+  - **ids and hamming identical**: 5,897 detections, none gained, lost or changed.
+  - Decision margins: up to 0.70 apart (≤0.5% relative); most aren't bit-equal.
+  - Corners: ≤0.0005 px apart.
+  - TXMAN1 full replays (`--graphs`): the same 38,482 sightings as `detector-17`. Margins up to
+    2.5 apart and corners up to 0.01 px at the CSV's precision.
+- **Accuracy** (`judge.py`, all TXMAN1, against CPU refinement):
+  - in-frame p50 1.282 → 1.281 (CI −0.009..+0.005), p90 9.135 → 9.122 (CI −0.124..+0.125).
+  - static jitter 0.084 → 0.085 (CI −0.001..+0.003).
+  - Not worse.
+- **Measured** (`graph_bench`, the three interleaved x 8, full clocks, PhotonVision stopped; thread
+  CPU / Detect wall / process CPU, µs):
+
+  | Recording | `detector-16` (`=2`) | `detector-17` (`=3`) | `detector-18` (`=4`) |
+  | --- | --- | --- | --- |
+  | TXMAN1 Q17 orin-left | 172 / 1952 / 427 | 130 / 2134 / 133 | **130 / 1958 / 134** |
+  | TXMAN1 Q24 orin-right | 170 / 1809 / 377 | 128 / 1972 / 131 | **127 / 1811 / 130** |
+
+  `=4` keeps `=3`'s CPU (−87% against the CPU path, the worker threads unused) at `=2`'s wall
+  time. It's the best of the three for calibrated cameras, but the margins aren't the CPU's
+  bits.
 
 #### Where the remaining CPU goes (4 cameras, 1.2 cores)
 
@@ -2063,11 +2558,11 @@ For comparison, one camera alone took 1.45 ms and 7% GPU at the start.
 #### Latency: where a frame's ~14.5 ms go
 
 The dashboard shows 14.3–15.2 ms per camera: mid-exposure to the result.
-- **New in the `971 jpeg` line:** `frame age at decode` is how old each frame is when its decode
+- **New in the `jpeg decoder` line:** `frame age at decode` is how old each frame is when its decode
   starts, from cscore's timestamp. That's `WPI_TIMESRC_V4L_SOE` (source 3), which our driver sets
   at the frame's first USB packet. The line also has `JPEG avg` (KB).
 - **Measured** (4 cameras, 122 fps): age at decode 8.2 ms on average (max ~16), JPEG 34–36 KB.
-- **Split with the kernel log:** `/tmp/spectrum-971-kmsg` makes the decoder write each decode start
+- **Split with the kernel log:** `/tmp/spectrum-detector-kmsg` makes the decoder write each decode start
   to `/dev/kmsg`, next to uvcvideo's "Frame complete" lines (`trace=128`). Over 393 ms:
   **first packet to last packet 8.1 ms** on every camera, **last packet to decode start
   0.15 ms**.
@@ -2219,6 +2714,195 @@ thread):
   the layout every 8 ms saw each change between two reads; the slowest read took 0.3 ms.
 - **On a Jetson:** `tests/field-map/run.sh` (also in `tests/run-all.sh`) runs the same checks
   against the real service, plus every camera's fps through the swap. Not run yet.
+
+## Object detection (TensorRT, photonvision-100)
+
+2026-11-01, JetPack 7.2.1 / TensorRT 10.16.2 / CUDA 13.2. User guide: [OBJECT-DETECTION.md](OBJECT-DETECTION.md).
+Replaces the 2026 `photonvision-14` design (trtexec-built static engine, Java letterbox, BGR only, one
+engine per camera).
+
+### Design
+
+- **Native (`detector/trt_yolo.cu`, `trt_yolo.h`; JNI in `TensorRtYoloJNI.cu`; `libspectrumtrt.so`):**
+  - **ONNX in, engine cached.** `YoloEngine::Create` takes a YOLOv8/YOLO11 detect ONNX (Ultralytics,
+    `dynamic=True` recommended) or a ready `.engine`. ONNX is built with the TensorRT builder (FP16,
+    1 GiB workspace, an optimisation profile of batch 1..max at the requested input size when the
+    dims are dynamic). The engine goes to `<cache>/<stem>-<W>x<H>-b<max>-fp16-<hash>.engine`; the hash covers
+    the model bytes, size, batch, precision, `getInferLibVersion()` and the GPU (name, SM, SM count).
+    A cached engine that fails to load is deleted so the next start rebuilds it. INT8 isn't done (the
+    hook is the builder config; it needs a calibration set).
+  - **Build time is long:** 689 s for yolo11n 640x640 b1..4 and 780 s for 640x384, with the GPU
+    throttled to 306 MHz (PhotonVision was stopped, so spectrum-clocks went to deep idle). Expect
+    roughly half that at full clocks. PhotonVision builds on the model's service thread. Until the
+    engine is ready the object side returns nothing, and the tags carry on.
+  - **GPU preprocessing:** one kernel per frame letterboxes bilinearly into its batch slot (grey 114
+    padding, any input size including 640x384), normalises to 0..1, writes NCHW in the engine's input
+    type, and copies grey (1-channel, mono cameras) to R, G and B, or swaps BGR to RGB. Frames are uploaded with
+    `cudaMemcpy2DAsync` (~0.2 ms for a 1280x800 grey frame). `Image::on_device` skips the upload for
+    a frame already on the GPU. It isn't wired to the AprilTag detector's device buffer yet: the
+    detector library would have to export it, and its CUDA graphs reuse that buffer every frame.
+  - **GPU decode, CPU NMS:** a kernel takes each anchor's best class, applies the confidence
+    threshold and compacts the survivors (atomic counter, ≤2048 per frame). Only those candidates come
+    back, in one copy with no second sync, and per-class NMS runs on them on the CPU (≪0.1 ms).
+    End-to-end heads (`[B, K, 6]`, NMS in the model) are converted and filtered. Boxes come back in
+    source-frame pixels.
+  - **Lowest CUDA stream priority** (`cudaStreamCreateWithPriority`, the range's least,
+    `SPECTRUM_TRT_STREAM_PRIORITY` overrides). On Orin the range is 0..-5 and the default is 0, which
+    is already the least, so for the detector's kernels to win, its streams must be raised:
+    `detector-19` adds `SPECTRUM_TAG_STREAM_PRIORITY=high` (detector streams and the graph-capture
+    stream at the greatest priority). It's off by default and not yet measured. Even without it,
+    the 15-30 fps cases below cost the tags only 0.2-0.3 ms.
+  - Takes the AprilTag library's CUDA capture lock shared (`spectrum_cuda_lock_shared`) around
+    allocation, engine load and every batch, like the 2026 runner.
+- **Java (fork):**
+  - **`TensorRtService`:** one per (model, input size), shared by every camera using it. Cameras
+    `submit` a frame copy, and one worker thread takes the first one queued. It then waits up to
+    `SPECTRUM_OD_BATCH_MS` (2 ms) for more, stopping early once every registered camera has one queued
+    or `SPECTRUM_OD_MAX_BATCH` (4) is reached, and runs them as one batch. The queue drops frames past
+    2x the max batch. Every 10 s it logs `TensorRT <model>: N frames in M batches (b1:.. b2:..), detect
+    .. ms mean .. max per batch, queue wait .., dropped ..`.
+  - **`TensorRtModel` / `TensorRtObjectDetector`:** the `Model`/`ObjectDetector` backend (family
+    `TENSORRT`, extension `.onnx`). The backend is offered when `/usr/lib/libspectrumtrt.so` exists,
+    so the same jar runs on the SystemCore. Uploads through Settings > Object Detection skip the test
+    load (the build takes minutes). 12-install's ONNX comes with a `<model>.json` sidecar (labels,
+    size).
+  - **AprilTag + Object** (`AprilTagObjectPipeline`, type `AprilTagObject`, extends
+    `AprilTagCudaPipeline`): the tag side is unchanged and published at once. Up to `objectFpsMax`
+    times a second (fixed schedule, at most one frame in flight per camera), the grey frame is copied
+    and submitted. When it completes, the detections go through the Object Detection pipeline's
+    filter, sort and 2D-target pipes, then to `VisionModule`'s second `NTDataPublisher` on
+    **`<camera>-objects`**, stamped with that frame's own sequence ID and capture time.
+  - **Why a sibling table** rather than tags and objects in one `PhotonPipelineResult`: a result
+    has one capture timestamp. Objects arrive one inference after the frame's tags were published, so
+    holding the tags back would add 5-15 ms to every tag frame, and attaching objects to a later tag
+    result would date them wrong for fusion. The sibling table keeps both exact, needs no
+    PhotonLib/serde change (the hashes are untouched), and `PhotonCamera("<camera>-objects")` works
+    unchanged.
+  - **UI:** an "AprilTag + Object" pipeline type (offered when the TENSORRT backend is), an Objects
+    tab (model, Object FPS max, confidence, NMS IoU, max objects, class filter), Tag FPS max on the
+    AprilTag/AprilCudaTag tabs, and Object FPS max on the Object Detection tab.
+  - **Tag/Object FPS max** (`FrameRateCap`): enforced in `VisionRunner` before the grab, on a fixed
+    schedule, combined with IdleMode's period (the longer wins). With no cap, it's IdleMode exactly as
+    before.
+  - **Not done yet:** object boxes aren't drawn on the stream; -pose/-obb heads (the decode is
+    shaped for adding a head type: a third output layout in `Engine::Init`/`DecodeRaw`); INT8; feeding
+    the detector's device frame.
+
+### Measured (Orin Nano Super, MAXN_SUPER, GPU locked at 1020 MHz unless noted)
+
+**Engine alone** (`tests/object-detection/run.sh bench`, trt_yolo_bench, synthetic 1280x800 grey frames,
+300 calls back to back; GPU ~90%, VDD_IN 17-19 W, ≤74 °C during the run):
+
+| yolo11n FP16 | batch 1 | batch 2 | batch 4 | infer share |
+| --- | --- | --- | --- | --- |
+| 640x640 | 5.06 ms (p95 5.22) | 8.30 ms = 4.15/frame | 15.06 ms = 3.76/frame | 92% (upload 0.19, pre 0.10, decode 0.09 ms at b1) |
+| 640x384 | 3.51 ms (p95 3.53) | 5.28 ms = 2.64/frame | 8.83 ms = 2.21/frame | 91% |
+
+- **Batching:** b2 saves 18-25% per frame and b4 26-37%. 640x384 is 31% cheaper than 640x640 at b1
+  and 41% at b4.
+- **The same engines at a throttled GPU** (612 MHz): 7.63 / 12.5 / 22.2 ms (640x640) and 5.41 / 8.05
+  / 13.4 ms (640x384). At deep idle (306 MHz): 14.7 / 24.2 / 43.1 ms. Benchmark with the clocks
+  locked (`spectrum-clocks mode full` plus real maxima; see the gotcha below).
+- **Correctness:** Ultralytics' `bus.jpg` through the 640x640 engine gave the same 5 objects as
+  Ultralytics' own predict (bus 0.94 vs 0.94, people 0.90/0.85/0.83 vs 0.89/0.88/0.86, boxes within a
+  few px). The cut-off person scored 0.39 vs 0.62: Ultralytics predicts at a minimal-padding 480x640
+  input. Grey input found the same 5, with scores 0.01-0.1 lower.
+
+**Live, PhotonVision, 2 Thriftiest Cams at 1280x800 122 fps, AprilTag + Object with COCO yolo11n
+640x640** (`run.sh live`, 40 s per condition after 45 s settling; tag latency = capture to published,
+from VisionRunner's Loop timing):
+
+| Objects per camera | Tag fps | Tag latency median / p95 | Tag pipeline | TensorRT batches | GPU (tegrastats) | VDD_IN | Max temp |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| off (AprilTagCuda) | 121.3 | 14.2-14.8 / 15.2-15.7 ms | 0.9-1.0 ms | n/a | 18% | 9.0 W | 71 °C |
+| 15 fps | 121.3 | 14.7 / 15.7-16.4 ms | 1.2-1.4 ms | 30 fps total, 34% in pairs, 6.9-7.1 ms/batch, wait 2.5 ms | 29% | 10.5 W | 73 °C |
+| 30 fps | 121.3 | 14.3-15.3 / 15.9-16.3 ms | 1.2-1.3 ms | 60 fps, 10% pairs, 6.1-6.2 ms | 41% | 12.1 W | 77 °C |
+| every frame (~67 fps each) | 121.3 | 15.8 / 17.0-17.4 ms | 1.6-2.1 ms | 134 fps, 20% pairs, 6.6 ms | 69% | 15.6 W | **84 °C** |
+| Tag FPS max 60, no objects | 60.0 | 18.6-19.3 / 22.7-23.3 ms | 1.5 ms | n/a | 9% | 8.8 W | 78 °C |
+| Tag FPS max 60 + 15 fps objects | 60.0 | 18.8-19.3 / 22.9-23.2 ms | 1.4-1.5 ms | 30 fps, ~1% pairs, 5.3 ms | 23% | 10.2 W | 78 °C |
+
+- **Objects at 15-30 fps per camera cost the tags +0.2-0.5 ms median, +0.5 ms p95, and nothing
+  dropped.** Running every frame adds 1.3 ms and gets close to the 85 °C limit (84 °C with the bench
+  heatsink and fan). Keep Object FPS max at ≤30.
+- **Batching rarely happens live.** The two cameras free-run, unsynchronised, so frames seldom land
+  within 2 ms of each other (pairs: 34% at 15 fps, ~1% at 60 tag fps). Each batch ran ~6-7 ms because
+  it shares the GPU with the detector. Batching pays off with more cameras or higher object rates. A
+  wider window (`SPECTRUM_OD_BATCH_MS`) trades object latency for it.
+- **Object latency** (capture to published) ≈ the 2-3 ms queue wait + the 5-7 ms batch + publish,
+  so about 10 ms after the tags for the same frame.
+- **Tag FPS max 60 halves the detector's GPU** (18 → 9% for 2 cameras) and holds exactly 60.0 fps,
+  but **adds ~4.5 ms median / ~7.5 ms p95 tag latency**. After the scheduled wake-up, the grab
+  returns the frame cscore already has, which on average was captured half a camera period
+  (~4 ms) earlier. Fix (not done): drop a stale frame by its timestamp before decoding, or align the
+  schedule to frame arrivals. Until then, use Tag FPS max where the GPU matters more than ~5 ms
+  (side cameras).
+- **Gotcha:** `spectrum-clocks full` restores the *saved* maxima. If those were saved while
+  throttled, you stay at 612 MHz GPU / 1190 MHz CPU. To benchmark: write the devfreq/cpufreq maxima,
+  then `jetson_clocks`. Afterwards `spectrum-clocks mode auto` (done; PhotonVision left stopped).
+- **Tests:** the photon-core suite on the Jetson: 268 tests, 7 failures. All are native-library or
+  singleton initialisation failures in this JVM (`NTDataPublisherBlankResultTest`,
+  `VisionModuleCalibrationTest`, `VisionModuleManagerTest`, plus `PipelineManagerTest`,
+  `VisionSourceManagerTest`, `HardwareTest$CustomGPIOTest`, `FileSaveFrameConsumerTest` when run as
+  a whole suite). `PipelineManagerTest` and `VisionSourceManagerTest` fail identically on the
+  unmodified branch.
+
+## Camera threads pinned to cores (photonvision-102, 2026-11-02)
+
+`CameraThreads` in the fork. Jetson layout (6 cores): core 0 handles USB IRQs and the system (`spectrum-rt` puts the
+xhci IRQ there when it's on; its default moved from core 5 to 0). Cores 2-5 get one tag camera's VisionRunner each:
+the thread that runs the detector, NAPA included. Cameras are assigned in name order, wrapping past 4 (logged).
+Tag cameras are AprilTagCuda and AprilTag + Object pipelines, plus AprilTag with NAPA. Plain CPU AprilTag stays
+unpinned, because its worker pool would inherit one core. Shared threads (SpectrumDecoder / NVJPG, TensorRT, the
+AprilTag+Object fallback detect) and non-tag cameras are **not pinned by default** (`pinSharedCore -1`). Core 1
+for them was the plan, but the A/B below shows it costs latency.
+
+How it works: there is no native code. A thread reads its own Linux TID from `/proc/thread-self` and registers it.
+One daemon thread (`SpectrumCameraThreads`, every 2 s) compares `Cpus_allowed_list` and runs `taskset` / `chrt`
+when it differs. PhotonVision runs as root, so this works on any thread of the process, and it survives core
+hotplug. Helper threads that a pinned thread creates (the NVJPG decoder's helpers, OpenCV's pool) inherit its
+single core. The sweep moves those to the cores no tag camera uses. Settings: `HardwareSettings.pinCameraThreads`
+(null = auto: on on a Jetson), `pinCameraCores` "2-5", `pinSharedCore` -1, `pinCameraFifo` 0, `pinOtherThreads`
+false. Environment variables override these: `SPECTRUM_PIN_CAMERAS`, `SPECTRUM_PIN_CAMERA_CORES`,
+`SPECTRUM_PIN_SHARED_CORE`, `SPECTRUM_PIN_FIFO` (capped at 49, under the kernel's IRQ threads at 50) and
+`SPECTRUM_PIN_OTHERS`. They're read when PhotonVision starts, and there's no UI yet. SystemCore (4 cores): off
+unless set. Suggested: `SPECTRUM_PIN_CAMERAS=1 SPECTRUM_PIN_CAMERA_CORES=2-3`.
+
+Pinning the whole JVM to core 1 with systemd `CPUAffinity=` and widening the camera threads afterwards was
+considered and **not done**. The JVM sizes its GC and JIT thread counts, and OpenCV its pool, from the affinity
+at start: one core would mean one GC worker and longer stop-the-world pauses, and those stall the camera threads
+anyway. Native threads created by a camera thread would also inherit core 1. `SPECTRUM_PIN_OTHERS=1` is the safer
+form: after start-up, it moves every unregistered thread off the cores the cameras are using.
+
+**Live A/B** (`tests/pin-cameras/run.sh`). Setup: `spectrum-clocks mode full` (CPU 1728 / GPU 1020 / EMC 3199), 2
+Thriftiest cams 1280x800 MJPEG at 122 fps, NVJPG, "Tags on CPU (NAPA)" min 16, no tags in view, 60 s per
+condition, interleaved, PhotonVision restarted per condition. Each latency is the mean of both cameras' 10 s
+windows (p50/p95/p99), and max is the largest. Rounds: unpinned 6 and pinned 7 (in 3 sessions), others 2, cams
+only 2.
+
+| Condition | Tag latency p50 / p95 / p99 / max | fps/cam | PV CPU | VDD_IN | CPU_GPU_CV | tj max |
+| --- | --- | --- | --- | --- | --- | --- |
+| Unpinned | 14.58 / 15.48 / **15.69** / 23.7 ms | 121.3 | 0.57 cores | 8.56 W | 2.52 W | 74 °C |
+| Pinned: cameras 2-5, shared threads on core 1 | 14.73 / 15.65 / 16.78 / 24.1 ms | 121.3 | 0.56 | 8.56 W | 2.52 W | 74 °C |
+| Same + every other thread on cores 0-1 | 14.87 / 16.09 / 18.82 / 31.1 ms | 121.3 | 0.57 | 8.55 W | 2.51 W | 72 °C |
+| Same + every other thread on the cameras' unused cores (0,1,4,5) | 14.69 / 15.62 / 16.60 / 23.7 ms | 121.3 | 0.55 | 8.54 W | 2.52 W | 73 °C |
+| **Cameras only** (shared threads unpinned; the default now) | 14.57 / 15.49 / 15.88 / 21.3 ms | 121.4 | 0.56 | 8.59 W | 2.54 W | 74 °C |
+| + yolo11n at Object FPS max 30: unpinned (2 rounds) | 14.98 / 15.88 / 16.23 / 22.2 ms | 121.2 | 0.85 | 11.52 W | 4.37 W | 82 °C |
+| + yolo11n: pinned, decode and TensorRT on core 1 (2) | 15.23 / 18.25 / 19.47 / 25.8 ms | 121.3 | 0.81 | 11.61 W | 4.34 W | 82 °C |
+| + yolo11n: cameras only (1 valid round) | 14.76 / 15.61 / 16.20 / 21.7 ms | 121.4 | 0.85 | 11.55 W | 4.35 W | 81 °C |
+
+- **With 2 cameras, pinning doesn't help.** The pinned threads stopped migrating (VisionRunner from ~300-800 to 0
+  per minute, decoder from ~3,000-6,000 to 0) and had fewer involuntary switches (~200 to ~60 per minute). Latency,
+  CPU and power were the same, within noise. 4 of 6 cores sit idle, so the scheduler always finds a free one.
+- **Shared threads on one core cost latency.** Both cameras' frames arrive together, so their decoders wake at the
+  same moment and one waits: p99 +1.1 ms. Add TensorRT on that core and the YOLO batches stretch (5.3 to 7.1 ms
+  mean, more batching), costing +2.4 ms p95 and +3.2 ms p99. That's why the shared core is unpinned by default.
+- Squeezing every other thread onto cores 0-1 (IRQs, the JIT, GC, decoder helpers) is worse: p99 +3 ms, max 31 ms.
+  Onto the unused camera cores it's neutral.
+- The second yolo11n cams-only round is left out. Another session added `SPECTRUM_CAMERA_DELAY_US=2500` (a
+  drop-in that moves frame timestamps 2.5 ms earlier) mid-run, and that round read +2.6 ms on everything. tj reached
+  84 °C on that last round, so the yolo runs stopped there.
+- Expect pinning to matter only at 4 cameras with YOLO and a busy system, where threads compete for cores. Re-run
+  `tests/pin-cameras/run.sh 60 3 30` then, and also with `SPECTRUM_PIN_FIFO`.
 
 ## Changes from the handoff
 

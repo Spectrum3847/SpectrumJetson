@@ -50,7 +50,7 @@ frames). Repeating it showed the same settings vary by 2 ms between restarts, an
 queues came out ~0.5 ms better and `block` no different. Both are now the defaults because neither
 hurts. The lesson: one run per setting isn't enough when the noise is this big. Numbers in
 [TECHNICAL.md](TECHNICAL.md) ("4 cameras: CUDA wait and GPU work queues"). Still switchable:
-`SPECTRUM_971_CUDA_SYNC`, or `/tmp/spectrum-971-cuda-sync` + restart; `08-select-detector.sh
+`SPECTRUM_DETECTOR_CUDA_SYNC`, or `/tmp/spectrum-detector-cuda-sync` + restart; `08-select-detector.sh
 --gpu-connections N`.
 
 ### Exposure: 5 ms

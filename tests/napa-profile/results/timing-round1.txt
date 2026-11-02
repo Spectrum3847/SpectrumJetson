@@ -1,0 +1,27 @@
+napa16_s2: 44954 sightings, napa16_A: 44954; only napa16_s2 0, only napa16_A 0; common 44954, corners moved > 1e-4 px: 0
+IDENTICAL
+napafar_s2: 43057 sightings, napafar_A: 43057; only napafar_s2 0, only napafar_A 0; common 43057, corners moved > 1e-4 px: 0
+IDENTICAL
+napa16_s2: 44954 sightings, napa16_AB: 44954; only napa16_s2 0, only napa16_AB 0; common 44954, corners moved > 1e-4 px: 0
+IDENTICAL
+napafar_s2: 43057 sightings, napafar_AB: 43057; only napafar_s2 0, only napafar_AB 0; common 43057, corners moved > 1e-4 px: 0
+IDENTICAL
+napa16_s2: 44954 sightings, napa16_ABCD: 44954; only napa16_s2 0, only napa16_ABCD 0; common 44954, corners moved > 1e-4 px: 0
+IDENTICAL
+napafar_s2: 43057 sightings, napafar_ABCD: 43057; only napafar_s2 0, only napafar_ABCD 0; common 43057, corners moved > 1e-4 px: 0
+IDENTICAL
+| Case | Build | frames | mean ms | median | p95 | vs base (mean) |
+|---|---|---|---|---|---|---|
+| napa16_t1 | base | 9034 | 2.323 | 2.379 | 2.674 |  |
+| napa16_t1 | A | 9034 | 2.187 | 2.240 | 2.540 | -5.8% |
+| napa16_t1 | AB | 9034 | 2.123 | 2.175 | 2.473 | -8.6% |
+| napa16_t1 | ABCD | 9034 | 2.230 | 2.288 | 2.605 | -4.0% |
+| napa_t1 | base | 9034 | 0.487 | 0.484 | 0.607 |  |
+| napa_t1 | A | 9034 | 0.471 | 0.468 | 0.593 | -3.1% |
+| napa_t1 | AB | 9034 | 0.471 | 0.468 | 0.589 | -3.3% |
+| napa_t1 | ABCD | 9034 | 0.489 | 0.486 | 0.612 | +0.5% |
+| napafar_t1 | base | 36114 | 1.243 | 1.246 | 1.631 |  |
+| napafar_t1 | A | 36114 | 1.186 | 1.188 | 1.564 | -4.6% |
+| napafar_t1 | AB | 36114 | 1.180 | 1.178 | 1.575 | -5.1% |
+| napafar_t1 | ABCD | 36114 | 1.233 | 1.233 | 1.645 | -0.8% |
+exp done

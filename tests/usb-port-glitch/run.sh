@@ -112,7 +112,12 @@ for t, m in journal(["-k"]):
         print(f"  {t - t0:5.1f} s  kernel: {m[:140]}")
 for t, m in journal(["-u", "photonvision"]):
     clean = re.sub(r"\x1b\[[0-9;]*m", "", m)
-    if t >= t0 and (name in clean or short in clean) and re.search(r"ERROR|Resetting|Connected", clean) \
+    # The recovery's steps (photonvision-84, -88, -89): the reset or power toggle, cscore setting
+    # the format on the reopened camera, and the first usable frame in PhotonVision ("delivering
+    # frames again": "streaming again" above is only the camera's USB bandwidth reserved again).
+    if t >= t0 and (name in clean or short in clean) \
+            and re.search(r"ERROR|Resetting|Connected|set format|delivering frames again|working again"
+                          r"|Restart", clean) \
             and "timed out getting frame" not in clean and "DEBUG" not in clean:
         print(f"  {t - t0:5.1f} s  PV: {clean[:140]}")
 print("\nPASS: came back by itself" if back or gone is None else "\nFAIL: didn't come back")

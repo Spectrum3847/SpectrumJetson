@@ -35,11 +35,13 @@ public class VisionScenario {
     private final List<SyntheticCamera> synth = new ArrayList<>();
     private final List<FakeCameraIO> ios = new ArrayList<>();
     private final List<Transform3d> mounts = new ArrayList<>();
+    private final List<Transform3d> trueMounts = new ArrayList<>();
     private Consumer<VisionSystem.Builder> configure = b -> {};
     private final List<Measurement> measurements = new ArrayList<>();
     private VisionSystem vision;
     private double now = 0;
     private Pose2d truth = new Pose2d();
+    private java.util.function.Function<Pose2d, Pose2d> estimateFn = p -> p;
 
     /** One measurement the pose estimator would have received, with the truth at that time. */
     public record Measurement(Pose2d pose, double timestampSeconds, Matrix<N3, N1> stdDevs, Pose2d truth) {
@@ -53,9 +55,15 @@ public class VisionScenario {
     }
 
     public VisionScenario camera(SyntheticCamera camera, Transform3d robotToCamera) {
+        return camera(camera, robotToCamera, robotToCamera);
+    }
+
+    /** A camera whose real mount ({@code actual}) isn't the one robot code has ({@code configured}). */
+    public VisionScenario camera(SyntheticCamera camera, Transform3d configured, Transform3d actual) {
         synth.add(camera);
         ios.add(new FakeCameraIO(camera.name));
-        mounts.add(robotToCamera);
+        mounts.add(configured);
+        trueMounts.add(actual);
         return this;
     }
 
@@ -70,11 +78,14 @@ public class VisionScenario {
             var b = VisionSystem.builder(field)
                     .offline()
                     .clock(() -> now)
-                    .currentEstimate(() -> truth)
+                    .currentEstimate(() -> estimateFn.apply(truth))
                     .sink((pose, t, std) -> measurements.add(new Measurement(pose, t, std, truth)));
             for (int i = 0; i < ios.size(); i++) b.camera(ios.get(i), mounts.get(i), 1.0);
             configure.accept(b);
             vision = b.build();
+            if (vision.mountCheck() != null) {
+                for (var c : synth) vision.mountCheck().intrinsics(c.name, c.cameraMatrix(), c.distCoeffs);
+            }
         }
         return vision;
     }
@@ -91,7 +102,7 @@ public class VisionScenario {
         vs.addMotion(captured, robot.getRotation(), yawRate, speed);
         vs.addMotion(t, robot.getRotation(), yawRate, speed);
         for (int i = 0; i < synth.size(); i++) {
-            var f = synth.get(i).frame(field, new Pose3d(robot), mounts.get(i), captured);
+            var f = synth.get(i).frame(field, new Pose3d(robot), trueMounts.get(i), captured);
             if (f != null) ios.get(i).queue(f);
         }
         return vs.periodic();
@@ -101,6 +112,17 @@ public class VisionScenario {
     public VisionScenario run(
             double start, double end, double dt, DoubleFunction<Pose2d> path, double yawRate, double speed) {
         for (double t = start; t <= end + 1e-9; t += dt) step(t, path.apply(t), yawRate, speed, 0.03);
+        return this;
+    }
+
+    /** The VisionSystem under test. */
+    public VisionSystem vision() {
+        return system();
+    }
+
+    /** Replace the estimator pose the system sees (default: the truth). */
+    public VisionScenario estimate(java.util.function.Function<Pose2d, Pose2d> f) {
+        estimateFn = f;
         return this;
     }
 

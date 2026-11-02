@@ -86,8 +86,8 @@ Same sensor (OV9281), different USB bridge chip, so different firmware, tools an
 | USB bridge | SunplusIT SPCA2089D (`1bcf:28c5`) | Realtek (`0bda:3035`) |
 | Flash | 512 KiB | 128 KiB |
 | Fastest modes | 120 fps at every resolution | 120 fps at 640x480 and up; **210 fps** at 640x400 and below |
-| Gain control | Only with firmware 5.13 (experimental) | Yes |
-| Exposure minimum | Not published | 3.91 ms stock; **0.244 ms** with their "Low Exposure" firmware |
+| Gain control | Yes with the 5.13 published firmware and our usbrecov builds; not on the factory 5.13 the cameras ship with | Yes |
+| Exposure minimum | **0.1 ms** (`exposure_time_absolute` 1-5000, 100 µs units; read 2026-10-31) | 3.91 ms stock; **0.244 ms** with their "Low Exposure" firmware |
 | Serial number | Same on every camera; settable with `thriftiest-fw.py rename` | Settable with their Windows tool |
 | Lens | Interchangeable, focus yourself | Fixed, glued at 5 ft, factory calibrated, 81°x52°; PhotonVision calibration JSON provided |
 | Case | Moulded plastic | Billet aluminium, isolated from robot ground; 10-32 at 1.5" and M4 at 40 mm |

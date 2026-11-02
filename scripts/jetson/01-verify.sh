@@ -3,7 +3,8 @@
 # Verifies NVMe root, L4T version, and that MAXN SUPER exists, then enables it.
 set -uo pipefail
 
-EXPECTED_L4T="R36 (release), REVISION: 5.2"
+# JetPack 7.2.1 (L4T r39.2.1); "R36 (release), REVISION: 5.2" for a JetPack 6 flash.
+EXPECTED_L4T=${EXPECTED_L4T:-"R39 (release), REVISION: 2.1"}
 MAXN_SUPER_ID=2
 fail=0
 
@@ -28,11 +29,17 @@ fi
 echo
 echo "==> Enabling MAXN SUPER (mode $MAXN_SUPER_ID) and max clocks"
 # nvpmodel may ask to reboot when switching modes; answer as prompted.
-sudo nvpmodel -m "$MAXN_SUPER_ID"
+# r39 needs a reboot to switch to MAXN SUPER. Answered no, the clocks still reach its levels but
+# nvpmodel.service then fails at every boot asking again (2026-10-30), so answer yes: this reboots
+# the Jetson now when the mode changes (when it's already MAXN SUPER nvpmodel just returns).
+if [[ $(sudo nvpmodel -q | head -1) != *MAXN_SUPER* ]] || systemctl is-failed -q nvpmodel; then
+  echo "    rebooting to apply MAXN SUPER: run this script again after"
+  echo YES | sudo nvpmodel -m "$MAXN_SUPER_ID"
+fi
 sudo jetson_clocks
 sudo nvpmodel -q
 
 echo
-echo "All checks passed. Next: sudo apt update && sudo apt install -y nvidia-jetpack"
+echo "All checks passed. Next: scripts/jetson/02-jetpack.sh (installs nvidia-jetpack)"
 echo "(the BSP flash does not include CUDA/cuDNN/TensorRT), then check 'nvcc --version'"
 echo "with /usr/local/cuda/bin on PATH."

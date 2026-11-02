@@ -1,0 +1,13 @@
+at3_d1_t4    n  4517  median  20.79  p95  24.40  max  31.41 ms   ~   48 frames/s on 4 cores
+at3_d2_p4    n  4517  median  17.78  p95  22.37  max  33.72 ms   ~  222 frames/s on 4 cores
+at3_d2_t1    n  4517  median  17.22  p95  21.80  max  32.87 ms   ~   57 frames/s on 4 cores
+at3_d2_t4    n  4517  median   7.18  p95   8.94  max  12.61 ms   ~  138 frames/s on 4 cores
+napa16_p4    n  4517  median   2.60  p95   2.96  max   3.90 ms   ~ 1566 frames/s on 4 cores
+napa16_t1    n  4517  median   2.38  p95   2.68  max   3.30 ms   ~  430 frames/s on 4 cores
+napa_p4      n  4517  median   0.50  p95   0.63  max   1.12 ms   ~ 7956 frames/s on 4 cores
+napa_t1      n  4517  median   0.48  p95   0.61  max   0.76 ms   ~ 2054 frames/s on 4 cores
+frames 27215
+GPU test (8x8 px tiles, mwbd 20)   active mean  57.1%  p10  25.0%  p50  64.6%  p90  74.0%  min   0.0%
+NAPA level 0 (12x12 px)            active mean  69.1%  p10  34.5%  p50  78.4%  p90  87.0%  min   0.1%
+NAPA level 1 (24x24 px)            active mean  83.1%  p10  53.4%  p50  92.8%  p90  97.9%  min   0.4%
+frames with a tag: 41%; GPU-test active on those 63.4%, on the others 52.7%

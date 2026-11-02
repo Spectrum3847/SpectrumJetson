@@ -1,0 +1,323 @@
+diff --git a/third_party/971apriltag/apriltag.cc b/third_party/971apriltag/apriltag.cc
+index 9ec02c6..1faa601 100644
+--- a/third_party/971apriltag/apriltag.cc
++++ b/third_party/971apriltag/apriltag.cc
+@@ -206,6 +206,9 @@ static size_t DeviceScanInclusiveScanByKeyScratchSpace(size_t elements) {
+ 
+ }  // namespace
+ 
++bool SpectrumGpuRefine();    // detector-15, below
++bool SpectrumGraphRefine();  // detector-16, below
++
+ GpuDetector::GpuDetector(size_t width, size_t height,
+                          apriltag_detector_t* tag_detector,
+                          CameraMatrix camera_matrix,
+@@ -1461,6 +1464,10 @@ absl::Status GpuDetector::EnqueueThirdStage(size_t points_bucket, size_t quads_b
+                       tag_detector_->qtp.cos_critical_rad, fit_quads_device_.get(), stream);
+   CHECK_CUDA(cudaMemcpyAsync(stage_counts_host_.get() + 1, num_quad_peaked_quads_device_.get(),
+                              sizeof(int), cudaMemcpyDeviceToHost, stream));
++  if (SpectrumGraphRefine() && tag_detector_->refine_edges &&
++      !EnqueueGraphRefine(quads_bucket, stream)) {  // detector-16
++    return absl::UnknownError("the in-graph refinement couldn't be recorded");
++  }
+   // The fit quads themselves, as many as there are, straight into pinned memory (a pageable copy
+   // after the graph cost ~70 us of CPU a frame).
+   void* pinned = DeviceAddress(fit_quads_pinned_.get());
+@@ -1559,6 +1566,7 @@ cudaGraphExec_t GpuDetector::RecordStageGraph(int stage, size_t points_bucket,
+   cudaGraphDestroy(graph);
+   if (e != cudaSuccess) return fail("instantiate", e);
+   cudaGraphUpload(exec, stream_.get());  // now, not on its first launch
++  if (stage == 3) stage3_refines_ = SpectrumGraphRefine() && tag_detector_->refine_edges;
+   stage_graphs_[key] = exec;
+   return exec;
+ }
+@@ -1711,6 +1719,7 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+   if (timing) after_image_memcpy_to_device_.Record(&stream_);
+ 
+   refine_image_device_ = image_device;  // detector-15
++  if (SpectrumGraphRefine()) SetGraphRefineParams(image_device);  // detector-16
+   if (graph) {
+     gray_image_host_ptr_ = image;
+     CHECK_CUDA(cudaGraphLaunch(first_stage_exec_, stream_.get()));
+@@ -2234,8 +2243,14 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+ 
+   // const aos::monotonic_clock::time_point before_fit_quads =
+   //     aos::monotonic_clock::now();
+-  UpdateFitQuads();
+-  AdjustPixelCenters();
++  // detector-16: a stage 3 graph that fit the corners and refined them already.
++  decode_refined_ = nullptr;
++  if (staged && TakeGraphCorners(num_quad_peaked_quads_host)) {
++    decode_refined_ = graph_refined_host_.data();
++  } else {
++    UpdateFitQuads();
++    AdjustPixelCenters();
++  }
+ 
+   DecodeTags();
+ 
+@@ -2355,11 +2370,31 @@ __device__ void GpuReDistort(double* x, double* y, const CameraMatrix& cm, const
+   *y = yPP * cm.fy + cm.cy;
+ }
+ 
++// detector-16: what the in-graph refinement reads each frame (pinned, written by the host before the
++// graph runs), so the recorded graph follows the image buffer and calibration as they change.
++struct GraphRefineParams {
++  int enabled;  // this frame: 0 makes both kernels return at once (and the host refines)
++  const uint8_t* image;
++  int width, height;
++  float quad_decimate;
++  CameraMatrix cm;
++  DistCoeffs dc;
++};
++
+ __global__ void RefineEdgesKernel(const QuadCorners* in, float (*out)[4][2], const int* count,
+-                                  const uint8_t* im, int width, int height, float quad_decimate,
+-                                  CameraMatrix cm, DistCoeffs dc) {
++                                  const uint8_t* im_arg, int width_arg, int height_arg,
++                                  float quad_decimate_arg, CameraMatrix cm_arg, DistCoeffs dc_arg,
++                                  const int* valid = nullptr,
++                                  const GraphRefineParams* prm = nullptr) {
+   const int q = blockIdx.x;
+   if (q >= *count) return;
++  if (prm && !prm->enabled) return;
++  if (valid && !valid[q]) return;  // detector-16: a quad the corner checks dropped
++  const uint8_t* im = prm ? prm->image : im_arg;
++  const int width = prm ? prm->width : width_arg, height = prm ? prm->height : height_arg;
++  const float quad_decimate = prm ? prm->quad_decimate : quad_decimate_arg;
++  const CameraMatrix cm = prm ? prm->cm : cm_arg;
++  const DistCoeffs dc = prm ? prm->dc : dc_arg;
+   const int edge = threadIdx.x / 32, lane = threadIdx.x % 32;
+   __shared__ double lines[4][4];
+   __shared__ float p[4][2];
+@@ -2508,4 +2543,177 @@ bool GpuDetector::RefineEdgesOnGpu() {
+   return true;
+ }
+ 
++
++namespace {
++// detector-16: UpdateFitQuads and AdjustPixelCenters (apriltag_detect.cc) on the GPU, one thread per
++// fit quad, the same steps (GPU hypotf and fused multiply-adds can move the last bits). corners[i]
++// and valid[i] for fit quad i, in the fit quads' order.
++__device__ void GpuFitLine(const LineFitMoments& moments, double* lineparam01, double* lineparam23) {
++  int64_t Cxx = moments.Mxx * moments.W - static_cast<int64_t>(moments.Mx) *
++                                              static_cast<int64_t>(moments.Mx);
++  int64_t Cxy = moments.Mxy * moments.W - static_cast<int64_t>(moments.Mx) *
++                                              static_cast<int64_t>(moments.My);
++  int64_t Cyy = moments.Myy * moments.W - static_cast<int64_t>(moments.My) *
++                                              static_cast<int64_t>(moments.My);
++  const float hypot_cached = hypotf((Cxx - Cyy), 2 * Cxy);
++  lineparam01[0] = static_cast<float>(moments.Mx) / static_cast<float>(moments.W * 2);
++  lineparam01[1] = static_cast<float>(moments.My) / static_cast<float>(moments.W * 2);
++  const float nx1 = static_cast<float>(Cxx - Cyy) - hypot_cached;
++  const float ny1 = Cxy * 2;
++  const float M1 = nx1 * nx1 + ny1 * ny1;
++  const float nx2 = Cxy * 2;
++  const float ny2 = static_cast<float>(Cyy - Cxx) - hypot_cached;
++  const float M2 = nx2 * nx2 + ny2 * ny2;
++  float nx, ny;
++  if (M1 > M2) {
++    nx = nx1;
++    ny = ny1;
++  } else {
++    nx = nx2;
++    ny = ny2;
++  }
++  float length = hypotf(nx, ny);
++  lineparam23[0] = nx / length;
++  lineparam23[1] = ny / length;
++}
++
++__global__ void CornersFromFitQuads(const FitQuad* fit_quads, const int* count, size_t bucket,
++                                    bool reversed_border, int min_tag_width, float cos_critical_rad,
++                                    float quad_decimate, QuadCorners* corners_out, int* valid_out,
++                                    const GraphRefineParams* prm) {
++  if (!prm->enabled) return;
++  const size_t i = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x;
++  if (i >= bucket || i >= static_cast<size_t>(*count)) return;
++  const FitQuad& quad = fit_quads[i];
++  valid_out[i] = 0;
++  if (!quad.valid) return;
++  QuadCorners corners;
++  corners.blob_index = quad.blob_index;
++  corners.reversed_border = reversed_border;
++  double lines[4][4];
++  for (int k = 0; k < 4; k++) GpuFitLine(quad.moments[k], lines[k], lines[k] + 2);
++  for (int k = 0; k < 4; k++) {
++    double A00 = lines[k][3], A01 = -lines[(k + 1) & 3][3];
++    double A10 = -lines[k][2], A11 = lines[(k + 1) & 3][2];
++    double B0 = -lines[k][0] + lines[(k + 1) & 3][0];
++    double B1 = -lines[k][1] + lines[(k + 1) & 3][1];
++    double det = A00 * A11 - A10 * A01;
++    double W00 = A11 / det, W01 = -A01 / det;
++    if (fabs(det) < 0.001) return;
++    double L0 = W00 * B0 + W01 * B1;
++    corners.corners[k][0] = lines[k][0] + L0 * A00;
++    corners.corners[k][1] = lines[k][1] + L0 * A10;
++  }
++  {
++    float area = 0;
++    float length[3], p;
++    for (int k = 0; k < 3; k++) {
++      int idxa = k, idxb = (k + 1) % 3;
++      length[k] = hypotf((corners.corners[idxb][0] - corners.corners[idxa][0]),
++                         (corners.corners[idxb][1] - corners.corners[idxa][1]));
++    }
++    p = (length[0] + length[1] + length[2]) / 2;
++    area += sqrtf(p * (p - length[0]) * (p - length[1]) * (p - length[2]));
++    const int idxs[] = {2, 3, 0, 2};
++    for (int k = 0; k < 3; k++) {
++      int idxa = idxs[k], idxb = idxs[k + 1];
++      length[k] = hypotf((corners.corners[idxb][0] - corners.corners[idxa][0]),
++                         (corners.corners[idxb][1] - corners.corners[idxa][1]));
++    }
++    p = (length[0] + length[1] + length[2]) / 2;
++    area += sqrtf(p * (p - length[0]) * (p - length[1]) * (p - length[2]));
++    if (area < 0.95 * min_tag_width * min_tag_width) return;
++  }
++  for (int k = 0; k < 4; k++) {
++    int i0 = k, i1 = (k + 1) & 3, i2 = (k + 2) & 3;
++    float dx1 = corners.corners[i1][0] - corners.corners[i0][0];
++    float dy1 = corners.corners[i1][1] - corners.corners[i0][1];
++    float dx2 = corners.corners[i2][0] - corners.corners[i1][0];
++    float dy2 = corners.corners[i2][1] - corners.corners[i1][1];
++    float cos_dtheta = (dx1 * dx2 + dy1 * dy2) / sqrtf((dx1 * dx1 + dy1 * dy1) * (dx2 * dx2 + dy2 * dy2));
++    if (fabsf(cos_dtheta) > cos_critical_rad || dx1 * dy2 < dy1 * dx2) return;
++  }
++  // AdjustPixelCenters (quad_decimate is 2: the constructor checks).
++  if (quad_decimate > 1) {
++    for (int j = 0; j < 4; j++) {
++      if (quad_decimate == 1.5f) {
++        corners.corners[j][0] *= quad_decimate;
++        corners.corners[j][1] *= quad_decimate;
++      } else {
++        corners.corners[j][0] = (corners.corners[j][0] - 0.5f) * quad_decimate + 0.5f;
++        corners.corners[j][1] = (corners.corners[j][1] - 0.5f) * quad_decimate + 0.5f;
++      }
++    }
++  }
++  corners_out[i] = corners;
++  valid_out[i] = 1;
++}
++}  // namespace
++
++// detector-16 (SpectrumGraphRefine): stage 3's graph ends with the corners and their refinement, into
++// pinned memory; the host then only decodes. False when it can't (then the graph doesn't).
++bool GpuDetector::EnqueueGraphRefine(size_t quads_bucket, cudaStream_t stream) {
++  auto* corners = static_cast<QuadCorners*>(DeviceAddress(graph_corners_pinned_.get()));
++  auto* valid = static_cast<int*>(DeviceAddress(graph_valid_pinned_.get()));
++  auto* refined = static_cast<float(*)[4][2]>(DeviceAddress(graph_refined_pinned_.get()));
++  auto* prm = static_cast<const GraphRefineParams*>(DeviceAddress(graph_refine_params_pinned_.get()));
++  if (!corners || !valid || !refined || !prm) return false;
++  CornersFromFitQuads<<<(quads_bucket + 127) / 128, 128, 0, stream>>>(
++      fit_quads_device_.get(), num_quad_peaked_quads_device_.get(), quads_bucket, reversed_border_,
++      min_tag_width_, tag_detector_->qtp.cos_critical_rad, tag_detector_->quad_decimate, corners,
++      valid, prm);
++  RefineEdgesKernel<<<quads_bucket, 128, 0, stream>>>(
++      corners, refined, num_quad_peaked_quads_device_.get(), nullptr, 0, 0, 0, CameraMatrix{},
++      DistCoeffs{}, valid, prm);
++  return cudaGetLastError() == cudaSuccess;
++}
++
++// detector-16: what the graph's refinement reads this frame.
++// On only with a lens calibration: without one the CPU's refinement is cheap (no undistortion) and
++// the two kernels would only add GPU time (~+50 us of wall a frame, measured).
++void GpuDetector::SetGraphRefineParams(const uint8_t* image_device) {
++  auto* p = reinterpret_cast<GraphRefineParams*>(graph_refine_params_pinned_.get());
++  const DistCoeffs& d = distortion_coefficients_;
++  const bool calibrated = d.k1 != 0 || d.k2 != 0 || d.p1 != 0 || d.p2 != 0 || d.k3 != 0 ||
++                          d.k4 != 0 || d.k5 != 0 || d.k6 != 0;
++  p->enabled = calibrated && SpectrumGpuRefine() && tag_detector_->refine_edges;
++  graph_refine_enabled_ = p->enabled != 0;
++  p->image = image_device;
++  p->width = static_cast<int>(width_);
++  p->height = static_cast<int>(height_);
++  p->quad_decimate = tag_detector_->quad_decimate;
++  p->cm = camera_matrix_;
++  p->dc = distortion_coefficients_;
++}
++
++// SPECTRUM_DETECTOR_GPU_REFINE=2 (read once: it's recorded into the stage graphs): corners and
++// RefineEdges inside stage 3's graph. 0 in /tmp/spectrum-detector-gpu-refine switches the host back
++// to its own corners and refinement live (the graph's are then ignored).
++bool SpectrumGraphRefine() {
++  static const bool on = [] {
++    const char* v = std::getenv("SPECTRUM_DETECTOR_GPU_REFINE");
++    return v && std::string(v) == "2";
++  }();
++  return on;
++}
++
++// detector-16: after a stage 3 graph with the refinement: the corners the host would have computed
++// (valid ones, in order) and their refinement. False: do it on the host.
++bool GpuDetector::TakeGraphCorners(int num_fit_quads) {
++  if (!stage3_refines_ || !graph_refine_enabled_) return false;
++  quad_corners_host_.resize(0);
++  graph_refined_host_.resize(0);
++  const QuadCorners* c = graph_corners_pinned_.get();
++  const int* v = graph_valid_pinned_.get();
++  const auto* r = graph_refined_pinned_.get();
++  for (int i = 0; i < num_fit_quads; ++i) {
++    if (!v[i]) continue;
++    quad_corners_host_.push_back(c[i]);
++    RefinedQuad q;
++    std::memcpy(q.p, r[i], sizeof(q.p));
++    graph_refined_host_.push_back(q);
++  }
++  return true;
++}
++
+ }  // namespace frc::apriltag
+diff --git a/third_party/971apriltag/apriltag.h b/third_party/971apriltag/apriltag.h
+index 60e44af..178744a 100644
+--- a/third_party/971apriltag/apriltag.h
++++ b/third_party/971apriltag/apriltag.h
+@@ -487,6 +487,22 @@ class GpuDetector {
+   void* refine_in_device_ = nullptr;
+   void* refine_out_device_ = nullptr;
+   void* refine_count_device_ = nullptr;
++  // detector-16: the corners and RefineEdges inside stage 3's graph (SpectrumGraphRefine).
++  struct RefinedQuad {
++    float p[4][2];
++  };
++  bool EnqueueGraphRefine(size_t quads_bucket, cudaStream_t stream);
++  void SetGraphRefineParams(const uint8_t* image_device);
++  bool TakeGraphCorners(int num_fit_quads);
++  bool stage3_refines_ = false;
++  bool graph_refine_enabled_ = false;  // this frame's GraphRefineParams::enabled
++  HostMemory<QuadCorners> graph_corners_pinned_{kMaxBlobs};
++  HostMemory<int> graph_valid_pinned_{kMaxBlobs};
++  HostMemory<float[4][2]> graph_refined_pinned_{kMaxBlobs};
++  HostMemory<uint64_t> graph_refine_params_pinned_{32};  // a GraphRefineParams
++  std::vector<RefinedQuad> graph_refined_host_;
++  // DecodeTags: refined corners for quad_corners_host_ (detector-16), or nullptr.
++  const RefinedQuad* decode_refined_ = nullptr;
+   // The largest counts of the last few frames (decaying), for the guessed buckets.
+   size_t chain_points_ = 0, chain_selected_ = 0, chain_quads_ = 0;
+   GpuMemory<int> stage3_points_device_{1};  // GuardStage3's count
+diff --git a/third_party/971apriltag/apriltag_detect.cc b/third_party/971apriltag/apriltag_detect.cc
+index 456bc23..906b4c1 100644
+--- a/third_party/971apriltag/apriltag_detect.cc
++++ b/third_party/971apriltag/apriltag_detect.cc
+@@ -656,7 +656,8 @@ void GpuDetector::QuadDecodeTask(void* _u) {
+   }
+ }
+ 
+-bool SpectrumGpuRefine();  // apriltag.cc (detector-15)
++bool SpectrumGpuRefine();    // apriltag.cc (detector-15)
++bool SpectrumGraphRefine();  // apriltag.cc (detector-16)
+ 
+ void GpuDetector::DecodeTags() {
+   size_t chunksize =
+@@ -682,7 +683,10 @@ void GpuDetector::DecodeTags() {
+   };
+ 
+   const float(*refined)[4][2] = nullptr;
+-  if (tag_detector_->refine_edges && SpectrumGpuRefine() && RefineEdgesOnGpu()) {
++  if (decode_refined_) {  // detector-16: refined inside stage 3's graph
++    refined = &decode_refined_[0].p;
++  } else if (tag_detector_->refine_edges && !SpectrumGraphRefine() && SpectrumGpuRefine() &&
++             RefineEdgesOnGpu()) {
+     refined = RefinedCorners();
+   }
+ 

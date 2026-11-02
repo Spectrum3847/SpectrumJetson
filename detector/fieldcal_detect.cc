@@ -9,9 +9,9 @@
 // CAMERA_DIR: one camera's folder of a Rewind session (..._NNNN.mjpeg + .csv, docs/REWIND.md).
 // --every N: every Nth frame. --calib: the camera's lens calibration; the detector's edge
 // refinement straightens edges with it, as it does in PhotonVision (without it, no undistortion).
-// --mwbd / --mse: as SPECTRUM_971_MIN_WHITE_BLACK_DIFF / SPECTRUM_971_MAX_LINE_FIT_MSE, which
+// --mwbd / --mse: as SPECTRUM_DETECTOR_MIN_WHITE_BLACK_DIFF / SPECTRUM_DETECTOR_MAX_LINE_FIT_MSE, which
 // are also read from the environment (defaults 5 and 10, as in GpuDetectorJNI.cc).
-// --mask (bos-07): as PhotonVision's Mask tab. ignore = skip the boxes, only = search only inside
+// --mask (detector-07): as PhotonVision's Mask tab. ignore = skip the boxes, only = search only inside
 // them; boxes are fractions of the image. Without --upscale 2 (the mask is at the detector's size).
 // --upscale 2 (experimental, off by default): search at full size. The detector finds quads on a
 // half-size image (quad_decimate 2 is hard-wired), which misses tags under ~20 px; a 2x
@@ -60,8 +60,10 @@ using recording::DecodeGray;
 using recording::Frame;
 using recording::ReadIndex;
 
+// SPECTRUM_DETECTOR_X, or the pre-rename SPECTRUM_971_X.
 double EnvOr(const char *name, double fallback) {
-  const char *v = std::getenv(name);
+  const char *v = std::getenv((std::string("SPECTRUM_DETECTOR_") + name).c_str());
+  if (!v || !*v) v = std::getenv((std::string("SPECTRUM_971_") + name).c_str());
   return v && *v ? std::atof(v) : fallback;
 }
 
@@ -79,8 +81,8 @@ int main(int argc, char **argv) {
   int every = 1, threads = 5, upscale = 1;
   int mask_mode = 0;  // 1 ignore inside the boxes, 2 search only inside them
   std::vector<double> mask_boxes;
-  int mwbd = static_cast<int>(EnvOr("SPECTRUM_971_MIN_WHITE_BLACK_DIFF", 5));
-  double mse = EnvOr("SPECTRUM_971_MAX_LINE_FIT_MSE", 10.0);
+  int mwbd = static_cast<int>(EnvOr("MIN_WHITE_BLACK_DIFF", 5));
+  double mse = EnvOr("MAX_LINE_FIT_MSE", 10.0);
   frc::apriltag::CameraMatrix cam{1, 1, 1, 1};  // with zero distortion: no undistortion
   frc::apriltag::DistCoeffs dist{};
   dist.num_params = 5;
@@ -247,7 +249,7 @@ int main(int argc, char **argv) {
       }
       img = big.data();
     }
-    // bos-05: one thread here, so the first-stage graph can be recorded right before use.
+    // detector-05: one thread here, so the first-stage graph can be recorded right before use.
     if (gpu->FirstStageGraphWanted(nullptr)) {
       if (absl::Status r = gpu->RecordFirstStageGraph(nullptr); !r.ok()) {
         std::cerr << "first-stage graph: " << r.message() << std::endl;

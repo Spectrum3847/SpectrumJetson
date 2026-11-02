@@ -1,0 +1,415 @@
+diff --git a/third_party/971apriltag/apriltag.cc b/third_party/971apriltag/apriltag.cc
+index 6f903a5..9ee30e4 100644
+--- a/third_party/971apriltag/apriltag.cc
++++ b/third_party/971apriltag/apriltag.cc
+@@ -3102,11 +3102,387 @@ __global__ void DecodeQuadsKernel(const QuadCorners* corners, const int* valid,
+   r->found = 1;
+ }
+ 
++// SpectrumJetson (detector-18): the same decode in float (SPECTRUM_DETECTOR_GPU_REFINE=4): the Orin
++// GPU's double rate made detector-17's kernel ~270 us a frame. Generated from the double version
++// above with every double made float (and float literals); not bit-identical to the CPU.
++namespace {
++__device__ __forceinline__ void ProjectF(const float* H, float x, float y, float* ox, float* oy) {
++  const float xx = H[0] * x + H[1] * y + H[2];
++  const float yy = H[3] * x + H[4] * y + H[5];
++  const float zz = H[6] * x + H[7] * y + H[8];
++  *ox = xx / zz;
++  *oy = yy / zz;
++}
++
++// homography_compute2 (apriltag.c) with the whole block: the same operations on each element, in the
++// same order, the eliminations spread over the threads. Call from every thread; A is
++// shared scratch (72 floats). *ok (shared) false: singular.
++__device__ void HomographyBlockF(const float p[4][2], float* A, float* H, bool* ok) {
++  const int t = threadIdx.x, nt = blockDim.x;
++  __shared__ float f[8];
++  __shared__ int pivot;
++  if (t < 4) {
++    const int i = t;
++    const float c0 = (i == 0 || i == 3) ? -1 : 1, c1 = (i == 0 || i == 1) ? -1 : 1;
++    const float c2 = p[i][0], c3 = p[i][1];
++    float* r0 = A + (2 * i) * 9;
++    float* r1 = A + (2 * i + 1) * 9;
++    r0[0] = c0; r0[1] = c1; r0[2] = 1; r0[3] = 0; r0[4] = 0; r0[5] = 0;
++    r0[6] = -c0 * c2; r0[7] = -c1 * c2; r0[8] = c2;
++    r1[0] = 0; r1[1] = 0; r1[2] = 0; r1[3] = c0; r1[4] = c1; r1[5] = 1;
++    r1[6] = -c0 * c3; r1[7] = -c1 * c3; r1[8] = c3;
++  }
++  if (t == 0) *ok = true;
++  __syncthreads();
++  for (int col = 0; col < 8; col++) {
++    if (t == 0) {
++      float max_val = 0;
++      int max_val_idx = -1;
++      for (int row = col; row < 8; row++) {
++        float val = fabs(A[row * 9 + col]);
++        if (val > max_val) {
++          max_val = val;
++          max_val_idx = row;
++        }
++      }
++      if (max_val < 1e-10f) *ok = false;
++      pivot = max_val_idx;
++    }
++    __syncthreads();
++    if (!*ok) return;
++    if (pivot != col && t >= col && t < 9) {
++      float tmp = A[col * 9 + t];
++      A[col * 9 + t] = A[pivot * 9 + t];
++      A[pivot * 9 + t] = tmp;
++    }
++    __syncthreads();
++    if (t > col && t < 8) f[t] = A[t * 9 + col] / A[col * 9 + col];
++    __syncthreads();
++    // rows col+1..7, columns col+1..8
++    const int rows = 7 - col, cols = 8 - col;
++    for (int k = t; k < rows * cols; k += nt) {
++      const int i = col + 1 + k / cols, j = col + 1 + k % cols;
++      A[i * 9 + j] -= f[i] * A[col * 9 + j];
++    }
++    if (t > col && t < 8) A[t * 9 + col] = 0;
++    __syncthreads();
++  }
++  if (t == 0) {
++    for (int col = 7; col >= 0; col--) {
++      float sum = 0;
++      for (int i = col + 1; i < 8; i++) sum += A[col * 9 + i] * A[i * 9 + 8];
++      A[col * 9 + 8] = (A[col * 9 + 8] - sum) / A[col * 9 + col];
++    }
++    const float h[9] = {A[8], A[17], A[26], A[35], A[44], A[53], A[62], A[71], 1};
++    for (int i = 0; i < 9; i++) H[i] = h[i];
++  }
++  __syncthreads();
++}
++
++// matd_inverse's 3x3 path fails when matd_plu finds a pivot under MATD_EPS (1e-8).
++__device__ bool InvertibleLikeMatdF(const float* H) {
++  float lu[9];
++  for (int i = 0; i < 9; i++) lu[i] = H[i];
++  for (int j = 0; j < 3; j++) {
++    for (int i = 0; i < 3; i++) {
++      int kmax = i < j ? i : j;
++      float acc = 0;
++      for (int k = 0; k < kmax; k++) acc += lu[i * 3 + k] * lu[k * 3 + j];
++      lu[i * 3 + j] -= acc;
++    }
++    int p = j;
++    for (int i = j + 1; i < 3; i++)
++      if (fabs(lu[i * 3 + j]) > fabs(lu[p * 3 + j])) p = i;
++    if (p != j)
++      for (int k = 0; k < 3; k++) {
++        float t = lu[p * 3 + k];
++        lu[p * 3 + k] = lu[j * 3 + k];
++        lu[j * 3 + k] = t;
++      }
++    float LUjj = lu[j * 3 + j];
++    if (fabs(LUjj) < 1e-8f) return false;
++    if (LUjj != 0) {
++      LUjj = 1.0f / LUjj;
++      for (int i = j + 1; i < 3; i++) lu[i * 3 + j] *= LUjj;
++    }
++  }
++  return true;
++}
++
++// mat33_sym_solve (apriltag_math.h) over the upper triangle of A.
++__device__ void SymSolveF(const float* A, const float* B, float* R) {
++  float L[9];
++  L[0] = sqrt(A[0]);
++  L[3] = A[1] / L[0];
++  L[6] = A[2] / L[0];
++  L[4] = sqrt(A[4] - L[3] * L[3]);
++  L[7] = (A[5] - L[3] * L[6]) / L[4];
++  L[8] = sqrt(A[8] - L[6] * L[6] - L[7] * L[7]);
++  float M[9];
++  M[0] = 1 / L[0];
++  M[3] = -L[3] * M[0] / L[4];
++  M[4] = 1 / L[4];
++  M[6] = (-L[6] * M[0] - L[7] * M[3]) / L[8];
++  M[7] = -L[7] * M[4] / L[8];
++  M[8] = 1 / L[8];
++  float tmp[3];
++  tmp[0] = M[0] * B[0];
++  tmp[1] = M[3] * B[0] + M[4] * B[1];
++  tmp[2] = M[6] * B[0] + M[7] * B[1] + M[8] * B[2];
++  R[0] = M[0] * tmp[0] + M[3] * tmp[1] + M[6] * tmp[2];
++  R[1] = M[4] * tmp[1] + M[7] * tmp[2];
++  R[2] = M[8] * tmp[2];
++}
++
++struct GrayModelF {
++  float A[9], B[3], C[3];
++};
++__device__ void GrayAddF(GrayModelF* gm, float x, float y, float gray) {
++  gm->A[0] += x * x;
++  gm->A[1] += x * y;
++  gm->A[2] += x;
++  gm->A[4] += y * y;
++  gm->A[5] += y;
++  gm->A[8] += 1;
++  gm->B[0] += x * gray;
++  gm->B[1] += y * gray;
++  gm->B[2] += gray;
++}
++__device__ __forceinline__ float GrayAtF(const GrayModelF& gm, float x, float y) {
++  return gm.C[0] * x + gm.C[1] * y + gm.C[2];
++}
++
++__device__ float ValueForPixelF(const uint8_t* im, int width, int height, float px, float py) {
++  int x1 = floor(px - 0.5f);
++  int x2 = ceil(px - 0.5f);
++  float x = px - 0.5f - x1;
++  int y1 = floor(py - 0.5f);
++  int y2 = ceil(py - 0.5f);
++  float y = py - 0.5f - y1;
++  if (x1 < 0 || x2 >= width || y1 < 0 || y2 >= height) return -1;
++  return im[y1 * width + x1] * (1 - x) * (1 - y) + im[y1 * width + x2] * x * (1 - y) +
++         im[y2 * width + x1] * (1 - x) * y + im[y2 * width + x2] * x * y;
++}
++
++__device__ uint64_t Rotate90F(uint64_t w, int numBits) {
++  int p = numBits;
++  uint64_t l = 0;
++  if (numBits % 4 == 1) {
++    p = numBits - 1;
++    l = 1;
++  }
++  w = ((w >> l) << (p / 4 + l)) | (w >> (3 * p / 4 + l) << l) | (w & l);
++  w &= ((uint64_t{1} << numBits) - 1);
++  return w;
++}
++}  // namespace
++
++__global__ void DecodeQuadsKernelF(const QuadCorners* corners, const int* valid,
++                                  const float (*refined)[4][2], const int* count,
++                                  const GraphRefineParams* prm, const GpuDecodeFamily* fam,
++                                  const DecodeEntry* entries, float sharpening,
++                                  GpuDecodeResult* out) {
++  const int q = blockIdx.x;
++  if (!prm->enabled || q >= *count) return;
++  GpuDecodeResult* r = &out[q];
++  if (threadIdx.x == 0) r->found = 0;
++  if (!valid[q] || corners[q].reversed_border != fam->reversed_border) return;
++  const uint8_t* im = prm->image;
++  const int width = prm->width, height = prm->height;
++  __shared__ float p[4][2];
++  __shared__ float H[9];
++  __shared__ bool ok;
++  __shared__ float sx[128], sy[128];
++  __shared__ int sv[128];
++  __shared__ GrayModelF white, black;
++  __shared__ float values[256];
++  __shared__ float sharpened[256];
++  if (threadIdx.x < 8) p[threadIdx.x / 2][threadIdx.x % 2] = refined[q][threadIdx.x / 2][threadIdx.x % 2];
++  __syncthreads();
++  if (threadIdx.x == 0) {
++    // QuadDecodeTask's sanity check (detector-08), on the unrefined corners as there.
++    bool sane = true;
++    const float w = static_cast<float>(width), h = static_cast<float>(height);
++    for (int k = 0; k < 4 && sane; ++k) {
++      const float x = corners[q].corners[k][0], y = corners[q].corners[k][1];
++      sane = isfinite(x) && isfinite(y) && x > -w && x < 2 * w && y > -h && y < 2 * h;
++    }
++    ok = sane;
++  }
++  __syncthreads();
++  if (!ok) return;
++  {
++    __shared__ float A[72];
++    HomographyBlockF(p, A, H, &ok);
++    if (!ok) return;
++    if (threadIdx.x == 0) ok = InvertibleLikeMatdF(H);
++    __syncthreads();
++    if (!ok) return;
++  }
++  const int wab = fam->width_at_border;
++  // The border patterns: 8 lines of wab samples each (quad_decode's `patterns`).
++  const int nsamples = 8 * wab;
++  for (int k = threadIdx.x; k < nsamples; k += blockDim.x) {
++    const int pi = k / wab, i = k % wab;
++    float pat[5];
++    switch (pi) {
++      case 0: pat[0] = -0.5f; pat[1] = 0.5f; pat[2] = 0; pat[3] = 1; pat[4] = 1; break;
++      case 1: pat[0] = 0.5f; pat[1] = 0.5f; pat[2] = 0; pat[3] = 1; pat[4] = 0; break;
++      case 2: pat[0] = wab + 0.5f; pat[1] = .5f; pat[2] = 0; pat[3] = 1; pat[4] = 1; break;
++      case 3: pat[0] = wab - 0.5f; pat[1] = .5f; pat[2] = 0; pat[3] = 1; pat[4] = 0; break;
++      case 4: pat[0] = 0.5f; pat[1] = -0.5f; pat[2] = 1; pat[3] = 0; pat[4] = 1; break;
++      case 5: pat[0] = 0.5f; pat[1] = 0.5f; pat[2] = 1; pat[3] = 0; pat[4] = 0; break;
++      case 6: pat[0] = 0.5f; pat[1] = wab + 0.5f; pat[2] = 1; pat[3] = 0; pat[4] = 1; break;
++      default: pat[0] = 0.5f; pat[1] = wab - 0.5f; pat[2] = 1; pat[3] = 0; pat[4] = 0; break;
++    }
++    float tagx01 = (pat[0] + i * pat[2]) / (wab);
++    float tagy01 = (pat[1] + i * pat[3]) / (wab);
++    float tagx = 2 * (tagx01 - 0.5f);
++    float tagy = 2 * (tagy01 - 0.5f);
++    float px, py;
++    ProjectF(H, tagx, tagy, &px, &py);
++    int ix = px;
++    int iy = py;
++    sx[k] = tagx;
++    sy[k] = tagy;
++    sv[k] = (ix < 0 || iy < 0 || ix >= width || iy >= height) ? -1 : im[iy * width + ix];
++  }
++  __syncthreads();
++  // The white model in thread 0, the black one in thread 32 (another warp): each adds its own
++  // samples in the CPU's order.
++  if (threadIdx.x == 0 || threadIdx.x == 32) {
++    const bool want_white = threadIdx.x == 0;
++    GrayModelF* gm = want_white ? &white : &black;
++    for (int i = 0; i < 9; i++) gm->A[i] = 0;
++    for (int i = 0; i < 3; i++) gm->B[i] = 0;
++    for (int k = 0; k < nsamples; k++) {
++      if (sv[k] < 0) continue;
++      const bool is_white = (k / wab) % 2 == 0;
++      if (is_white == want_white) GrayAddF(gm, sx[k], sy[k], sv[k]);
++    }
++    if (want_white || wab > 1) {
++      SymSolveF(gm->A, gm->B, gm->C);
++    } else {
++      gm->C[0] = 0;
++      gm->C[1] = 0;
++      gm->C[2] = gm->B[2] / 4;
++    }
++  }
++  __syncthreads();
++  if (threadIdx.x == 0) ok = !((GrayAtF(white, 0, 0) - GrayAtF(black, 0, 0) < 0) != fam->reversed_border);
++  __syncthreads();
++  if (!ok) return;
++  const int tw = fam->total_width;
++  const int min_coord = (wab - tw) / 2;
++  for (int k = threadIdx.x; k < tw * tw; k += blockDim.x) values[k] = 0;
++  __syncthreads();
++  for (int i = threadIdx.x; i < fam->nbits; i += blockDim.x) {
++    int bity = fam->bit_y[i];
++    int bitx = fam->bit_x[i];
++    float tagx01 = (bitx + 0.5f) / (wab);
++    float tagy01 = (bity + 0.5f) / (wab);
++    float tagx = 2 * (tagx01 - 0.5f);
++    float tagy = 2 * (tagy01 - 0.5f);
++    float px, py;
++    ProjectF(H, tagx, tagy, &px, &py);
++    float v = ValueForPixelF(im, width, height, px, py);
++    if (v == -1) continue;
++    float thresh = (GrayAtF(black, tagx, tagy) + GrayAtF(white, tagx, tagy)) / 2.0f;
++    values[tw * (bity - min_coord) + bitx - min_coord] = v - thresh;
++  }
++  __syncthreads();
++  // sharpen (apriltag.c), each cell's 3x3 sum in the same order.
++  for (int k = threadIdx.x; k < tw * tw; k += blockDim.x) {
++    const int y = k / tw, x = k % tw;
++    const float kernel[9] = {0, -1, 0, -1, 4, -1, 0, -1, 0};
++    float acc = 0;
++    for (int i = 0; i < 3; i++)
++      for (int j = 0; j < 3; j++) {
++        if ((y + i - 1) < 0 || (y + i - 1) > tw - 1 || (x + j - 1) < 0 || (x + j - 1) > tw - 1) continue;
++        acc += values[(y + i - 1) * tw + (x + j - 1)] * kernel[i * 3 + j];
++      }
++    sharpened[k] = acc;
++  }
++  __syncthreads();
++  for (int k = threadIdx.x; k < tw * tw; k += blockDim.x) values[k] = values[k] + sharpening * sharpened[k];
++  __syncthreads();
++  if (threadIdx.x != 0) return;
++  float black_score = 0, white_score = 0;
++  float black_score_count = 1, white_score_count = 1;
++  uint64_t rcode = 0;
++  for (int i = 0; i < fam->nbits; i++) {
++    int bity = fam->bit_y[i];
++    int bitx = fam->bit_x[i];
++    rcode = (rcode << 1);
++    float v = values[(bity - min_coord) * tw + bitx - min_coord];
++    if (v > 0) {
++      white_score += v;
++      white_score_count++;
++      rcode |= 1;
++    } else {
++      black_score -= v;
++      black_score_count++;
++    }
++  }
++  // quick_decode_codeword
++  DecodeEntry entry{0, 65535, 255, 0};
++  const int n = fam->nentries;
++  for (int ridx = 0; ridx < 4 && entry.hamming == 255; ridx++) {
++    for (int bucket = rcode % n; entries[bucket].rcode != UINT64_MAX; bucket = (bucket + 1) % n) {
++      if (entries[bucket].rcode == rcode) {
++        entry = entries[bucket];
++        entry.rotation = ridx;
++        break;
++      }
++    }
++    rcode = Rotate90F(rcode, fam->nbits);
++  }
++  const float margin = fmin(white_score / white_score_count, black_score / black_score_count);
++  if (!(margin >= 0 && entry.hamming < 255)) return;
++  r->id = entry.id;
++  r->hamming = entry.hamming;
++  r->decision_margin = margin;
++  // det->H = quad->H * R(rotation), R's cos and sin from the host (the CPU's cos/sin of k*pi/2).
++  const float c = fam->rot_cos[entry.rotation], s = fam->rot_sin[entry.rotation];
++  const float R[9] = {c, -s, 0, s, c, 0, 0, 0, 1};
++  float Hr[9];
++  for (int i = 0; i < 3; i++)
++    for (int j = 0; j < 3; j++) {
++      float acc = 0;
++      for (int k = 0; k < 3; k++) acc += H[i * 3 + k] * R[k * 3 + j];
++      Hr[i * 3 + j] = acc;
++      r->H[i * 3 + j] = acc;
++    }
++  float cx, cy;
++  ProjectF(Hr, 0, 0, &cx, &cy);
++  r->c[0] = cx;
++  r->c[1] = cy;
++  for (int i = 0; i < 4; i++) {
++    int tcx = (i == 1 || i == 2) ? 1 : -1;
++    int tcy = (i < 2) ? 1 : -1;
++    float px, py;
++    ProjectF(Hr, tcx, tcy, &px, &py);
++    r->p[i][0] = px;
++    r->p[i][1] = py;
++  }
++  r->found = 1;
++}
++
++
+ // detector-17: SPECTRUM_DETECTOR_GPU_REFINE=3 (read once): detector-16 and the decode in the graph.
+ bool SpectrumGraphDecode() {
+   static const bool on = [] {
+     const char* v = std::getenv("SPECTRUM_DETECTOR_GPU_REFINE");
+-    return v && std::string(v) == "3";
++    return v && (std::string(v) == "3" || std::string(v) == "4");
++  }();
++  return on;
++}
++
++// detector-18: =4, the decode in float.
++bool SpectrumGraphDecodeFloat() {
++  static const bool on = [] {
++    const char* v = std::getenv("SPECTRUM_DETECTOR_GPU_REFINE");
++    return v && std::string(v) == "4";
+   }();
+   return on;
+ }
+@@ -3153,10 +3529,17 @@ bool GpuDetector::EnqueueGraphDecode(size_t quads_bucket, cudaStream_t stream) {
+   auto* prm = static_cast<const GraphRefineParams*>(DeviceAddress(graph_refine_params_pinned_.get()));
+   auto* results = static_cast<GpuDecodeResult*>(DeviceAddress(graph_decode_pinned_.get()));
+   if (!corners || !valid || !refined || !prm || !results || !gpu_decode_family_) return false;
+-  DecodeQuadsKernel<<<quads_bucket, 64, 0, stream>>>(
+-      corners, valid, refined, num_quad_peaked_quads_device_.get(), prm, gpu_decode_family_->get(),
+-      reinterpret_cast<const DecodeEntry*>(gpu_decode_entries_->get()),
+-      tag_detector_->decode_sharpening, results);
++  if (SpectrumGraphDecodeFloat()) {  // detector-18
++    DecodeQuadsKernelF<<<quads_bucket, 64, 0, stream>>>(
++        corners, valid, refined, num_quad_peaked_quads_device_.get(), prm,
++        gpu_decode_family_->get(), reinterpret_cast<const DecodeEntry*>(gpu_decode_entries_->get()),
++        static_cast<float>(tag_detector_->decode_sharpening), results);
++  } else {
++    DecodeQuadsKernel<<<quads_bucket, 64, 0, stream>>>(
++        corners, valid, refined, num_quad_peaked_quads_device_.get(), prm,
++        gpu_decode_family_->get(), reinterpret_cast<const DecodeEntry*>(gpu_decode_entries_->get()),
++        tag_detector_->decode_sharpening, results);
++  }
+   return cudaGetLastError() == cudaSuccess;
+ }
+ 

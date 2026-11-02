@@ -2,7 +2,8 @@
 # Robot-readiness tuning for the Jetson. Run ON THE JETSON; asks for sudo once.
 # Safe to re-run. Reboot afterwards to get the boot-time and persistence benefits.
 #
-#   1. No automatic updates   - apt must not update NVIDIA/Java packages mid-event
+#   1. No automatic updates   - apt must not update NVIDIA/Java packages mid-event; also unneeded
+#                               desktop services off (printing, Docker, Bluetooth, ModemManager, ...)
 #   2. snapd off              - its first-boot "seeding" took 45 s of every boot (no snaps used)
 #   3. Headless               - boot to multi-user (no GNOME desktop on a robot)
 #   4. Clocks locked at boot  - jetson_clocks after nvpmodel, before PhotonVision
@@ -49,8 +50,31 @@
 #                               2026-10-01). Nothing happens with the radio switched off (events).
 #  13. SSD health readable    - smartmontools (smartctl) for photonvision-82's SSD topics
 #  14. Camera flashing        - pyusb (python3-usb) for photonvision-87's firmware card
+#  15. Low-jitter cameras     - spectrum-rt (scripts/jetson/spectrum-rt.sh), OFF by default: USB
+#                               interrupt on its own core, camera/decode threads at real-time
+#                               priority. RT=on|off sets it; without RT= a re-run keeps the saved
+#                               choice. Also `sudo spectrum-rt on|off|status` at any time.
+#  16. Lower clocks idle      - spectrum-clocks (scripts/jetson/spectrum-clocks.sh): PhotonVision
+#                               lowers the CPU/GPU clocks after the robot has been disabled (or
+#                               absent) for 20 s (Settings > Robot state; never in the ~3 s
+#                               between auto and teleop) and locks them again on enable. Lower
+#                               too while PhotonVision isn't running (stopped, crashed: the
+#                               service drop-in; not installed: spectrum-clocks-guard after 30 s).
+#                               Deep idle (photonvision-99): no robot, web UI or stream viewer
+#                               for 5 min (or PhotonVision stopped 5 min): 5 fps, lowest clocks,
+#                               EMC dynamic, CPU idle states on (all cores stay online).
+#                               `sudo spectrum-clocks mode full` keeps them full, `mode shallow`
+#                               never goes deep; `status`.
+#  17. Camera delay           - SPECTRUM_CAMERA_DELAY_US=2500 in PhotonVision's environment: each
+#                               frame's timestamp moves this much earlier on top of half the
+#                               exposure (the camera's own delay before it sends). 2.5 ms is Team
+#                               100's rotating-disc measurement of the Thriftiest Cam in MJPEG
+#                               (team100/all26 config_thrifty_mjpeg.py extra_delay_ms), a starting
+#                               value until our own spin test. CAMERA_DELAY_US=N overrides it.
+#                               Applies at PhotonVision's next start (no restart here).
 #
-# Usage: [FAN=quiet|full|off] 09-robot-tuning.sh [--undo]   (no FAN: keep the saved choice)
+# Usage: [FAN=quiet|full|off] [RT=on|off] [CAMERA_DELAY_US=N] 09-robot-tuning.sh [--undo]
+#        (no FAN/RT: keep the saved choice; no CAMERA_DELAY_US: 2500)
 set -euo pipefail
 # Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
 [[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
@@ -67,6 +91,11 @@ WATCHDOG_CONF=/etc/systemd/system.conf.d/zz-spectrum-watchdog.conf
 PANIC_CONF=/etc/sysctl.d/90-spectrum-panic.conf
 PV_RESTART_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-restart.conf
 PV_OPENCV_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-opencv.conf
+PV_CLOCKS_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-clocks.conf
+PV_DELAY_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-camera-delay.conf
+CAMERA_DELAY_US=${CAMERA_DELAY_US:-2500}
+[[ $CAMERA_DELAY_US =~ ^[0-9]+$ ]] || { echo "CAMERA_DELAY_US must be whole microseconds" >&2; exit 1; }
+CLOCKS_HELPER=/usr/local/bin/spectrum-clocks
 USB_TMPFILES=/etc/tmpfiles.d/90-spectrum-usb.conf
 TCP_CONF=/etc/sysctl.d/90-spectrum-tcp.conf
 WIFI_RETRY=/usr/local/bin/spectrum-wifi-retry
@@ -96,7 +125,7 @@ sudo -n true 2>/dev/null || sudo -v   # ask for the password only if sudo needs 
 
 if [[ ${1:-} == --undo ]]; then
   sudo rm -f "$APT_CONF" "$UDEV_RULE" "$SYSCTL_CONF" "$JOURNALD_CONF"
-  sudo rm -f "$WATCHDOG_CONF" "$PANIC_CONF" "$PV_RESTART_CONF" "$PV_OPENCV_CONF" "$USB_TMPFILES"
+  sudo rm -f "$WATCHDOG_CONF" "$PANIC_CONF" "$PV_RESTART_CONF" "$PV_OPENCV_CONF" "$PV_DELAY_CONF" "$USB_TMPFILES"
   sudo rm -f "$TCP_CONF"
   sudo sysctl -q net.ipv4.tcp_retries2=15
   echo 5000 | sudo tee /sys/module/usbcore/parameters/initial_descriptor_timeout >/dev/null
@@ -113,8 +142,16 @@ if [[ ${1:-} == --undo ]]; then
   sudo systemctl enable apt-daily.timer apt-daily-upgrade.timer
   sudo systemctl unmask "${SNAP_UNITS[@]}"
   sudo systemctl enable snapd.service snapd.socket snapd.seeded.service
+  sudo systemctl unmask docker.socket 2>/dev/null || true   # step 1 desktop services: re-enable by hand if wanted
+  [[ -x $CLOCKS_HELPER ]] && sudo "$CLOCKS_HELPER" full >/dev/null
+  sudo systemctl disable --now spectrum-clocks-guard.timer 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/spectrum-clocks-guard.{service,timer} /usr/local/bin/spectrum-clocks-guard
+  sudo rm -f "$CLOCKS_HELPER" "$PV_CLOCKS_CONF" /etc/spectrum-clocks-mode
   sudo systemctl disable jetson-clocks.service 2>/dev/null || true
   sudo rm -f "$CLOCKS_UNIT"
+  [[ -x /usr/local/bin/spectrum-rt ]] && sudo /usr/local/bin/spectrum-rt off >/dev/null
+  sudo systemctl disable --now spectrum-rt.timer 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/spectrum-rt.{service,timer} /usr/local/bin/spectrum-rt /etc/spectrum-rt
   sudo systemctl set-default graphical.target
   sudo systemctl daemon-reload
   sudo udevadm control --reload
@@ -124,6 +161,37 @@ fi
 
 echo "==> 1. Automatic updates off"
 sudo systemctl disable --now apt-daily.timer apt-daily-upgrade.timer
+# Ubuntu's iperf3 package enables an iperf3 server at boot (port 5201). Bandwidth tests start
+# their own `iperf3 -s` when needed; nothing should listen on the robot network otherwise.
+if systemctl list-unit-files iperf3.service --no-legend 2>/dev/null | grep -q iperf3; then
+  sudo systemctl disable --now iperf3.service
+fi
+# Desktop-rootfs services a robot coprocessor never uses (stock JetPack 7 / Ubuntu 24.04).
+UNNEEDED_UNITS=(
+  lpd.service                     # printer daemon (generated from /etc/init.d/lpd)
+  cups.service cups.socket        # printing (not installed on stock JetPack 7)
+  saned.socket                    # scanner server, listens on port 6566
+  docker.service containerd.service  # containers; we run nothing in Docker
+  bluetooth.service               # Bluetooth stack
+  ModemManager.service            # cellular modems; probes serial/USB devices
+  fwupd.service fwupd-refresh.timer  # firmware updates over the internet
+  kerneloops.service              # kernel crash reporter
+  upower.service                  # battery status (no battery)
+  nvargus-daemon.service          # CSI camera daemon; our cameras are USB (V4L2), NVJPG doesn't use it
+  motd-news.timer update-notifier-download.timer update-notifier-motd.timer  # login banner / update checks
+  man-db.timer                    # man page index rebuild
+  anacron.timer anacron.service   # catch-up cron (runs daily jobs after boot)
+  e2scrub_all.timer               # weekly ext4 metadata scrub (heavy disk I/O)
+  # Kept on purpose: avahi-daemon (.local names), udisks2 (USB drives).
+)
+for u in "${UNNEEDED_UNITS[@]}"; do
+  systemctl list-unit-files "$u" --no-legend 2>/dev/null | grep -q . || continue
+  sudo systemctl disable --now "$u" 2>/dev/null || true
+done
+# docker.socket socket-activates docker.service again, so mask it.
+if systemctl list-unit-files docker.socket --no-legend 2>/dev/null | grep -q .; then
+  sudo systemctl mask --now docker.socket
+fi
 sudo tee "$APT_CONF" >/dev/null <<'EOF'
 // SpectrumJetson: robot coprocessor, no background package updates.
 APT::Periodic::Update-Package-Lists "0";
@@ -165,6 +233,81 @@ WantedBy=multi-user.target
 EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now jetson-clocks.service
+# JetPack 7 (2026-10-30): an hour after a clean boot the GPU was back at 306 MHz (its minimum)
+# and two CPU cores at 730 MHz, with jetson-clocks.service still "active" and nothing in the log.
+# That tripled detect times (6.3 ms vs 1.7 locked) and halved fps. Until we know what resets
+# them, check every 15 s and lock again, logging when it happens (journalctl -t spectrum-clocks).
+# The check is `spectrum-clocks guard` (spectrum-clocks.sh): it also lowers the clocks while
+# PhotonVision isn't running, and leaves them alone while PhotonVision has lowered them (step 16).
+sudo install -m 755 "$(dirname "$0")/spectrum-clocks.sh" "$CLOCKS_HELPER"
+[[ -e /etc/spectrum-clocks-mode ]] || echo auto | sudo tee /etc/spectrum-clocks-mode >/dev/null
+sudo tee /usr/local/bin/spectrum-clocks-guard >/dev/null <<'GUARD'
+#!/usr/bin/env bash
+# SpectrumJetson (09-robot-tuning.sh): relock the clocks if something lowered them; lower them
+# while PhotonVision isn't running. See /usr/local/bin/spectrum-clocks.
+exec /usr/local/bin/spectrum-clocks guard
+GUARD
+sudo chmod 755 /usr/local/bin/spectrum-clocks-guard
+sudo tee /etc/systemd/system/spectrum-clocks-guard.service >/dev/null <<'UNIT'
+[Unit]
+Description=Relock CPU/GPU clocks if something lowered them (SpectrumJetson)
+After=jetson-clocks.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/spectrum-clocks-guard
+UNIT
+sudo tee /etc/systemd/system/spectrum-clocks-guard.timer >/dev/null <<'UNIT'
+[Unit]
+Description=Check the clock lock every 15 s (SpectrumJetson)
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=15
+AccuracySec=1
+[Install]
+WantedBy=timers.target
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl enable --now spectrum-clocks-guard.timer
+
+echo "==> 16. Lower clocks while idle (spectrum-clocks)"
+# PhotonVision (photonvision-90) runs `spectrum-clocks throttle` after the robot (or no robot) has
+# been disabled for throttleClocksAfterDisabledSeconds (Settings > Robot state, default 20) and
+# `spectrum-clocks full` the moment it's enabled. The drop-in: full clocks before PhotonVision
+# starts (cameras start at speed), lower clocks once it stops or crashes (Restart=always brings it
+# back, and full with it). "-": a helper failure never stops PhotonVision starting.
+# `sudo spectrum-clocks mode full` keeps them full always (benchmarks, replays without PhotonVision).
+sudo mkdir -p "$(dirname "$PV_CLOCKS_CONF")"
+sudo tee "$PV_CLOCKS_CONF" >/dev/null <<CONF
+# SpectrumJetson: full clocks while PhotonVision runs; lower when it stops (spectrum-clocks).
+[Service]
+ExecStartPre=-$CLOCKS_HELPER full
+ExecStopPost=-$CLOCKS_HELPER throttle
+CONF
+sudo systemctl daemon-reload
+
+echo "==> 15. Low-jitter cameras (spectrum-rt, off unless RT=on)"
+sudo install -m 755 "$(dirname "$0")/spectrum-rt.sh" /usr/local/bin/spectrum-rt
+sudo tee /etc/systemd/system/spectrum-rt.service >/dev/null <<'UNIT'
+[Unit]
+Description=Low-jitter camera handling, if switched on (SpectrumJetson spectrum-rt)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/spectrum-rt apply
+UNIT
+sudo tee /etc/systemd/system/spectrum-rt.timer >/dev/null <<'UNIT'
+[Unit]
+Description=Re-apply spectrum-rt every 15 s (new PhotonVision threads) (SpectrumJetson)
+[Timer]
+OnBootSec=40
+OnUnitActiveSec=15
+AccuracySec=1
+[Install]
+WantedBy=timers.target
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl enable --now spectrum-rt.timer
+if [[ -n ${RT:-} ]]; then sudo /usr/local/bin/spectrum-rt "$RT" >/dev/null
+elif [[ ! -e /etc/spectrum-rt ]]; then echo off | sudo tee /etc/spectrum-rt >/dev/null; fi
 
 echo "==> 5. No USB autosuspend for cameras"
 # Any device with a uvcvideo interface: set power/control=on on the USB device (the parent).
@@ -276,9 +419,14 @@ StartLimitIntervalSec=0
 [Service]
 Restart=always
 RestartSec=1
-# A stop takes 3-7 s; the settings are saved in the first second. Twice on 2026-10-01 the
-# process hung in its native exit, after the shutdown hooks, until the default 90 s kill
-# (docs/AUDIT-2026-10.md): every camera and the dashboard were down that long.
+# PhotonVision's own unit stops with ExecStop=/bin/systemctl kill photonvision: that SIGTERMs
+# its own systemctl (the unit's control process) too, so every stop ended "failed (Result:
+# signal)" even though java exits in ~1 s. Clear it: systemd's normal stop sends the SIGTERM.
+# The JVM exits 143 (128 + SIGTERM) after its shutdown hooks: count that as a clean stop.
+ExecStop=
+SuccessExitStatus=143
+# Twice on 2026-10-01 the process hung in its native exit, after the shutdown hooks, until
+# the default 90 s kill (docs/AUDIT-2026-10.md); not seen since. Bound it at 15 s.
 TimeoutStopSec=15
 CONF
 sudo systemctl daemon-reexec   # picks up the watchdog setting
@@ -294,10 +442,24 @@ Environment=OPENCV_THREAD_POOL_ACTIVE_WAIT_WORKER=0
 Environment=OPENCV_THREAD_POOL_ACTIVE_WAIT_MAIN=0
 CONF
 sudo systemctl daemon-reload
-if [[ $(cat "$PV_OPENCV_CONF") != "$opencv_before" ]]; then
+if [[ $(cat "$PV_OPENCV_CONF") != "$opencv_before" ]] && systemctl cat photonvision.service &>/dev/null; then
   echo "    restarting PhotonVision to apply"
   sudo systemctl restart photonvision
 fi
+
+echo "==> 17. Camera delay: SPECTRUM_CAMERA_DELAY_US=$CAMERA_DELAY_US"
+sudo tee "$PV_DELAY_CONF" >/dev/null <<CONF
+# SpectrumJetson: frame timestamps move this much earlier on top of half the exposure: the
+# camera's own delay from the end of exposure to sending the frame (USBFrameProvider).
+# 2500 = Team 100's rotating-disc measurement of the Thriftiest Cam in MJPEG (team100/all26,
+# raspberry_pi/app/camera/config/config_thrifty_mjpeg.py extra_delay_ms = 2.5), a starting
+# value until our own spin test (tests/field-replay/RESULTS.md "Camera delay from rotation").
+# Override: CAMERA_DELAY_US=N scripts/jetson/09-robot-tuning.sh. Applies at the next start.
+[Service]
+Environment=SPECTRUM_CAMERA_DELAY_US=$CAMERA_DELAY_US
+CONF
+sudo systemctl daemon-reload
+echo "    takes effect at PhotonVision's next start"
 
 echo "==> 10. USB enumeration retries time out after 1 s, not 5 s"
 sudo tee "$USB_TMPFILES" >/dev/null <<'CONF'
@@ -383,5 +545,8 @@ echo "  USB descriptor timeout: $(cat /sys/module/usbcore/parameters/initial_des
 echo "  TCP retries before giving up: $(sysctl -n net.ipv4.tcp_retries2) (~13 s at 5)"
 echo "  Wi-Fi retry: $(systemctl is-active spectrum-wifi-retry.timer) (every 2 min, radio on only)"
 echo "  cooling: $(sudo "$FAN_HELPER" status) (Settings > Robot state)"
+echo "  low-jitter cameras (spectrum-rt): $(cat /etc/spectrum-rt 2>/dev/null || echo off)"
+echo "  clocks while disabled (spectrum-clocks): $(cat /etc/spectrum-clocks-mode 2>/dev/null || echo auto)"
 echo "  photonvision: Restart=$(systemctl show photonvision -p Restart --value), $(systemctl show photonvision -p Environment --value | tr ' ' '\n' | grep -c OPENCV_THREAD_POOL) OpenCV pool settings"
+echo "  camera delay: $(systemctl show photonvision -p Environment --value | tr ' ' '\n' | sed -n 's/^SPECTRUM_CAMERA_DELAY_US=//p') us"
 echo "Reboot to apply the boot changes: sudo reboot"

@@ -1,0 +1,180 @@
+diff --git a/third_party/971apriltag/apriltag.cc b/third_party/971apriltag/apriltag.cc
+index bc2de5d..c7c0ae0 100644
+--- a/third_party/971apriltag/apriltag.cc
++++ b/third_party/971apriltag/apriltag.cc
+@@ -884,6 +884,24 @@ bool SpectrumStageGraphs() {
+   return on && knob.Get() != 0;
+ }
+ 
++// SpectrumJetson (detector-13): with the stage graphs, Detect() waited for the GPU three times a
++// frame: for the point count (to pick stage 2's bucket), for the selected-point and quad counts
++// (stage 3's buckets), and for the fit quads. Each wait leaves the GPU idle while the camera thread
++// wakes up and launches the next graph. Chained, stages 2 and 3 go in right behind stage 1 with
++// buckets guessed from the last frames' counts (a little above the largest lately), and Detect()
++// waits once. Any bucket at least as large as the real count gives exactly the same output
++// (detector-11's padding), so the host only checks afterwards that each count fit its bucket; when
++// one didn't (a much busier frame), stages 2 and 3 run again with the right buckets as before.
++// SPECTRUM_DETECTOR_CHAIN=0 or 0 in /tmp/spectrum-detector-chain (re-read every 2 s): off.
++bool SpectrumChainedStages() {
++  static const bool on = [] {
++    const char* v = std::getenv("SPECTRUM_DETECTOR_CHAIN");
++    return !(v && std::string(v) == "0");
++  }();
++  static SpectrumKnob knob("/tmp/spectrum-detector-chain", 1);
++  return on && knob.Get() != 0;
++}
++
+ // The smallest bucket >= n, from 1024 up in steps of about 25% (multiples of 256), at most cap.
+ size_t StageBucket(size_t n, size_t cap) {
+   size_t b = 1024;
+@@ -914,6 +932,17 @@ __global__ void QuadsToInt(const size_t* num_quads, int* out, size_t max_quads)
+   *out = *num_quads > max_quads ? 0 : static_cast<int>(*num_quads);
+ }
+ 
++// detector-13: stage 3's point count, or 0 when the selected points or the quads don't fit the
++// buckets its graph was recorded for (a chained launch with a guess that was too small: the host
++// then runs stages 2 and 3 again). Over too-small buckets, stage 3 would read past what it sorted.
++__global__ void GuardStage3(const int* selected, const int* num_quads, size_t points_bucket,
++                            size_t quads_bucket, int* out) {
++  *out = static_cast<size_t>(*selected) <= points_bucket &&
++                 static_cast<size_t>(*num_quads) <= quads_bucket
++             ? *selected
++             : 0;
++}
++
+ constexpr uint64_t kPadKey = ~uint64_t{0};
+ 
+ // RewriteToIndexPoint with the counts on the GPU: points past the real count become kPadKey.
+@@ -1348,7 +1377,9 @@ absl::Status GpuDetector::EnqueueSecondStage(size_t points_bucket, cudaStream_t
+ absl::Status GpuDetector::EnqueueThirdStage(size_t points_bucket, size_t quads_bucket,
+                                             cudaStream_t stream) {
+   const int bucket = static_cast<int>(points_bucket);
+-  const int* num_points = num_selected_blobs_device_.get();
++  GuardStage3<<<1, 1, 0, stream>>>(num_selected_blobs_device_.get(), num_quads_int_device_.get(),
++                                   points_bucket, quads_bucket, stage3_points_device_.get());
++  const int* num_points = stage3_points_device_.get();
+   {
+     IndexPoint pad;
+     pad.key = kPadKey;
+@@ -1552,6 +1583,7 @@ absl::Status GpuDetector::DetectGraphStages(int* num_selected_blobs, int* num_co
+         "): frame skipped");
+   }
+   *num_selected_blobs = stage_counts_host_.get()[0];
++  NoteStageCounts(n, static_cast<size_t>(*num_selected_blobs), *num_quads_host_.get());  // detector-13
+   if (*num_selected_blobs == 0) {
+     *done = true;
+     return absl::OkStatus();
+@@ -1567,6 +1599,70 @@ absl::Status GpuDetector::DetectGraphStages(int* num_selected_blobs, int* num_co
+   return absl::OkStatus();
+ }
+ 
++cudaGraphExec_t GpuDetector::RecordedStageGraph(int stage, size_t points_bucket,
++                                                size_t quads_bucket) const {
++  auto it = stage_graphs_.find(std::make_tuple(stage, points_bucket, quads_bucket));
++  return it == stage_graphs_.end() ? nullptr : it->second;
++}
++
++// detector-13: the counts a frame needed. The guesses follow the largest count of the last frames,
++// decaying ~3% a frame, so a busy moment keeps the buckets up for a second or so.
++void GpuDetector::NoteStageCounts(size_t points, size_t selected, size_t quads) {
++  auto track = [](size_t& held, size_t now) { held = std::max(now, held - held / 32); };
++  track(chain_points_, points);
++  track(chain_selected_, selected);
++  track(chain_quads_, quads);
++  ++chain_frames_;
++  if (!SpectrumChainedStages()) return;
++  // Ask for the graphs the next frames will guess (recorded between frames, RecordStageGraphs).
++  const size_t points_capacity = sorted_union_marker_pair_device_.size();
++  StageGraph(2, StageBucket(chain_points_ + chain_points_ / 8, points_capacity), 0);
++  StageGraph(3, StageBucket(chain_selected_ + chain_selected_ / 8, points_capacity),
++             StageBucket(chain_quads_ + chain_quads_ / 8, kMaxBlobs));
++}
++
++// detector-13: stages 2 and 3 with guessed buckets, launched behind stage 1, one wait. Unavailable:
++// no guess yet, or its graphs aren't recorded yet. *missed: a count didn't fit its guessed bucket;
++// the caller runs DetectGraphStages, which launches stages 2 and 3 again with the right buckets.
++absl::Status GpuDetector::DetectChainedStages(int* num_selected_blobs, int* num_quad_peaked_quads,
++                                              bool* done, bool* missed) {
++  *missed = false;
++  if (chain_frames_ < 2) return absl::UnavailableError("no counts yet");
++  const size_t points_capacity = sorted_union_marker_pair_device_.size();
++  const size_t points_bucket = StageBucket(chain_points_ + chain_points_ / 8, points_capacity);
++  const size_t selected_bucket = StageBucket(chain_selected_ + chain_selected_ / 8, points_capacity);
++  const size_t quads_bucket = StageBucket(chain_quads_ + chain_quads_ / 8, kMaxBlobs);
++  cudaGraphExec_t second = RecordedStageGraph(2, points_bucket, 0);
++  cudaGraphExec_t third = RecordedStageGraph(3, selected_bucket, quads_bucket);
++  if (!second || !third) return absl::UnavailableError("guessed graphs not recorded yet");
++  CHECK_CUDA(cudaGraphLaunch(second, stream_.get()));
++  CHECK_CUDA(cudaGraphLaunch(third, stream_.get()));
++  CHECK_CUDA(cudaStreamSynchronize(stream_.get()));
++  const size_t n = static_cast<size_t>(*num_compressed_union_marker_pair_host_.get());
++  const size_t num_quads = *num_quads_host_.get();
++  const int selected = stage_counts_host_.get()[0];
++  // As DetectGraphStages, in the same order: too many quads is an error whatever the buckets.
++  if (n <= points_bucket && num_quads > kMaxBlobs) {
++    return absl::ResourceExhaustedError(
++        "more candidate quads (" + std::to_string(num_quads) +
++        ") than the detector's buffers hold (" + std::to_string(kMaxBlobs) +
++        "): frame skipped");
++  }
++  if (n > points_bucket || static_cast<size_t>(selected) > selected_bucket ||
++      num_quads > quads_bucket) {
++    *missed = true;
++    return absl::OkStatus();
++  }
++  NoteStageCounts(n, static_cast<size_t>(selected), num_quads);
++  *num_selected_blobs = selected;
++  if (selected == 0) {
++    *done = true;
++    return absl::OkStatus();
++  }
++  *num_quad_peaked_quads = stage_counts_host_.get()[1];
++  return absl::OkStatus();
++}
++
+ absl::Status GpuDetector::Detect(const uint8_t* image,
+                                  const uint8_t* image_device) {
+   // const aos::monotonic_clock::time_point start_time =
+@@ -1742,8 +1838,19 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+   bool staged = false;
+   if (graph && SecondStageGraphs()) {
+     bool done = false;
+-    absl::Status status = DetectGraphStages(&num_selected_blobs_host, &num_compressed_peaks_host,
+-                                            &num_quad_peaked_quads_host, &done);
++    absl::Status status = absl::UnavailableError("not chained");
++    if (SpectrumChainedStages()) {  // detector-13
++      bool missed = false;
++      status = DetectChainedStages(&num_selected_blobs_host, &num_quad_peaked_quads_host, &done,
++                                   &missed);
++      if (status.ok() && missed) status = absl::UnavailableError("missed");
++      if (status.ok()) num_compressed_peaks_host = -1;
++    }
++    if (absl::IsUnavailable(status)) {
++      done = false;
++      status = DetectGraphStages(&num_selected_blobs_host, &num_compressed_peaks_host,
++                                 &num_quad_peaked_quads_host, &done);
++    }
+     if (absl::IsUnavailable(status)) {
+       staged = false;
+     } else if (!status.ok()) {
+diff --git a/third_party/971apriltag/apriltag.h b/third_party/971apriltag/apriltag.h
+index 065273d..a95beea 100644
+--- a/third_party/971apriltag/apriltag.h
++++ b/third_party/971apriltag/apriltag.h
+@@ -466,6 +466,16 @@ class GpuDetector {
+   GpuMemory<int> num_selected_blobs_int_device_{1};
+   GpuMemory<int> num_quads_int_device_{1};
+   HostMemory<FitQuad> fit_quads_pinned_{kMaxBlobs};  // stage 3's fit quads, for the host
++  // SpectrumJetson (detector-13): stages 2 and 3 launched right behind stage 1 with buckets guessed
++  // from recent frames, and one wait for the GPU instead of three (DetectChainedStages).
++  absl::Status DetectChainedStages(int* num_selected_blobs, int* num_quad_peaked_quads, bool* done,
++                                   bool* missed);
++  cudaGraphExec_t RecordedStageGraph(int stage, size_t points_bucket, size_t quads_bucket) const;
++  void NoteStageCounts(size_t points, size_t selected, size_t quads);
++  // The largest counts of the last few frames (decaying), for the guessed buckets.
++  size_t chain_points_ = 0, chain_selected_ = 0, chain_quads_ = 0;
++  GpuMemory<int> stage3_points_device_{1};  // GuardStage3's count
++  int chain_frames_ = 0;
+ 
+   // SpectrumJetson (detector-07): SetMask's mask on the GPU, and whether it's on.
+   GpuMemory<uint8_t> mask_device_;

@@ -4,11 +4,11 @@
 # pipeline and a tag held still in view. Asks for sudo once; takes ~4 minutes.
 #
 # Usage: run.sh [all|faults]   (faults = skip the A/B)
-# Leaves the bos detector with min_white_black_diff 20 selected.
+# Leaves the gpu detector with min_white_black_diff 20 selected.
 set -uo pipefail
 
 SEL=$HOME/SpectrumJetson/scripts/jetson/08-select-detector.sh
-FAULT=/tmp/spectrum-971-fault-every
+FAULT=/tmp/spectrum-detector-fault-every
 EXPOSURES=(30 83)
 SETTLE=3
 WINDOW=6
@@ -28,7 +28,7 @@ wait_for_stats() {
   local n=$1 deadline=$(( $(date +%s) + 90 )) pid
   while [ "$(date +%s)" -lt "$deadline" ]; do
     pid=$(mainpid)
-    if [ "$pid" != 0 ] && [ "$(journalctl _PID="$pid" --no-pager -o cat 2>/dev/null | grep -c '^971 stats')" -ge "$n" ]; then
+    if [ "$pid" != 0 ] && [ "$(journalctl _PID="$pid" --no-pager -o cat 2>/dev/null | grep -cE '^(971|detector) stats')" -ge "$n" ]; then
       return 0
     fi
     sleep 1
@@ -38,7 +38,7 @@ wait_for_stats() {
 
 # Average the stats lines the current process printed in the last WINDOW seconds.
 summarize() {
-  journalctl _PID="$(mainpid)" --no-pager -o cat --since "-${WINDOW} s" 2>/dev/null | grep '^971 stats' |
+  journalctl _PID="$(mainpid)" --no-pager -o cat --since "-${WINDOW} s" 2>/dev/null | grep -E '^(971|detector) stats' |
     awk '{
       for (i = 1; i <= NF; i++) {
         if ($i == "calls/s,") c += $(i-1)
@@ -69,11 +69,11 @@ run_config() {
 MODE=${1:-all}   # all | faults
 if [[ $MODE == all ]]; then
   echo "== A/B (hold the tag still) =="
-  run_config "4143 mwbd5" 4143
-  run_config "bos  mwbd5" bos --mwbd 5
-  run_config "bos  mwbd20" bos --mwbd 20
+  run_config "4143 mwbd5" gpu-4143
+  run_config "gpu  mwbd5" gpu --mwbd 5
+  run_config "gpu  mwbd20" gpu --mwbd 20
 else
-  "$SEL" bos --mwbd 20 >/dev/null
+  "$SEL" gpu --mwbd 20 >/dev/null
   wait_for_stats 2
 fi
 
@@ -84,7 +84,7 @@ echo 100 > $FAULT
 wait_secs 12
 rm -f $FAULT
 pid1=$(mainpid)
-fails=$(journalctl _PID="$pid1" --no-pager -o cat --since "-13 s" | grep -c "^971 detector h.* failure")
+fails=$(journalctl _PID="$pid1" --no-pager -o cat --since "-13 s" | grep -cE "^(971 )?detector h.* failure")
 echo "PID before $pid0, after $pid1 ($([ "$pid0" = "$pid1" ] && echo 'no restart' || echo 'RESTARTED'))"
 echo "failures logged: $fails; stats while faulting: $(WINDOW=10 summarize)"
 
@@ -117,7 +117,7 @@ rm -f $FAULT
 deadline=$(( $(date +%s) + 90 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
   p=$(mainpid)
-  if [ "$p" != 0 ] && [ "$p" != "$pid0" ] && journalctl _PID="$p" --no-pager -o cat 2>/dev/null | grep -q '^971 stats'; then break; fi
+  if [ "$p" != 0 ] && [ "$p" != "$pid0" ] && journalctl _PID="$p" --no-pager -o cat 2>/dev/null | grep -qE '^(971|detector) stats'; then break; fi
   sleep 0.2
 done
 t_back=$(date +%s.%N)
@@ -127,4 +127,4 @@ awk -v a="$t0" -v b="$t_abort" -v c="$t_back" 'BEGIN {
 
 echo
 v4l2-ctl -d /dev/video0 --set-ctrl=exposure_time_absolute=83
-echo "Done. Selected: bos detector, min_white_black_diff 20 (exposure left at 83)."
+echo "Done. Selected: gpu detector, min_white_black_diff 20 (exposure left at 83)."

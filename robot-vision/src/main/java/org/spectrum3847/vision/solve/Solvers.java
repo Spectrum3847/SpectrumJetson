@@ -41,6 +41,16 @@ public final class Solvers {
         return multiTagThen(singleTag(new SingleTagConfig()));
     }
 
+    /**
+     * The robot-side multi-camera solve (optional, not in {@link #standard()} yet): one pose from
+     * every corner of every tag of every camera, for PhotonVision with its 3D mode off. It works on
+     * a set of frames, not one, so it's called from robot code rather than through {@link
+     * PoseSolver}; see {@link MultiCameraSolver}.
+     */
+    public static MultiCameraSolver multiCamera(MultiCameraSolver.Config config) {
+        return new MultiCameraSolver(config);
+    }
+
     /** PhotonVision's multi-tag result if the frame has one, otherwise {@code fallback}. */
     public static PoseSolver multiTagThen(PoseSolver fallback) {
         return (frame, robotToCamera, field, motion) ->

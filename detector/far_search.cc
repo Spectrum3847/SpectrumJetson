@@ -103,7 +103,7 @@ struct FarDetector {
     try {
       gpu = new frc::apriltag::GpuDetector(w, h, td, cm, dc, vision::ImageFormat::MONO8);
     } catch (const std::exception &e) {
-      std::cout << "971 far search: detector " << w << "x" << h << " failed: " << e.what()
+      std::cout << "far search: detector " << w << "x" << h << " failed: " << e.what()
                 << std::endl;
       Reset();
       return false;
@@ -255,15 +255,17 @@ void SetExcluded(const std::vector<int> &ids) {
   std::lock_guard<std::mutex> lock(state_mu);
   if (ids == excluded_ids) return;
   excluded_ids = ids;
-  std::cout << "971 far search: " << ids.size() << " excluded tag(s) don't count toward a good view"
+  std::cout << "far search: " << ids.size() << " excluded tag(s) don't count toward a good view"
             << std::endl;
 }
 
 void SetConfig(const Config &c) {
   std::lock_guard<std::mutex> lock(state_mu);
-  if (c.enabled != config.enabled || c.sweeps_per_s != config.sweeps_per_s) {
-    std::cout << "971 far search: " << (c.enabled ? "on" : "off");
+  if (c.enabled != config.enabled || c.sweeps_per_s != config.sweeps_per_s ||
+      c.fixed_sweep_ms != config.fixed_sweep_ms) {
+    std::cout << "far search: " << (c.enabled ? "on" : "off");
     if (c.enabled) std::cout << ", up to " << c.sweeps_per_s << " full-size searches a second";
+    if (c.enabled && c.fixed_sweep_ms > 0) std::cout << ", time guard on a fixed " << c.fixed_sweep_ms << " ms";
     std::cout << std::endl;
   }
   config = c;
@@ -420,7 +422,10 @@ std::vector<Det> Process(int camera, const cv::Mat &gray, const std::vector<Det>
   }
 
   std::lock_guard<std::mutex> lock(state_mu);
-  if (sweep) next_sweep_allowed_us = now_us + static_cast<int64_t>(sweep_ms * 1000 / kMaxSweepShare);
+  if (sweep) {
+    const double guard_ms = config.fixed_sweep_ms > 0 ? config.fixed_sweep_ms : sweep_ms;
+    next_sweep_allowed_us = now_us + static_cast<int64_t>(guard_ms * 1000 / kMaxSweepShare);
+  }
   counters.sweeps += sweep;
   counters.crops += crops_run;
   counters.far_tags += static_cast<long>(extras.size());

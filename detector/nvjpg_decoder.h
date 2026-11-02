@@ -2,7 +2,7 @@
 // (libspectrumnvjpg.so, NvJpgDecoder.cc). GpuDetectorJNI.cc loads it with dlopen.
 //
 // Why a separate library: NVIDIA's libnvjpeg.so is a modified libjpeg-8b that exports the same
-// jpeg_* names as libjpeg-turbo, with a different jpeg_decompress_struct. lib971apriltag.so links
+// jpeg_* names as libjpeg-turbo, with a different jpeg_decompress_struct. libspectrum-gpu-apriltag.so links
 // libjpeg-turbo for its CPU decode, so it can't also link libnvjpeg. Loaded with RTLD_DEEPBIND,
 // this library's jpeg_* calls bind to libnvjpeg and the detector's stay with libjpeg-turbo.
 //

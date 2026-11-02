@@ -4,8 +4,8 @@ import org.opencv.core.Mat;
 import org.opencv.core.MatOfDouble;
 import org.photonvision.jni.GpuDetectorJNI;
 
-// Feed lib971apriltag synthetic frames at several resolutions, the way PhotonVision does
-// (one detector, resized when the frame size changes). The JNI prints "971 detector hN
+// Feed libspectrum-gpu-apriltag synthetic frames at several resolutions, the way PhotonVision does
+// (one detector, resized when the frame size changes). The JNI prints "detector hN
 // failure" lines for failed frames; run.sh counts them per resolution.
 public class FrameSizeTest {
   public static void main(String[] args) throws Exception {

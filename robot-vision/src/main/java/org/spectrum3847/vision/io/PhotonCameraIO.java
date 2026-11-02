@@ -77,6 +77,14 @@ public class PhotonCameraIO implements CameraIO {
         inputs.qualityMatched = matcher.matchedCount();
     }
 
+    @Override
+    public java.util.Optional<double[][]> calibration() {
+        var k = camera.getCameraMatrix();
+        var d = camera.getDistCoeffs();
+        if (k.isEmpty() || d.isEmpty()) return java.util.Optional.empty();
+        return java.util.Optional.of(new double[][] {k.get().getData(), d.get().getData()});
+    }
+
     // The calibration can arrive after start, or change: look again every 5 s.
     private void refreshEstimator() {
         double now = org.spectrum3847.vision.compat.Clock.now();

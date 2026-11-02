@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-line performance snapshot of PhotonVision, for before/after comparisons. Run ON THE JETSON
-# (no sudo). Over N seconds: each detector's fps and detect time (971 stats), PhotonVision's
+# (no sudo). Over N seconds: each detector's fps and detect time ("detector stats" lines), PhotonVision's
 # total CPU, and CPU split into the per-camera vision threads, OpenCV/native worker threads
 # spawned from them, and everything else.
 # Usage: tests/perf-snapshot.sh [seconds] [label]   (default 20)
@@ -41,7 +41,7 @@ print(f"{main + workers + other:.0f} {main:.0f} {workers:.0f} {other:.0f}")
 PY
 read -r total main workers other < /tmp/perf-cpu.$$
 rm -f /tmp/perf-cpu.$$
-cams=$(journalctl _PID="$P" --no-pager -o cat --since "$since" | grep '^971 stats' | awk '
+cams=$(journalctl _PID="$P" --no-pager -o cat --since "$since" | grep -E '^(971|detector) stats' | awk '
   { for (i = 1; i <= NF; i++) { if ($i == "calls/s,") f[$3] += $(i-1); if ($i == "avg" && $(i-1) == "detect") d[$3] += $(i+1) }; n[$3]++ }
   END { for (h in n) printf "%s %.0f fps %.2f ms  ", h, f[h] / n[h], d[h] / n[h] }')
 # Browser preview streams (PhotonVision's MJPEG servers, ports 1181-1190) cost CPU: count viewers.

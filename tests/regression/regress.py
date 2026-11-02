@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Detector regression check: a fixed corpus of recordings, replayed through the detector we build,
 compared detection by detection with the output we last accepted ("golden"). Run ON THE JETSON,
-through run.sh (which builds far_replay first and puts a deadline on everything).
+through run.sh (which builds detector-replay first and puts a deadline on everything).
 
   regress.py check [NAME...]       replay and compare (default: every session); exit 1 on any change
   regress.py bless [NAME...]       accept the current output as golden, after reading check's report
@@ -12,7 +12,7 @@ through run.sh (which builds far_replay first and puts a deadline on everything)
 The corpus lives on the scratch partition at /opt/photonvision/rewind/regression (beside Rewind's
 sessions, which Rewind's quota never touches), with a copy on the laptop. corpus.json records each
 session's checksum, so a damaged or swapped recording shows as such instead of as a detector change.
-Goldens are golden/NAME.csv.gz in the repo: far_replay's output (every camera of a session, merged
+Goldens are golden/NAME.csv.gz in the repo: detector-replay's output (every camera of a session, merged
 in recording order, far-tag search on as live), one row per detection.
 """
 import argparse, csv, gzip, hashlib, io, json, os, shutil, subprocess, sys, time
@@ -20,7 +20,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 CORPUS = Path(os.environ.get("SPECTRUM_REGRESSION_CORPUS", "/opt/photonvision/rewind/regression"))
-FAR_REPLAY = Path(os.environ.get("FAR_REPLAY", Path.home() / "build/bos-detector/far_replay"))
+FAR_REPLAY = Path(os.environ.get("FAR_REPLAY", Path.home() / "build/gpu-detector/detector-replay"))
 MANIFEST = HERE / "corpus.json"
 GOLDEN = HERE / "golden"
 OUT = Path("/tmp/spectrum-regression")
@@ -80,12 +80,12 @@ def replay(name, m):
     t0 = time.time()
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     if r.returncode != 0:
-        raise RuntimeError("far_replay failed on %s (exit %d): %s" % (name, r.returncode, r.stderr[-800:]))
+        raise RuntimeError("detector-replay failed on %s (exit %d): %s" % (name, r.returncode, r.stderr[-800:]))
     return out, time.time() - t0, r.stdout
 
 
 def rows(text):
-    """{(camera, frame, id, source): (margin, side_px, corners...)} from far_replay's CSV."""
+    """{(camera, frame, id, source): (margin, side_px, corners...)} from detector-replay's CSV."""
     rd = csv.DictReader(io.StringIO(text))
     out = {}
     for r in rd:
@@ -175,7 +175,7 @@ def main():
     a = ap.parse_args()
     m = load_manifest()
     if not FAR_REPLAY.exists():
-        sys.exit("No far_replay at %s (run.sh builds it)" % FAR_REPLAY)
+        sys.exit("No detector-replay at %s (run.sh builds it)" % FAR_REPLAY)
 
     if a.cmd == "add":
         if len(a.names) != 2:
@@ -208,7 +208,7 @@ def main():
     if a.cmd == "bless":
         bless(names, m)
         return
-    print("Detector regression: %d session(s), far_replay %s" % (len(names), " ".join(m["detector_args"])))
+    print("Detector regression: %d session(s), detector-replay %s" % (len(names), " ".join(m["detector_args"])))
     bad = check(names, m)
     print("PASS: every detection the same as golden" if not bad else
           "CHANGED: %s. If the change is intended, bless it (run.sh --bless %s) and commit the goldens."

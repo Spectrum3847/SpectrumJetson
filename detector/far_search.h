@@ -14,7 +14,7 @@
 //  - As soon as any camera has a good view again, all of it stops: cameras cost what they did.
 //
 // Everything is in image coordinates of the camera's frame: corners, centre and homography are
-// scaled back from the upscaled (and cropped) images. Shared by lib971apriltag.so (live, through
+// scaled back from the upscaled (and cropped) images. Shared by libspectrum-gpu-apriltag.so (live, through
 // GpuDetectorJNI.cc) and fieldcal_detect (replay), so both run the same policy.
 #pragma once
 
@@ -48,6 +48,12 @@ struct Det {
 struct Config {
   bool enabled = true;
   double sweeps_per_s = 30;  // full-size searches a second, across all cameras
+  // The time guard (next full-size search waits 5x the last one's time) normally uses the measured
+  // time: live, that's the point (a slow scene or a busy GPU mustn't eat the frame rate), and it
+  // makes which frames get searched depend on timing. A value > 0 uses this fixed cost instead, so
+  // the decisions depend only on the frames and their timestamps: detector-replay's default, so a
+  // replay is repeatable run to run (tests/regression).
+  double fixed_sweep_ms = 0;
 };
 
 void SetConfig(const Config &c);

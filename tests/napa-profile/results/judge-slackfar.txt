@@ -1,0 +1,32 @@
+still stretches (image): TXMAN1_Q17: 0, TXMAN1_Q19: 2, TXMAN1_Q24: 0, TXMAN1_Q27: 0, TXMAN1_Q32: 4, TXMAN1_Test_r19: 5
+Judge: base napafar_s2; matches TXMAN1_Q17, TXMAN1_Q19, TXMAN1_Q24, TXMAN1_Q27, TXMAN1_Q32, TXMAN1_Test_r19
+
+== napafar_s0: 42726 sightings (base 43057, common 42725); detect 1.15 ms/frame, refine 0.000 ms/frame
+  lost 332 (in-frame checkable 184: median 4.72 px, p90 30.26, >5 px 86, >20.4 px 27); gained 1 (in-frame checkable 0: median nan px, p90 nan, >5 px 0, >20.4 px 0); all base: median 1.36, p90 11.74
+  still stretches: 11, tag-stretches 27; drift p50 0.07 p90 0.24 px
+  static jitter (27 tag-stretches in 11 still stretches; 100% image-still): median 0.083 -> 0.083 px (diff CI +0.000..+0.000); p90 0.114 -> 0.116 (CI +0.000..+0.004)
+    side 20-40: 0.086->0.086 (n 17); side 40-80: 0.074->0.074 (n 10); edge 0-10: 0.097->0.097 (n 8); edge 50-+: 0.078->0.078 (n 19)
+  in-frame (21809 common sightings): p50 1.341 -> 1.341 (CI -0.001..+0.001); p75 4.211 -> 4.211 (CI +0.000..+0.000); p90 11.529 -> 11.529 (CI -0.001..+0.002)
+    per sighting: better 1%, worse 1%, same 99%; median paired diff +0.0000 px
+    side 0-20: 2.80->2.80 (n 746); side 20-40: 1.03->1.03 (n 9980); side 40-80: 1.36->1.36 (n 9677); side 80-+: 2.06->2.06 (n 1406); edge 0-10: 10.33->10.33 (n 304); edge 10-50: 4.80->4.80 (n 1351); edge 50-+: 1.22->1.22 (n 20012)
+  smoothness (9635 7-frame windows, slow motion): 1.077 -> 1.077 px (CI -0.000..+0.000)
+
+== napafar_s1: 43006 sightings (base 43057, common 43006); detect 1.15 ms/frame, refine 0.000 ms/frame
+  lost 51 (in-frame checkable 17: median 3.43 px, p90 25.15, >5 px 8, >20.4 px 2); gained 0 (in-frame checkable 0: median nan px, p90 nan, >5 px 0, >20.4 px 0); all base: median 1.36, p90 11.74
+  still stretches: 11, tag-stretches 27; drift p50 0.07 p90 0.24 px
+  static jitter (27 tag-stretches in 11 still stretches; 100% image-still): median 0.083 -> 0.083 px (diff CI +0.000..+0.000); p90 0.114 -> 0.114 (CI +0.000..+0.000)
+    side 20-40: 0.086->0.086 (n 17); side 40-80: 0.074->0.074 (n 10); edge 0-10: 0.097->0.097 (n 8); edge 50-+: 0.078->0.078 (n 19)
+  in-frame (22088 common sightings): p50 1.356 -> 1.356 (CI +0.000..+0.000); p75 4.274 -> 4.274 (CI +0.000..+0.000); p90 11.732 -> 11.732 (CI +0.000..+0.000)
+    per sighting: better 0%, worse 0%, same 100%; median paired diff +0.0000 px
+    side 0-20: 2.85->2.85 (n 808); side 20-40: 1.05->1.04 (n 10146); side 40-80: 1.37->1.37 (n 9721); side 80-+: 2.07->2.07 (n 1413); edge 0-10: 10.34->10.34 (n 308); edge 10-50: 4.81->4.81 (n 1369); edge 50-+: 1.23->1.23 (n 20269)
+  smoothness (9655 7-frame windows, slow motion): 1.081 -> 1.081 px (CI +0.000..+0.000)
+
+== napafar_s3: 43074 sightings (base 43057, common 43057); detect 1.16 ms/frame, refine 0.000 ms/frame
+  lost 0 (in-frame checkable 0: median nan px, p90 nan, >5 px 0, >20.4 px 0); gained 17 (in-frame checkable 4: median 4.29 px, p90 11.01, >5 px 2, >20.4 px 0); all base: median 1.36, p90 11.74
+  still stretches: 11, tag-stretches 27; drift p50 0.07 p90 0.24 px
+  static jitter (27 tag-stretches in 11 still stretches; 100% image-still): median 0.083 -> 0.083 px (diff CI +0.000..+0.000); p90 0.114 -> 0.114 (CI +0.000..+0.000)
+    side 20-40: 0.086->0.086 (n 17); side 40-80: 0.074->0.074 (n 10); edge 0-10: 0.097->0.097 (n 8); edge 50-+: 0.078->0.078 (n 19)
+  in-frame (22117 common sightings): p50 1.358 -> 1.358 (CI +0.000..+0.000); p75 4.278 -> 4.278 (CI +0.000..+0.000); p90 11.739 -> 11.739 (CI +0.000..+0.000)
+    per sighting: better 0%, worse 0%, same 100%; median paired diff +0.0000 px
+    side 0-20: 2.85->2.85 (n 811); side 20-40: 1.05->1.05 (n 10169); side 40-80: 1.37->1.37 (n 9724); side 80-+: 2.07->2.07 (n 1413); edge 0-10: 10.34->10.34 (n 308); edge 10-50: 4.80->4.80 (n 1369); edge 50-+: 1.23->1.23 (n 20297)
+  smoothness (9665 7-frame windows, slow motion): 1.083 -> 1.083 px (CI +0.000..+0.000)

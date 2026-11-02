@@ -1,5 +1,5 @@
 // Checks libspectrumnvjpg.so (NVJPG hardware JPEG -> gray) against libjpeg-turbo, the way
-// lib971apriltag.so uses it: loaded with dlopen(RTLD_DEEPBIND) into a process that also has
+// libspectrum-gpu-apriltag.so uses it: loaded with dlopen(RTLD_DEEPBIND) into a process that also has
 // libjpeg-turbo (here it's even linked into the executable, the worst case for the name clash).
 //
 //   NvjpgCheck <lib> <file.mjpeg>...   (Rewind recordings: JPEG frames back to back)

@@ -23,7 +23,7 @@ trap 'sudo tegrastats --stop 2>/dev/null' EXIT
 tach=$(grep -lx pwm_tach /sys/class/hwmon/hwmon*/name 2>/dev/null | head -1)
 fps() {   # each camera's processed fps, from the detector's once-a-second stats in the log
   journalctl -u photonvision --since "-3 s" --no-pager -o cat 2>/dev/null \
-    | sed -n 's/^971 stats \(h[0-9]*\) [0-9x]*: \([0-9]*\)\.[0-9]* calls\/s.*/\1=\2/p' | sort -u -t= -k1,1 | tr '\n' ' '
+    | sed -En 's/^(971|detector) stats (h[0-9]*\) [0-9x]*: \([0-9]*\)\.[0-9]* calls\/s.*/\1=\2/p' | sort -u -t= -k1,1 | tr '\n' ' '
 }
 echo "time_s,tj_c,cpu_c,gpu_c,power_w,fan_rpm,fan_pwm,cameras_fps" > "$CSV"
 echo "Logging to $CSV for $MIN min (stop at $STOP_C C)"
@@ -58,5 +58,5 @@ if len(last) > 5:
     print(f"last 10 min: {slope:+.2f} C/min" + ("  (levelled off)" if abs(slope) < 0.1 else ""))
 fan = sorted({r["fan_pwm"] for r in rows})
 print("fan pwm seen:", ", ".join(fan), "(0 = off; 255 = the guard turned it on)")
-print("cameras at the end:", rows[-1]["cameras_fps"] or "(no 971 stats in the log)")
+print("cameras at the end:", rows[-1]["cameras_fps"] or "(no detector stats in the log)")
 PY

@@ -1,0 +1,70 @@
+diff --git a/third_party/971apriltag/apriltag.cc b/third_party/971apriltag/apriltag.cc
+index c7c0ae0..90d5cb1 100644
+--- a/third_party/971apriltag/apriltag.cc
++++ b/third_party/971apriltag/apriltag.cc
+@@ -1566,11 +1566,23 @@ cudaGraphExec_t GpuDetector::RecordStageGraph(int stage, size_t points_bucket,
+ // Detect() after the first-stage graph, as two graphs. *done: nothing to detect (no candidate
+ // points), detections cleared by the caller. Unavailable: a graph couldn't be recorded, and the
+ // caller runs the steps one by one instead (they recompute everything a graph wrote).
++absl::Status GpuDetector::CheckPointCount() const {
++  if (static_cast<size_t>(*num_compressed_union_marker_pair_host_.get()) >=
++      union_marker_pair_device_.size()) {
++    return absl::UnknownError(
++        "Impossible increase in markers: device: " +
++        std::to_string(union_marker_pair_device_.size()) + " host: " +
++        std::to_string(*num_compressed_union_marker_pair_host_.get()));
++  }
++  return absl::OkStatus();
++}
++
+ absl::Status GpuDetector::DetectGraphStages(int* num_selected_blobs, int* num_compressed_peaks,
+                                             int* num_quad_peaked_quads, bool* done) {
+   const size_t points_capacity = sorted_union_marker_pair_device_.size();
+   // The first-stage graph's point count.
+   CHECK_CUDA(cudaStreamSynchronize(stream_.get()));
++  if (absl::Status s = CheckPointCount(); !s.ok()) return s;
+   const size_t n = static_cast<size_t>(*num_compressed_union_marker_pair_host_.get());
+   cudaGraphExec_t second = StageGraph(2, StageBucket(n, points_capacity), 0);
+   if (!second) return absl::UnavailableError("no stage 2 graph");
+@@ -1638,6 +1650,7 @@ absl::Status GpuDetector::DetectChainedStages(int* num_selected_blobs, int* num_
+   CHECK_CUDA(cudaGraphLaunch(second, stream_.get()));
+   CHECK_CUDA(cudaGraphLaunch(third, stream_.get()));
+   CHECK_CUDA(cudaStreamSynchronize(stream_.get()));
++  if (absl::Status s = CheckPointCount(); !s.ok()) return s;
+   const size_t n = static_cast<size_t>(*num_compressed_union_marker_pair_host_.get());
+   const size_t num_quads = *num_quads_host_.get();
+   const int selected = stage_counts_host_.get()[0];
+@@ -1821,7 +1834,9 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+       &num_compressed_union_marker_pair_host_, &stream_);
+   }  // !graph (the recorded graph ends with the same copy)
+ 
+-  {
++  // SpectrumJetson (detector-14): on the graph path the count isn't there yet (the graph copies it back
++  // asynchronously); DetectGraphStages and DetectChainedStages check it after their wait.
++  if (!graph) {
+     if (static_cast<size_t>(*num_compressed_union_marker_pair_host_.get()) >=
+         union_marker_pair_device_.size()) {
+       return absl::UnknownError(
+@@ -1876,6 +1891,9 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+     size_t temp_storage_bytes = radix_sort_tmpstorage_device_.size();
+     QuadBoundaryPointDecomposer decomposer;
+     after_num_compact_memcpy_.Synchronize();
++    if (graph) {  // detector-14: now the count is there
++      if (absl::Status s = CheckPointCount(); !s.ok()) return s;
++    }
+     CHECK_CUDA(cub::DeviceRadixSort::SortKeys(
+         radix_sort_tmpstorage_device_.get(), temp_storage_bytes,
+         compressed_union_marker_pair_device_.get(),
+diff --git a/third_party/971apriltag/apriltag.h b/third_party/971apriltag/apriltag.h
+index a95beea..cfe41f7 100644
+--- a/third_party/971apriltag/apriltag.h
++++ b/third_party/971apriltag/apriltag.h
+@@ -472,6 +472,8 @@ class GpuDetector {
+                                    bool* missed);
+   cudaGraphExec_t RecordedStageGraph(int stage, size_t points_bucket, size_t quads_bucket) const;
+   void NoteStageCounts(size_t points, size_t selected, size_t quads);
++  // detector-14: the first stage's point count fits its buffer (after a wait for the GPU).
++  absl::Status CheckPointCount() const;
+   // The largest counts of the last few frames (decaying), for the guessed buckets.
+   size_t chain_points_ = 0, chain_selected_ = 0, chain_quads_ = 0;
+   GpuMemory<int> stage3_points_device_{1};  // GuardStage3's count

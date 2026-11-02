@@ -18,6 +18,11 @@ set -uo pipefail
 if mountpoint -q /data/settings; then STATE=/data/settings/spectrum-fan-mode
 elif [[ -e /data && ! -x /data ]]; then STATE=""   # /data is root-only: can't tell without root
 else STATE=/etc/spectrum-fan-mode; fi
+# A mode saved before 10-data-partition.sh made /data/settings (09-robot-tuning.sh runs first on a
+# fresh flash) is in /etc: carry it across rather than fall back to quiet.
+if [[ $STATE == /data/settings/* && ! -e $STATE && -f /etc/spectrum-fan-mode && -w /data/settings ]]; then
+  cp /etc/spectrum-fan-mode "$STATE" && sync "$STATE"
+fi
 GUARD=spectrum-fan-guard.service
 
 # The saved mode; quiet when none was saved; "unknown" when it can't be read (/data/settings is

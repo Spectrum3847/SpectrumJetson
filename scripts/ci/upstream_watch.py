@@ -120,19 +120,19 @@ def report_photonvision():
 
 
 def report_bos():
-    sha = pin("scripts/jetson/07-build-bos-detector.sh", r"^BOS_SHA=([0-9a-f]+)")
+    sha = pin("scripts/jetson/07-build-gpu-detector.sh", r"^BOS_SHA=([0-9a-f]+)")
     d = clone("https://github.com/frc971/bos.git", "bos")
     head = sh("git", "rev-parse", "origin/HEAD", cwd=d).stdout.strip()
     new = commits(d, sha, head, ["third_party/971apriltag"])
     if not new:
         return None
-    ok, total, fail = try_patches(d, head, r"bos-\d+.*\.patch")
-    patches = (f"All {total} `bos-*` patches apply to `{head[:8]}`." if not fail else
+    ok, total, fail = try_patches(d, head, r"detector-\d+.*\.patch")
+    patches = (f"All {total} `detector-*` patches apply to `{head[:8]}`." if not fail else
                f"**{ok} of {total} patches apply**; the first that doesn't is `{fail}`.")
     return {
         "key": f"bos:{head}",
         "title": "Upstream: frc971/bos (the CUDA AprilTag detector)",
-        "body": f"We pin `{sha}` (`scripts/jetson/07-build-bos-detector.sh`). {len(new)} new commit(s) touching `third_party/971apriltag`:\n\n"
+        "body": f"We pin `{sha}` (`scripts/jetson/07-build-gpu-detector.sh`). {len(new)} new commit(s) touching `third_party/971apriltag`:\n\n"
                 + "\n".join(f"- {c}" for c in new[:40])
                 + f"\n\n{patches}\n\nTo update: change `BOS_SHA`, rebuild on the Jetson, and compare detections with a Rewind replay (`tests/far-search/replay.sh`).",
     }
@@ -151,7 +151,7 @@ def report_aos():
         "title": "Upstream: RealtimeRoboticsGroup/aos (where Austin develops the detector now)",
         "body": f"Last reviewed `{reviewed[:9]}` (`scripts/ci/upstream-pins.env`). {len(new)} new commit(s) in `frc/orin` and `frc/vision`:\n\n"
                 + "\n".join(f"- [{c}](https://github.com/RealtimeRoboticsGroup/aos/commit/{c.split()[0]})" for c in new[:40])
-                + "\n\nWe build from bos, not aos: these are for reading (detector fixes worth porting as a `bos-*` patch). "
+                + "\n\nWe build from bos, not aos: these are for reading (detector fixes worth porting as a `detector-*` patch). "
                   f"Once reviewed, set `AOS_REVIEWED={head[:9]}`.",
     }
 

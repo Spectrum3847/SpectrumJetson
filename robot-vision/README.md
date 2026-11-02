@@ -121,6 +121,47 @@ drivetrain.registerTelemetry(state -> vision.addMotion(
 
 Change it with `Solvers.multiTagThen(Solvers.singleTag(new Solvers.SingleTagConfig().preferTrig(false)))`, or write your own `PoseSolver`.
 
+### Multi-camera solve (optional, not the default yet)
+
+`Solvers.multiCamera(config)` (`MultiCameraSolver`) solves **one robot pose from every corner of every tag of every camera**. It's for PhotonVision with its 3D mode off, where the coprocessor sends only 2D results and corners and the robot does the geometry. It returns `MULTI_CAMERA` candidates.
+
+What it does:
+- **Unknowns:** the robot's x, y and heading at one reference time, the newest frame's. The robot is taken as flat, so each camera's height and tilt come from its mount. That's why one tag on one camera still solves.
+- **Gyro:** an optional heading prior, σ 1.5° by default.
+- **Cameras at different times:** each frame is moved to the reference time with the odometry history, `Δ = odom(tRef)⁻¹ ∘ odom(tFrame)`. Odometry drift doesn't matter, only its changes do. Without odometry it uses the gyro's heading change, and without either the frames are taken as simultaneous.
+- **Corners:** undistorted with each camera's OpenCV calibration (`getCameraMatrix()`, `getDistCoeffs()`), in OpenCV's pixel convention, which is what the 2027 fork sends. Set `cornerShiftPx` if a source differs.
+- **Corner σ per tag:** set from the tag's size in pixels, its distance, how near it is to the image edge, and its decision margin. You can swap this out with `weighting(...)`.
+- **The fit:** Levenberg–Marquardt with a Cauchy robust loss (or Huber), seeded from every tag on its own. A tag that still doesn't fit is dropped and flagged.
+- **Out:** the pose, a 3×3 covariance for the EKF or a trust model, and every tag's residual for gates.
+
+```java
+var solver = Solvers.multiCamera(new MultiCameraSolver.Config());
+var frames = new ArrayList<MultiCameraSolver.CameraFrame>();
+for (var cam : vision.cameras()) {
+    // the camera's newest frame; intrinsics from PhotonCamera.getCameraMatrix()/getDistCoeffs()
+    frames.add(new MultiCameraSolver.CameraFrame(frame, intrinsics, cam.robotToCamera()));
+}
+solver.solve(frames, field, vision.motion(), MultiCameraSolver.PoseHistory.of(odometryBuffer), estimator.getEstimatedPosition())
+      .ifPresent(r -> estimator.addVisionMeasurement(r.pose(), r.timestampSeconds(), VecBuilder.fill(r.stdDevs()[0], r.stdDevs()[1], r.stdDevs()[2])));
+```
+
+**Simulation results** (`MultiCameraSolverTest`): synthetic corners on the real 2026 field, 4 cameras, perfect mounts and calibration. The per-camera `MULTI_TAG` and `TAG_TRIG` columns are worked out from the same noisy corners. Translation error, median/p90:
+
+| Corner noise | multi-camera | per-camera `MULTI_TAG` (mean of cameras) | `TAG_TRIG` (mean of tags) | multi-camera, 1 camera |
+|---|---|---|---|---|
+| 0.5 px | 0.1 / 0.6 cm | 1.6 / 19 cm | 1.7 / 4.9 cm | 0.8 / 11 cm |
+| 1 px | 0.2 / 0.7 cm | 4.5 / 33 cm | 3.7 / 10 cm | 2.1 / 17 cm |
+| 2 px | 0.4 / 1.6 cm | 7.5 / 52 cm | 7.8 / 18 cm | 2.8 / 47 cm |
+
+Other results from the same test:
+- **Heading error:** 0.03° against 1.3° for the per-camera solve at 1 px.
+- **One tag, one camera, 0.5 px:** 1.9 / 4.1 cm with the gyro prior, and 5 / 50 cm without it.
+- **One tag 12 px off:** 0.2 / 3.4 cm, where least squares gives 1.6 / 4.8 cm.
+- **Covariance consistency:** mean NEES 2.6, against an ideal 3.
+- **Speed:** about 170 µs a solve on the laptop for 4 cameras and 10 tags.
+
+On a real robot, the mount and calibration errors will dominate these numbers.
+
 ## Gates
 
 A gate rejects a pose candidate before it reaches the estimator, for a reason that's logged and counted. `Gates.recommended()`, in order:
@@ -251,6 +292,73 @@ The photonvision-82 alerts stay up until robot code restarts, so the pit sees th
 
 Thresholds are public fields on the `VisionHealth` object.
 
+A camera mount that's wrong in robot code also raises an alert: see [Mount check](#mount-check).
+
+## Mount check
+
+A camera knocked, re-aimed, or measured wrong moves every pose from that camera, while each tag
+detection still looks fine, so no gate catches it. At TXMAN1, team 8515's code had the left camera
+at yaw 90° when it was at 84–87°, and the right camera was re-aimed between days (pitch −19° to
+−25°); nothing noticed. `MountCheck` (on by default in `VisionSystem`) does.
+
+**How it works.** For each frame (at most 25 a second per camera), it solves the camera's own field
+pose from vision alone: a 6-DoF PnP on the tag corners with the camera's calibration (PhotonLib's
+camera matrix, read automatically), or PhotonVision's own solve without it. Frames whose solve is
+too uncertain (far or bunched-up tags, a lone tag that fits two ways) are left out. The camera's
+pose implies a mount, compared with the one in code:
+
+- **Height, roll and pitch** need no reference: the robot is flat on the floor, so they are the
+  camera's own field height and tilt. Every usable frame checks them.
+- **x, y and yaw** need the robot's pose from something other than that camera:
+  - other cameras seeing tags at the same time (moved to one time with the estimator's motion).
+    The largest group of cameras that agree with each other is the reference, so **one bad camera
+    among three or more is the odd one out**;
+  - two cameras that disagree: one of them is wrong. It's the one whose poses disagree more with
+    the pose estimator, and whose height, roll or pitch are off;
+  - otherwise the pose estimator, but only for a camera that gave less than 60% of its recent
+    measurements (otherwise the estimator's pose is mostly that camera's own).
+
+Samples are taken only with the robot slow (< 1 m/s, < 0.75 rad/s). The estimate is the median of
+each camera's last 400 samples. A dimension is **SUSPECT** when it's more than **2° / 4 cm** off
+(plus two standard errors of the median) after 40 samples, **BAD** at twice that. Settings are
+public fields on `vision.mountCheck().config`.
+
+**Pre-match check.** Disabled, robot still, every camera seeing tags for a few seconds (2 s at
+25 Hz fills 40 samples):
+
+```java
+for (var r : vision.health().mountCheck()) {        // or vision.mountCheck().reports()
+    System.out.println(r.camera() + " " + r.status() + ": " + r.message());
+    // r.estimated().code(): the measured mount as Java, to paste into robot code
+}
+```
+
+| Where | What |
+|---|---|
+| Alert (Elastic, AdvantageScope) | "Camera X mount wrong: yaw −5.2 deg (cameras:a+b); measured ..." (warning when SUSPECT, error when BAD). Stays up until `mountCheck().reset()`, so the pit sees it after a match. |
+| `/SpectrumVision/mountCheck/summary` | "left OK, right BAD (yaw −5.2 deg)" (the Jetson's Match Ready view can show it) |
+| `/SpectrumVision/mountCheck/<camera>/` | `status` (NO_DATA/OK/SUSPECT/BAD), `message`, `estimated` and `error` (x, y, z m, roll, pitch, yaw deg), `estimatedMount` (Pose3d, robot-relative: AdvantageScope draws it), `code`, `samples`, `reference`, `disagreement` (m, deg from the other cameras) |
+
+After fixing a mount (or changing it with `camera.setRobotToCamera`, which restarts that camera's
+samples on its own), call `vision.mountCheck().reset()`. A turret camera's mount moves:
+`vision.mountCheck().ignore("Turret")`. Off: `.mountCheck(false)` on the builder.
+
+**What it showed on TXMAN1** (`MountCheckTxman1Test`, 8515's detections replayed with the robot's
+logged pose; the mounts their code had): orin-left BAD in all 6 matches (yaw 82–87° measured vs
+90°, roll +1–2°; on Friday also height 0.48 m vs the placeholder's 0.25 m), orin-right BAD in 5
+(pitch −24° in Q32 against −18° in code: the re-aim; Q27 had too few usable frames). That agrees
+with the mounts tests/field-replay solved offline.
+
+**Limits.**
+- One camera alone: only height, roll and pitch, unless the estimator has another source (more
+  cameras, or a camera that rarely feeds it). Its x/y/yaw then report NaN, reference "none".
+- Two cameras that each see tags only on their own side (8515's): x/y/yaw against the estimator,
+  which those same cameras fed, so errors read smaller than they are.
+- A tilted robot (on a ramp, a bump, a lifted wheel) looks like a pitch or roll error; the check
+  samples only when slow, but it can't tell a tilted floor.
+- Cost: about 25–80 µs a frame on a laptop (one PnP, rate-limited to 25 Hz a camera); several
+  times that on a roboRIO.
+
 ## Robot-code checklist
 
 What robot code must get right, whichever library it uses:
@@ -324,7 +432,7 @@ This tests both builds, compiles the examples, runs both simulation tests, and m
 
 **Where dependencies come from:**
 - **CTRE Phoenix 6:** from CTRE's Maven repository.
-- **AdvantageKit:** from its GitHub releases' offline Maven repo, which `build.sh` downloads. Some school web filters block frcmaven.wpi.edu, where it's normally hosted (ours does).
+- **AdvantageKit:** from its GitHub releases' offline Maven repo, which `build.sh` downloads. That also works where a web filter blocks frcmaven.wpi.edu, where it's normally hosted. (Ours doesn't, as of 2026-10-30.)
 
 **How one source serves two WPILibs:**
 - **The source:** `src/main` is written against WPILib 2026.
@@ -335,8 +443,9 @@ This tests both builds, compiles the examples, runs both simulation tests, and m
   - `PhotonCamera.setEnabled`, which PhotonLib 2026 lacks.
 - **Rules for contributors:** write WPILib names only in import lines, never inline. Put anything version-specific in a compat class.
 
-**Tests:** 27, run on both builds (Java 17 and 25), plus the 2026 simulation test. All the examples compile in both builds against the real CTRE and AdvantageKit libraries. The tests cover:
+**Tests:** 35, run on both builds (Java 17 and 25), plus the 2026 simulation test. All the examples compile in both builds against the real CTRE and AdvantageKit libraries. The tests cover:
 - solvers: exact on synthetic frames; ambiguity resolved by the gyro; the trig solve ignoring a flipped tag;
+- the multi-camera solve: exact without noise, time alignment, noise sweeps against the per-camera solvers, an outlier tag, covariance consistency (NEES), its speed;
 - every gate, plus the innovation reset;
 - the trust model's shape;
 - lens undistortion round trips;

@@ -154,17 +154,17 @@
     <p class="hint">Example reports for a robot with four Thriftiest Cams, put together from the exact messages <code>scripts/jetson/health-check.sh</code> prints (compare the real bench run in <a href="#failsafes">chapter 16</a>). The purple ◂ notes are ours, not part of the output. The 4 at the end of the command is how many cameras to expect; leave it off and the script expects 2.</p>
   </div>
 
-  <h3 class="full">The live log and its "971 stats" line</h3>
+  <h3 class="full">The live log and its "detector stats" line</h3>
   <div class="split top full">
     <div class="prose">
-      <p><code>journalctl -u photonvision -f</code> shows PhotonVision's log as it's written (Ctrl+C to stop). It's busy. The most useful lines come from our GPU detector: once a second, one <code>971 stats</code> line for every AprilTag camera.</p>
-      <p>Add <code>| grep "971 stats"</code> to see only those. Four cameras means four lines a second. If a camera's line is missing, that camera isn't reaching the detector.</p>
-      <p>Every 10 s there's also a <code>971 jpeg</code> line: which JPEG decoder is running (the <span class="term">NVJPG</span> hardware, or libjpeg-turbo on the CPU) and whether its checks still match.</p>
+      <p><code>journalctl -u photonvision -f</code> shows PhotonVision's log as it's written (Ctrl+C to stop). It's busy. The most useful lines come from our GPU detector: once a second, one <code>detector stats</code> line for every AprilTag camera.</p>
+      <p>Add <code>| grep "detector stats"</code> to see only those. Four cameras means four lines a second. If a camera's line is missing, that camera isn't reaching the detector.</p>
+      <p>Every 10 s there's also a <code>jpeg decoder</code> line: which JPEG decoder is running (the <span class="term">NVJPG</span> hardware, or libjpeg-turbo on the CPU) and whether its checks still match.</p>
     </div>
     <div class="lab" style="margin:0">
       <div class="lab-head"><span class="tag">Lab</span><h4>Take a stats line apart</h4></div>
       <p class="todo">Tap each piece of the line.</p>
-      <div class="stats971" id="pit-971" role="group" aria-label="Parts of a 971 stats log line"></div>
+      <div class="stats971" id="pit-971" role="group" aria-label="Parts of a detector stats log line"></div>
       <div class="s971-out" id="pit-971-out" aria-live="polite"></div>
       <p class="hint">The line's format comes from our detector wrapper, <code>detector/GpuDetectorJNI.cc</code>. The numbers are an example with two tags in view; on the bench, with none, it prints about 1 ms and no margin.</p>
     </div>
@@ -192,7 +192,7 @@
     <div class="cmds" id="pit-cmds">
       <div class="cmd"><div class="line"><code>ssh -i ~/.ssh/jetson_ed25519 spectrum3847@10.85.15.15</code></div><p><b>Log in to the Jetson.</b> Type <code>exit</code> to leave.</p></div>
       <div class="cmd"><div class="line"><code>~/SpectrumJetson/scripts/jetson/health-check.sh 4</code></div><p><b>The readiness report</b>, expecting 4 cameras. No sudo needed.</p></div>
-      <div class="cmd"><div class="line"><code>journalctl -u photonvision -f | grep "971 stats"</code></div><p><b>Live fps and detect time</b> per camera, once a second. Drop the <code>grep</code> for the whole log.</p></div>
+      <div class="cmd"><div class="line"><code>journalctl -u photonvision -f | grep "detector stats"</code></div><p><b>Live fps and detect time</b> per camera, once a second. Drop the <code>grep</code> for the whole log.</p></div>
       <div class="cmd"><div class="line"><code>lsusb -t</code></div><p><b>Which USB devices the Jetson can see.</b> Each camera is two <code>Class=Video</code> lines under the hub; "Port 1" to "Port 4" are USB ports 2.1 to 2.4. They should say 480M. A camera at 1.5M is a bad cable or plug.</p></div>
       <div class="cmd"><div class="line"><code>journalctl -k --since "-10 min" | grep usb</code></div><p><b>USB errors from the kernel.</b> <code>error -110</code> and "unable to enumerate" = not answering; <code>error -71</code> = data wires; "Not enough bandwidth" = USB budget. (<code>sudo dmesg</code> shows the same.)</p></div>
       <div class="cmd"><div class="line"><code>~/SpectrumJetson/scripts/jetson/usb-bandwidth.py</code></div><p><b>What each camera reserves</b> on the shared USB 2.0 budget, which port failed, and the fix.</p></div>
@@ -266,7 +266,7 @@
     <ul>
       <li>Symptom first: the finder above covers the problems we've actually seen, with the fix and how to confirm it.</li>
       <li>The 60-second check: Match Ready, dashboard fps (30 while disabled is idle mode), CPU Throttling, <code>/photonvision/&lt;camera&gt;/health/</code> and <code>/photonvision/jetson/</code>, then <code>health-check.sh 4</code> over SSH.</li>
-      <li><code>971 stats</code> lines: fps, detect time, tags and decision margin, per camera, every second.</li>
+      <li><code>detector stats</code> lines: fps, detect time, tags and decision margin, per camera, every second.</li>
       <li>Restart PhotonVision freely. Replug or power-cycle for stuck cameras. Avoid <code>sudo reboot</code> when cameras are stuck.</li>
       <li>Logs: Download Logs, Export Settings, or <code>journalctl</code> over SSH. The log survives power cuts, except during quiet mode after a match.</li>
       <li>A lost setup: restore a settings snapshot. Recording stops after a match: quiet mode, ended by any enable.</li>

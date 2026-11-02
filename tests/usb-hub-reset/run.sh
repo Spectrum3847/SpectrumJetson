@@ -68,7 +68,7 @@ def journal(args):
             yield float(m.group(1)), m.group(3)
 
 pv = list(journal([f"_PID={pid}"]))
-stats = [(t, re.match(r"971 stats (h\d+)", m).group(1)) for t, m in pv if m.startswith("971 stats")]
+stats = [(t, re.match(r"(?:971|detector) stats (h\d+)", m).group(1)) for t, m in pv if m.startswith(("971 stats", "detector stats"))]
 handles_before = {h for t, h in stats if t < t0}
 det_back = None
 for t in sorted({round(t * 2) / 2 for t, _ in stats if t > t_on}):

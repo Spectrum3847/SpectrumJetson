@@ -173,7 +173,7 @@
         <li><strong>PhotonVision</strong> (the official project, "upstream") runs AprilTags on the CPU.</li>
         <li><strong>FRC Team 4143</strong> made a 2026 fork that adds the <em>AprilTagCuda</em> pipeline, using the CUDA detector from FRC 971.</li>
         <li><strong>We</strong> started from 4143's version, merged in upstream's newest 2026 release (v2026.3.4, our patch 00), and added patches 01–73.</li>
-        <li>The detector itself is <strong>Austin Schuh's</strong> current code, built from 971's <code>frc971/bos</code> repo, with nine patches (<code>bos-01</code> to <code>bos-09</code>) and our own wrapper.</li>
+        <li>The detector itself is <strong>Austin Schuh's</strong> current code, built from 971's <code>frc971/bos</code> repo, with nine patches (<code>detector-01</code> to <code>detector-09</code>) and our own wrapper.</li>
       </ol>
       <p>We don't copy their code into our repo. We keep <em>patches</em>: small files that say exactly what we changed (<a href="#linux">chapter 06</a> shows one), applied fresh at every build. That keeps the credit clear and makes it easy to take the next upstream fix.</p>
     </div>

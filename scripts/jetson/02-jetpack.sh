@@ -8,6 +8,8 @@ set -euo pipefail
 
 sudo apt update
 sudo apt install -y nvidia-jetpack
+# PhotonVision 2027 (WPILib 2027) runs on Java 25; the JDK, not just the JRE, for the detector's JNI build.
+sudo apt install -y openjdk-25-jdk-headless
 
 # Environment from GpuDetectorJNI's README. Idempotent.
 MARK="# >>> SpectrumJetson env >>>"
@@ -16,10 +18,13 @@ if ! grep -qF "$MARK" ~/.bashrc; then
 # >>> SpectrumJetson env >>>
 export PATH=$PATH:/usr/local/cuda/bin
 export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/cuda/lib64
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64/
+export JAVA_HOME=/usr/lib/jvm/java-25-openjdk-arm64/
 # <<< SpectrumJetson env <<<
 EOF
   echo "Added CUDA/Java environment to ~/.bashrc"
 fi
+# An env block from the 2026 (JDK 17) setup: point it at JDK 25.
+sed -i 's|^export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64/$|export JAVA_HOME=/usr/lib/jvm/java-25-openjdk-arm64/|' ~/.bashrc
 
 /usr/local/cuda/bin/nvcc --version
+/usr/lib/jvm/java-25-openjdk-arm64/bin/java -version

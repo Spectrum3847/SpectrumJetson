@@ -1,6 +1,6 @@
 // SpectrumJetson: reading a Rewind recording (docs/REWIND.md): a camera folder's frame index and
 // JPEGs, decoded to gray with libjpeg-turbo exactly as GpuDetectorJNI.cc's TurboDecode does. Shared
-// by fieldcal_detect (field calibration) and far_replay (the far-tag search on recordings).
+// by fieldcal_detect (field calibration) and detector-replay (the far-tag search on recordings).
 #pragma once
 
 #include <algorithm>

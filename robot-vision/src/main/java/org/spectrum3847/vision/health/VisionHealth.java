@@ -47,6 +47,8 @@ import org.spectrum3847.vision.log.VisionStats;
  *       partition went read-only
  *   <li>RAM above {@link #maxJetsonRamPct}
  * </ul>
+ *
+ * And a camera whose mount in robot code doesn't match the robot ({@link MountCheck}).
  */
 public class VisionHealth {
     public double minFps = 20;
@@ -133,6 +135,22 @@ public class VisionHealth {
     public String cameraState(String name) {
         var c = cameras.get(name);
         return c == null ? "" : c.stateSub.get();
+    }
+
+    private MountCheck mountCheck;
+
+    /** VisionSystem gives its mount check here. */
+    public void setMountCheck(MountCheck m) {
+        mountCheck = m;
+    }
+
+    /**
+     * The pre-match mount check: per camera OK / SUSPECT / BAD and the measured mount (README,
+     * "Mount check"). Run it disabled, robot still, with tags in view of every camera, for a few
+     * seconds. Empty if the check is off or no camera has seen a tag.
+     */
+    public java.util.List<MountCheck.CameraReport> mountCheck() {
+        return mountCheck == null ? java.util.List.of() : mountCheck.reports();
     }
 
     public VisionHealth(double nowSeconds) {

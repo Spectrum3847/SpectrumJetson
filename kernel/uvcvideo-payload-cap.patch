@@ -34,10 +34,7 @@ diff -ru a/drivers/media/usb/uvc/uvc_driver.c b/drivers/media/usb/uvc/uvc_driver
 diff -ru a/drivers/media/usb/uvc/uvc_video.c b/drivers/media/usb/uvc/uvc_video.c
 --- a/drivers/media/usb/uvc/uvc_video.c	2026-09-24 18:27:28.792784665 -0500
 +++ b/drivers/media/usb/uvc/uvc_video.c	2026-09-24 18:28:19.054693186 -0500
-@@ -129,9 +129,42 @@
- 	return -EPIPE;
- }
- 
+@@ -160,3 +160,36 @@
 +/*
 + * SpectrumJetson: the payload_cap module parameter's cap for this camera, or 0:
 + * its USB port's entry (e.g. "1-2.4:944") if there is one, else its model's.
@@ -74,9 +71,6 @@ diff -ru a/drivers/media/usb/uvc/uvc_video.c b/drivers/media/usb/uvc/uvc_video.c
  	struct uvc_streaming_control *ctrl)
  {
 +	u32 cap;
- 	static const struct usb_device_id elgato_cam_link_4k = {
- 		USB_DEVICE(0x0fd9, 0x0066)
- 	};
 @@ -240,6 +273,14 @@
  				     stream->maxpsize);
  		ctrl->dwMaxPayloadTransferSize = stream->maxpsize;

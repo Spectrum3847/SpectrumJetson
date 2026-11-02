@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run ON THE JETSON. Compiles the fork's GpuDetectorJNI.java plus HandleReuseTest and
-# runs it against /usr/lib/lib971apriltag.so, or the one in $LIBDIR if set
-# (e.g. LIBDIR=~/build/bos-detector to test a build before installing it). Needs allwpilib's apriltag.jar (for the
+# runs it against /usr/lib/libspectrum-gpu-apriltag.so, or the one in $LIBDIR if set
+# (e.g. LIBDIR=~/build/gpu-detector to test a build before installing it). Needs allwpilib's apriltag.jar (for the
 # AprilTagDetection class the JNI looks up on load).
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -13,7 +13,10 @@ cat > "$tmp/src/org/photonvision/jni/GpuDetectorJNI.java" <<'J'
 package org.photonvision.jni;
 import edu.wpi.first.apriltag.AprilTagDetection;
 public class GpuDetectorJNI {
-  static { System.loadLibrary("971apriltag"); }
+  static {  // the old name (lib971apriltag) for builds from before 2026-10-31
+    try { System.loadLibrary("spectrum-gpu-apriltag"); }
+    catch (UnsatisfiedLinkError e) { System.loadLibrary("971apriltag"); }
+  }
   public static native long createGpuDetector(int width, int height);
   public static native void destroyGpuDetector(long handle);
   public static native void setparams(long handle, double fx, double cx, double fy, double cy,

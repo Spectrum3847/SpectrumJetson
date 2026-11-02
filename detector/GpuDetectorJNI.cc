@@ -16,16 +16,16 @@
 //   - a per-slot mutex stops destroy/setparams racing processimage
 //   - stale CUDA errors are cleared before each detect (NVIDIA/cccl#1791)
 //   - Detect() failures (absl::Status) are logged and return no detections
-//   - CUDA errors throw (patches/bos-01-nonfatal-cuda.patch) instead of aborting the JVM:
+//   - CUDA errors throw (patches/detector-01-nonfatal-cuda.patch) instead of aborting the JVM:
 //     the frame is skipped and the detector rebuilt on the next frame; only after
 //     the CUDA context stays broken (sticky error) for kMaxFailingTime do we exit so systemd restarts
 //     PhotonVision (a broken CUDA context cannot be recovered in-process)
 //   - no per-detection std::cout; a once-per-second stats line instead
 
 #include <jni.h>
-#include <wpi/jni_util.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -54,8 +54,7 @@
 #include <jpeglib.h>
 #include "far_search.h"
 #include "nvjpg_decoder.h"
-#include <wpi/RawFrame.h>
-#include <wpi/timestamp.h>
+#include "wpi_compat.h"
 #include "absl/status/status.h"
 #include <opencv2/core/mat.hpp>
 
@@ -67,35 +66,57 @@ void SpectrumInjectStickyCudaFault();  // fault_kernel.cu (test only)
 
 namespace {
 
-wpi::java::JClass detectionCls;
+// Settings were named SPECTRUM_971_* and /tmp/spectrum-971-* before the 2026-10-31 rename. The
+// old names still work; the new one wins when both are set.
+const char *DetectorEnv(const char *name) {  // "THREADS" -> SPECTRUM_DETECTOR_THREADS
+  if (const char *v = std::getenv((std::string("SPECTRUM_DETECTOR_") + name).c_str())) return v;
+  return std::getenv((std::string("SPECTRUM_971_") + name).c_str());
+}
+FILE *OpenDetectorSwitch(const char *name) {  // "threads" -> /tmp/spectrum-detector-threads
+  if (FILE *f = std::fopen((std::string("/tmp/spectrum-detector-") + name).c_str(), "r")) return f;
+  return std::fopen((std::string("/tmp/spectrum-971-") + name).c_str(), "r");
+}
+bool DetectorSwitchExists(const char *name) {
+  return access((std::string("/tmp/spectrum-detector-") + name).c_str(), F_OK) == 0 ||
+         access((std::string("/tmp/spectrum-971-") + name).c_str(), F_OK) == 0;
+}
 
-const wpi::java::JClassInit classes[] = {
-    {"edu/wpi/first/apriltag/AprilTagDetection", &detectionCls}};
+// AprilTagDetection, a global ref: WPILib 2027's name first, then 2026's (JNI_OnLoad).
+jclass detectionCls = nullptr;
 
 // Contrast threshold for the GPU thresholding step. 4143 used 5, frc971/bos uses 4,
 // and RealtimeRoboticsGroup/aos 76d8f216 moved to 20 for speed. Override at launch
-// with SPECTRUM_971_MIN_WHITE_BLACK_DIFF.
+// with SPECTRUM_DETECTOR_MIN_WHITE_BLACK_DIFF.
 int MinWhiteBlackDiff() {
-  if (const char *v = std::getenv("SPECTRUM_971_MIN_WHITE_BLACK_DIFF")) return std::atoi(v);
+  if (const char *v = DetectorEnv("MIN_WHITE_BLACK_DIFF")) return std::atoi(v);
   return 5;
 }
 
 // Largest mean-squared error of a candidate quad's edge-line fit. AprilTag's default is 10.
 // Upstream PhotonVision PR #2138 lowers its CPU detector to 2.5, which stops tags cut off at the
 // image edge from being detected, with little effect on range in their tests. Set with
-// SPECTRUM_971_MAX_LINE_FIT_MSE (08-select-detector.sh --mse N); test range and edge behaviour
+// SPECTRUM_DETECTOR_MAX_LINE_FIT_MSE (08-select-detector.sh --mse N); test range and edge behaviour
 // before changing it.
 float MaxLineFitMse() {
-  if (const char *v = std::getenv("SPECTRUM_971_MAX_LINE_FIT_MSE")) {
+  if (const char *v = DetectorEnv("MAX_LINE_FIT_MSE")) {
     const float f = std::strtof(v, nullptr);
     if (f > 0) return f;
   }
   return 10.0f;
 }
 
+// Drops candidate tags whose blob (the black border's bounding box) comes within this many
+// full-resolution pixels of the image edge, in the GPU blob filter before line fit, quad fit,
+// decode and refine (detector-12). 0 = off (the default). Set with SPECTRUM_DETECTOR_EDGE_BORDER_PX
+// (08-select-detector.sh --edge N); fixed for the process (docs/TECHNICAL.md).
+int EdgeBorderPx() {
+  if (const char *v = DetectorEnv("EDGE_BORDER_PX")) return std::max(0, std::atoi(v));
+  return 0;
+}
+
 // Worker threads for each detector's CPU stage (edge refinement and tag decoding). Every camera
 // has its own detector and pool, so 4 cameras x 6 threads compete for the Jetson's 6 cores. Set
-// with SPECTRUM_971_THREADS; /tmp/spectrum-971-threads overrides it without a restart
+// with SPECTRUM_DETECTOR_THREADS; /tmp/spectrum-detector-threads overrides it without a restart
 // (re-read every 2 s; processimage swaps the pool between frames), for A/B tests.
 int DetectorThreads() {
   static std::mutex mu;
@@ -106,8 +127,8 @@ int DetectorThreads() {
   if (now >= next) {
     next = now + std::chrono::seconds(2);
     int n = 6;
-    if (const char *e = std::getenv("SPECTRUM_971_THREADS")) n = std::atoi(e);
-    if (FILE *f = std::fopen("/tmp/spectrum-971-threads", "r")) {
+    if (const char *e = DetectorEnv("THREADS")) n = std::atoi(e);
+    if (FILE *f = OpenDetectorSwitch("threads")) {
       if (std::fscanf(f, "%d", &n) != 1) n = 6;
       std::fclose(f);
     }
@@ -121,7 +142,7 @@ int DetectorThreads() {
 // at 120 fps (2026-09-29) the threads convoyed on it: ~20,000 cross-core wakeups a second, 1.2
 // cores of kernel time, detect 4.4 ms against 1.5 ms for one camera, and the GPU ~40% "busy"
 // against ~22% for 3 cameras. Taking this lock first makes each camera queue once per frame
-// instead of ~40 times. SPECTRUM_971_GPU_LOCK=1/0; /tmp/spectrum-971-gpu-lock overrides it
+// instead of ~40 times. SPECTRUM_DETECTOR_GPU_LOCK=1/0; /tmp/spectrum-detector-gpu-lock overrides it
 // (re-read every 2 s, for A/B tests).
 bool GpuLockOn() {
   static std::mutex mu;
@@ -132,12 +153,12 @@ bool GpuLockOn() {
   if (now >= next) {
     next = now + std::chrono::seconds(2);
     int v = 0;
-    if (const char *e = std::getenv("SPECTRUM_971_GPU_LOCK")) v = std::atoi(e);
-    if (FILE *f = std::fopen("/tmp/spectrum-971-gpu-lock", "r")) {
+    if (const char *e = DetectorEnv("GPU_LOCK")) v = std::atoi(e);
+    if (FILE *f = OpenDetectorSwitch("gpu-lock")) {
       if (std::fscanf(f, "%d", &v) != 1) v = 0;
       std::fclose(f);
     }
-    if ((v != 0) != on) std::cout << "971 GPU lock: " << (v ? "on" : "off") << std::endl;
+    if ((v != 0) != on) std::cout << "detector GPU lock: " << (v ? "on" : "off") << std::endl;
     on = v != 0;
   }
   return on;
@@ -146,7 +167,7 @@ std::mutex gpu_mu;
 // The far search's off switch after a failure (processimage): microseconds on the steady clock.
 std::atomic<int64_t> far_search_off_until_us{0};
 
-// CUDA stream capture (bos-05's first-stage graph) breaks CUDA calls on other threads that aren't
+// CUDA stream capture (detector-05's first-stage graph) breaks CUDA calls on other threads that aren't
 // allowed while any stream is capturing: work on the legacy default stream, cudaFree, EGL buffer
 // registration. When all cameras started at once, that broke detectors and turned the hardware
 // JPEG decoder off on 4 of 10 starts (2026-09-29). So every CUDA path in this process holds this
@@ -177,12 +198,12 @@ CudaCaptureLock cuda_capture_lock;
 // context exists): "block" (sleep; the default), "auto" (CUDA's default; with one context on 6
 // cores it spins), "spin" or "yield". With 2 cameras (2026-09-24) blocking added ~0.3 ms and saved
 // no CPU. With 4 cameras it made no difference over 11 one-minute runs (docs/TECHNICAL.md), so it's
-// the default because it doesn't hurt. Set with SPECTRUM_971_CUDA_SYNC;
-// /tmp/spectrum-971-cuda-sync overrides it (for A/B tests: write it, restart PhotonVision).
+// the default because it doesn't hurt. Set with SPECTRUM_DETECTOR_CUDA_SYNC;
+// /tmp/spectrum-detector-cuda-sync overrides it (for A/B tests: write it, restart PhotonVision).
 unsigned CudaScheduleFlag(std::string *name) {
   std::string v = "block";
-  if (const char *e = std::getenv("SPECTRUM_971_CUDA_SYNC")) v = e;
-  if (FILE *f = std::fopen("/tmp/spectrum-971-cuda-sync", "r")) {
+  if (const char *e = DetectorEnv("CUDA_SYNC")) v = e;
+  if (FILE *f = OpenDetectorSwitch("cuda-sync")) {
     char buf[16] = {0};
     if (std::fgets(buf, sizeof(buf), f)) v = std::string(buf).substr(0, std::strcspn(buf, " \r\n"));
     std::fclose(f);
@@ -195,20 +216,20 @@ unsigned CudaScheduleFlag(std::string *name) {
   return cudaDeviceScheduleBlockingSync;
 }
 
-// Test hooks, read from /tmp/spectrum-971-fault-every (re-read every 30 frames so a test can
+// Test hooks, read from /tmp/spectrum-detector-fault-every (re-read every 30 frames so a test can
 // remove it before a restarted process runs):
 //   N > 0     every Nth frame hits a real, non-sticky CUDA error (cudaSetDevice on a bad
 //             ordinal right before Detect: the NVIDIA/cccl#1791 case) -> frame skipped
 //   "sticky"  one null-pointer kernel write: a sticky error that breaks the CUDA context
 //             -> the watchdog restarts PhotonVision
-constexpr const char *kFaultFile = "/tmp/spectrum-971-fault-every";
+constexpr const char *kFaultFile = "fault-every";  // /tmp/spectrum-detector-fault-every
 constexpr int kFaultSticky = -1;
 int FaultEvery() {
   static int n = 0;
   static int calls = 0;
   if (calls++ % 30 == 0) {
     n = 0;
-    if (FILE *f = std::fopen(kFaultFile, "r")) {
+    if (FILE *f = OpenDetectorSwitch(kFaultFile)) {
       char buf[16] = {0};
       if (std::fgets(buf, sizeof(buf), f)) n = (std::strncmp(buf, "sticky", 6) == 0) ? kFaultSticky : std::atoi(buf);
       std::fclose(f);
@@ -246,13 +267,19 @@ struct DetectorSlot {
   frc::apriltag::CameraMatrix camera_matrix = DefaultCameraMatrix();
   frc::apriltag::DistCoeffs dist_coeffs = DefaultDistCoeffs();
   long gpu_input_frames = 0;  // for the GPU input check
-  // bos-09: the most candidate quads seen in one frame, logged at each doubling from 512, to see
+  // This detector's own GPU input buffer, a fixed address: the first-stage graph (detector-05) replays
+  // only when the input is where it was recorded. Frames from the shared decode pool are copied
+  // into it on the GPU (~1 MB device to device), so the graph runs every frame.
+  uint8_t *dev_in = nullptr;
+  int dev_in_w = 0, dev_in_h = 0;
+  // detector-09: the most candidate quads seen in one frame, logged at each doubling from 512, to see
   // how close real scenes get to the detector's limit (GpuDetector::kMaxBlobs).
   size_t quads_logged = 256;
-  // When the first-stage graph (bos-05) was last recorded: at most once a second, so a buffer
+  // When the first-stage graph (detector-05) was last recorded: at most once a second, so a buffer
   // or mask that keeps changing can't stall every camera on each frame.
   std::chrono::steady_clock::time_point last_graph_record{};
-  // Detection mask (setMask, bos-07): 0 off, 1 ignore inside the boxes, 2 search only inside
+  std::chrono::steady_clock::time_point last_stage_graph_record{};  // detector-11
+  // Detection mask (setMask, detector-07): 0 off, 1 ignore inside the boxes, 2 search only inside
   // them. Boxes are x, y, w, h fractions of the image. mask_dirty: rasterise it on the next frame.
   int mask_mode = 0;
   std::vector<double> mask_rects;
@@ -332,11 +359,12 @@ bool Rebuild(DetectorSlot &s, size_t width, size_t height) {
   try {
     s.gpu = new frc::apriltag::GpuDetector(width, height, s.td, s.camera_matrix,
                                            s.dist_coeffs, vision::ImageFormat::MONO8);
+    s.gpu->SetEdgeBorder(EdgeBorderPx());
     s.needs_rebuild = false;
     s.mask_dirty = true;  // a new detector has no mask yet
     return true;
   } catch (const std::exception &e) {
-    std::cout << "971 detector build " << width << "x" << height << " failed: " << e.what()
+    std::cout << "detector build " << width << "x" << height << " failed: " << e.what()
               << std::endl;
     return false;
   }
@@ -354,13 +382,13 @@ void RecordFailure(DetectorSlot &s, jlong handle, const char *what) {
   cudaGetLastError();  // clear whatever was pending so the rebuild starts clean
   if (s.consecutive_failures == 0 || context_ok) s.first_failure = now;
   if (++s.consecutive_failures <= 5 || s.consecutive_failures % 30 == 0) {
-    std::cout << "971 detector h" << handle << " failure " << s.consecutive_failures << ": "
+    std::cout << "detector h" << handle << " failure " << s.consecutive_failures << ": "
               << what << (context_ok ? " (CUDA context OK; frame skipped)" : " (CUDA context BROKEN)")
               << std::endl;
   }
   if (!context_ok && s.consecutive_failures >= kMinFailures &&
       now - s.first_failure >= kMaxFailingTime) {
-    std::cout << "971 detector h" << handle << ": CUDA context broken for "
+    std::cout << "detector h" << handle << ": CUDA context broken for "
               << std::chrono::duration<double>(now - s.first_failure).count()
               << " s; exiting so systemd restarts PhotonVision" << std::endl;
     // _exit, not abort(): SIGABRT runs the JVM crash handler and Apport, which took ~28 s
@@ -370,41 +398,67 @@ void RecordFailure(DetectorSlot &s, jlong handle, const char *what) {
   }
 }
 
-jobject MakeJObject(JNIEnv *env, const apriltag_detection_t *detect) {
+// Pixel convention: AprilTag puts a pixel's centre at +0.5 (pixel (0,0) spans 0..1); OpenCV, and so
+// every camera calibration and PhotonVision's pose solve, puts it at 0. Left alone, every corner
+// is 0.5 px down-right of where the calibration expects it: a fixed ~0.04 deg bearing bias in
+// every pose (measured +0.49 px on rendered frames, tools/fieldcal/README.md). So results leave
+// here in OpenCV's convention: corners and centre shifted by -0.5, and the homography (tag
+// coordinates -> image) with them, as H' = T*H, T = [[1,0,-0.5],[0,1,-0.5],[0,0,1]].
+// Only here: the detector, the far search and fieldcal_detect keep AprilTag's convention inside.
+constexpr double kPixelCentre = 0.5;
+
+std::array<jdouble, 9> ToOpenCvH(const double *h) {
+  std::array<jdouble, 9> out;
+  for (int c = 0; c < 3; ++c) {
+    out[c] = h[c] - kPixelCentre * h[6 + c];
+    out[3 + c] = h[3 + c] - kPixelCentre * h[6 + c];
+    out[6 + c] = h[6 + c];
+  }
+  return out;
+}
+
+std::array<jdouble, 8> ToOpenCvCorners(const double (*p)[2]) {
+  std::array<jdouble, 8> out;
+  for (int k = 0; k < 4; ++k) {
+    out[2 * k] = p[k][0] - kPixelCentre;
+    out[2 * k + 1] = p[k][1] - kPixelCentre;
+  }
+  return out;
+}
+
+jobject MakeJObject(JNIEnv *env, const char *family, int id, int hamming, float margin,
+                    const std::array<jdouble, 9> &h, double cx, double cy,
+                    const std::array<jdouble, 8> &corners) {
   static jmethodID constructor =
       env->GetMethodID(detectionCls, "<init>", "(Ljava/lang/String;IIF[DDD[D)V");
   if (!constructor) return nullptr;
-
-  wpi::java::JLocal<jstring> fam{env, wpi::java::MakeJString(env, detect->family->name)};
-  auto homography = detect->H;
-  wpi::java::JLocal<jdoubleArray> harr{
-      env, wpi::java::MakeJDoubleArray(
-               env, {reinterpret_cast<const jdouble *>(homography->data),
-                     static_cast<size_t>(homography->nrows * homography->ncols)})};
-  wpi::java::JLocal<jdoubleArray> carr{
-      env, wpi::java::MakeJDoubleArray(
-               env, {reinterpret_cast<const jdouble *>(detect->p), 4 * 2})};
-
-  return env->NewObject(detectionCls, constructor, fam.obj(), static_cast<jint>(detect->id),
-                        static_cast<jint>(detect->hamming),
-                        static_cast<jfloat>(detect->decision_margin), harr.obj(),
-                        static_cast<jdouble>(detect->c[0]), static_cast<jdouble>(detect->c[1]),
+  wpi_compat::JLocal<jstring> fam{env, wpi_compat::MakeJString(env, family)};
+  wpi_compat::JLocal<jdoubleArray> harr{env, wpi_compat::MakeJDoubleArray(env, h)};
+  wpi_compat::JLocal<jdoubleArray> carr{env, wpi_compat::MakeJDoubleArray(env, corners)};
+  return env->NewObject(detectionCls, constructor, fam.obj(), static_cast<jint>(id),
+                        static_cast<jint>(hamming), static_cast<jfloat>(margin), harr.obj(),
+                        static_cast<jdouble>(cx - kPixelCentre), static_cast<jdouble>(cy - kPixelCentre),
                         carr.obj());
+}
+
+jobject MakeJObject(JNIEnv *env, const apriltag_detection_t *detect) {
+  const matd_t *H = detect->H;
+  if (H->nrows != 3 || H->ncols != 3) return nullptr;
+  return MakeJObject(env, detect->family->name, detect->id, detect->hamming,
+                     detect->decision_margin, ToOpenCvH(H->data), detect->c[0], detect->c[1],
+                     ToOpenCvCorners(detect->p));
 }
 
 // SpectrumJetson: the same from a copied detection (far_search.h), for results with far-search tags.
 jobject MakeJObject(JNIEnv *env, const far_search::Det &d) {
-  static jmethodID constructor =
-      env->GetMethodID(detectionCls, "<init>", "(Ljava/lang/String;IIF[DDD[D)V");
-  if (!constructor) return nullptr;
-  wpi::java::JLocal<jstring> fam{env, wpi::java::MakeJString(env, d.family->name)};
-  wpi::java::JLocal<jdoubleArray> harr{
-      env, wpi::java::MakeJDoubleArray(env, {reinterpret_cast<const jdouble *>(d.H.data()), d.H.size()})};
-  wpi::java::JLocal<jdoubleArray> carr{
-      env, wpi::java::MakeJDoubleArray(env, {reinterpret_cast<const jdouble *>(d.p.data()), d.p.size()})};
-  return env->NewObject(detectionCls, constructor, fam.obj(), static_cast<jint>(d.id),
-                        static_cast<jint>(d.hamming), static_cast<jfloat>(d.margin), harr.obj(),
-                        static_cast<jdouble>(d.c[0]), static_cast<jdouble>(d.c[1]), carr.obj());
+  if (d.H.size() != 9 || d.p.size() != 8) return nullptr;
+  double p[4][2];
+  for (int k = 0; k < 4; ++k) {
+    p[k][0] = d.p[2 * k];
+    p[k][1] = d.p[2 * k + 1];
+  }
+  return MakeJObject(env, d.family->name, d.id, d.hamming, d.margin, ToOpenCvH(d.H.data()), d.c[0],
+                     d.c[1], ToOpenCvCorners(p));
 }
 
 // A line every 10 s while the far search has done anything since the last one.
@@ -420,7 +474,7 @@ void ReportFarSearch() {
   const long sweeps = c.sweeps - last.sweeps, crops = c.crops - last.crops, tags = c.far_tags - last.far_tags;
   const long starved = c.starved_ms - last.starved_ms;
   if (sweeps || crops || tags || starved) {
-    std::cout << "971 far search 10 s: starved " << starved / 1000.0 << " s, " << sweeps
+    std::cout << "far search 10 s: starved " << starved / 1000.0 << " s, " << sweeps
               << " full-size searches (" << (sweeps ? (c.sweep_ms - last.sweep_ms) / sweeps : 0)
               << " ms each), " << crops << " crops ("
               << (crops ? (c.crop_ms - last.crop_ms) / crops : 0) << " ms each), " << tags
@@ -433,7 +487,7 @@ jobjectArray MakeJObjectArray(JNIEnv *env, const std::vector<far_search::Det> &d
   jobjectArray jarr = env->NewObjectArray(static_cast<jsize>(dets.size()), detectionCls, nullptr);
   if (!jarr) return nullptr;
   for (size_t i = 0; i < dets.size(); ++i) {
-    wpi::java::JLocal<jobject> elem{env, MakeJObject(env, dets[i])};
+    wpi_compat::JLocal<jobject> elem{env, MakeJObject(env, dets[i])};
     env->SetObjectArrayElement(jarr, static_cast<jsize>(i), elem.obj());
   }
   return jarr;
@@ -460,7 +514,7 @@ jobjectArray MakeJObjectArray(JNIEnv *env, const zarray_t *detections) {
   for (int i = 0; i < n; ++i) {
     apriltag_detection_t *det;
     zarray_get(detections, i, &det);
-    wpi::java::JLocal<jobject> elem{env, MakeJObject(env, det)};
+    wpi_compat::JLocal<jobject> elem{env, MakeJObject(env, det)};
     env->SetObjectArrayElement(jarr, i, elem.obj());
   }
   return jarr;
@@ -491,7 +545,7 @@ void RecordStats(Stats &st, jlong handle, const cv::Mat &img, const zarray_t *de
     // Built whole, then written in one go: written piece by piece, two cameras' lines could
     // interleave mid-line, and health-check.sh and the tests parse them.
     std::ostringstream line;
-    line << "971 stats h" << handle << " " << img.cols << "x" << img.rows << ": "
+    line << "detector stats h" << handle << " " << img.cols << "x" << img.rows << ": "
          << st.frames / window << " calls/s, detect avg " << st.detect_ms / st.frames << " ms max "
          << st.max_ms << " ms, jni " << st.jni_ms / st.frames << " ms, tags/frame "
          << double(st.tags) / st.frames;
@@ -598,7 +652,7 @@ const Nvjpg *LoadNvjpg() {
     }
     void *h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND);
     if (!h) {
-      std::cout << "971 jpeg: can't load " << path << " (" << dlerror()
+      std::cout << "jpeg decoder: can't load " << path << " (" << dlerror()
                 << "); using libjpeg-turbo" << std::endl;
       return nullptr;
     }
@@ -612,11 +666,11 @@ const Nvjpg *LoadNvjpg() {
         reinterpret_cast<decltype(a.decode_gray_dev)>(dlsym(h, "snj_decode_gray_dev"));
     a.error = reinterpret_cast<decltype(a.error)>(dlsym(h, "snj_error"));
     if (!a.create || !a.create_error || !a.destroy || !a.decode || !a.error) {
-      std::cout << "971 jpeg: " << path << " is missing functions; using libjpeg-turbo"
+      std::cout << "jpeg decoder: " << path << " is missing functions; using libjpeg-turbo"
                 << std::endl;
       return nullptr;
     }
-    std::cout << "971 jpeg: loaded " << path << (a.decode_bgr ? " (gray and colour)" : " (gray only)")
+    std::cout << "jpeg decoder: loaded " << path << (a.decode_bgr ? " (gray and colour)" : " (gray only)")
               << std::endl;
     return &a;
   }();
@@ -660,7 +714,7 @@ JpegDecoder WantedJpegDecoder() {
     mode = v.rfind("nvjpg", 0) == 0 ? JpegDecoder::kNvjpg : JpegDecoder::kTurbo;
     if (v != logged) {
       logged = v;
-      std::cout << "971 jpeg decoder: "
+      std::cout << "jpeg decoder mode: "
                 << (mode == JpegDecoder::kNvjpg
                         ? (limit >= 0 ? "nvjpg (hardware) for the first " + std::to_string(limit) +
                                             " cameras, libjpeg-turbo for the rest"
@@ -734,7 +788,7 @@ class JpegChecker {
         } else {
           checks_differ++;
           nvjpg_off = true;
-          std::cout << "971 jpeg: HARDWARE DECODE DIFFERS from libjpeg-turbo ("
+          std::cout << "jpeg decoder: HARDWARE DECODE DIFFERS from libjpeg-turbo ("
                     << (channels_ == 1 ? "gray" : "colour") << ", " << differ << " of "
                     << ref.size() << " values, max difference " << max_diff
                     << "); libjpeg-turbo decodes everything until PhotonVision restarts"
@@ -764,31 +818,108 @@ constexpr long kCheckEvery = 240;
 
 // One hardware decoder per camera thread (a decoder isn't thread-safe; PhotonVision decodes
 // each camera's frames on that camera's own thread).
+// Every camera decodes on NVJPG by default: on JetPack 7 both engines are used again
+// (NvJpgDecoder.cc's dual-engine fix), as on JetPack 6. SPECTRUM_NVJPG_MAX_CAMERAS=N caps it: the
+// first N decode threads get the hardware, the rest decode with libjpeg-turbo on the CPU. A thread
+// that ends frees its place.
+std::atomic<int> nvjpg_users{0};
+int MaxNvjpgCameras() {
+  static const int n = [] {
+    const char *e = std::getenv("SPECTRUM_NVJPG_MAX_CAMERAS");
+    return e ? std::max(0, std::atoi(e)) : 1000;
+  }();
+  return n;
+}
+
 struct NvjpgThread {
   SnjDecoder *dec = nullptr;
+  bool counted = false;  // holds one of the MaxNvjpgCameras places
   bool unavailable = false;       // no decoder
   bool path_unavailable[2] = {};  // [0] gray, [1] colour: this camera's JPEGs can't use it
   int unsupported_in_a_row[2] = {};
   long frames = 0;
-  // GPU input: the last gray frame decoded on this thread, also on the GPU (dev, dev_w x dev_h),
-  // while dev_valid. fp: 64 of its pixels, to recognise it in processimage (PhotonVision hands
-  // the detector a copy, and a rotation would change the pixels in place).
-  uint8_t *dev = nullptr;
-  int dev_w = 0, dev_h = 0;
-  bool dev_valid = false;
-  uint8_t fp[64];
   ~NvjpgThread() {
+    if (counted) nvjpg_users--;
     if (dec) LoadNvjpg()->destroy(dec);
-    if (dev) cudaFree(dev);
   }
 };
 thread_local NvjpgThread nvjpg_thread;
+
+void FingerprintGpuInput(const uint8_t *img, size_t n, uint8_t *fp);
+bool MatchesGpuInput(const uint8_t *img, size_t n, const uint8_t *fp);
+
+// GPU input across threads (2026-10-30): PhotonVision now decodes in its own thread, overlapped
+// with the pipeline, so the frame a detector gets was decoded on another thread and the
+// thread_local hand-off never matched: every frame was copied back up to the GPU ("gpu input"
+// gone from the stats line). A shared pool instead: the decoder leaves each gray frame on the GPU in
+// a free slot tagged with the host buffer it also wrote (PhotonVision shares that buffer with the
+// pipeline, photonvision-37) and its fingerprint; processimage claims the slot whose tag matches
+// the frame it was given, and frees it when Detect() is done. A decoder's previous frame that was
+// never claimed (the loop took a newer one) is freed when it decodes the next.
+struct GpuFrameSlot {
+  uint8_t *dev = nullptr;
+  int w = 0, h = 0;
+  const uint8_t *host = nullptr;
+  uint8_t fp[64];
+  int state = 0;  // 0 free, 1 decoded and waiting, 2 in use by a detector
+};
+constexpr int kGpuFrameSlots = 24;  // up to ~6 cameras x (waiting + in use + one being decoded)
+std::mutex gpu_frames_mu;
+GpuFrameSlot gpu_frames[kGpuFrameSlots];
+thread_local int my_waiting_slot = -1;  // this decoder's last frame, if not yet claimed
+
+// A free slot for a w x h frame (allocating its GPU buffer if needed), marked in use by the
+// decoder (state 2) until it's published; -1 if none.
+int TakeFreeGpuFrameSlot(int w, int h) {
+  std::lock_guard<std::mutex> lock(gpu_frames_mu);
+  if (my_waiting_slot >= 0 && gpu_frames[my_waiting_slot].state == 1) {
+    gpu_frames[my_waiting_slot].state = 0;  // never claimed: the loop took a newer frame
+  }
+  my_waiting_slot = -1;
+  int pick = -1;
+  for (int i = 0; i < kGpuFrameSlots && pick < 0; ++i) {
+    if (gpu_frames[i].state == 0 && gpu_frames[i].dev && gpu_frames[i].w == w && gpu_frames[i].h == h) pick = i;
+  }
+  for (int i = 0; i < kGpuFrameSlots && pick < 0; ++i) {
+    if (gpu_frames[i].state == 0) pick = i;
+  }
+  if (pick < 0) return -1;
+  GpuFrameSlot &g = gpu_frames[pick];
+  if (!g.dev || g.w != w || g.h != h) {
+    if (g.dev) cudaFree(g.dev);
+    g.dev = nullptr;
+    g.w = g.h = 0;
+    if (cudaMalloc(reinterpret_cast<void **>(&g.dev), static_cast<size_t>(w) * h) != cudaSuccess) {
+      cudaGetLastError();
+      g.dev = nullptr;
+      return -1;
+    }
+    g.w = w;
+    g.h = h;
+  }
+  g.state = 2;
+  return pick;
+}
+
+void PublishGpuFrameSlot(int i, const uint8_t *host, size_t n) {
+  std::lock_guard<std::mutex> lock(gpu_frames_mu);
+  gpu_frames[i].host = host;
+  FingerprintGpuInput(host, n, gpu_frames[i].fp);
+  gpu_frames[i].state = 1;
+  my_waiting_slot = i;
+}
+
+void FreeGpuFrameSlot(int i) {
+  if (i < 0) return;
+  std::lock_guard<std::mutex> lock(gpu_frames_mu);
+  gpu_frames[i].state = 0;
+}
 
 // GPU input: the hardware decoder leaves each gray frame on the GPU too, and processimage hands
 // that copy to Detect(), which otherwise copies the frame it was given back up to the GPU (48 us
 // of GPU and a ~270 us call a frame at 1280x800, nsys 2026-09-29). Only when processimage gets
 // the frame that was just decoded on the same thread (same size and the same 64 sampled pixels;
-// a full comparison every kCheckEvery frames). "0" in /tmp/spectrum-971-gpu-input
+// a full comparison every kCheckEvery frames). "0" in /tmp/spectrum-detector-gpu-input
 // turns it off (re-read every 2 s).
 std::atomic<bool> gpu_input_off{false};  // a check found the GPU copy differing: off until restart
 // The pixels FingerprintGpuInput samples: spread over the frame (Knuth's multiplicative hash).
@@ -813,7 +944,7 @@ bool GpuInputOn() {
   if (now >= next) {
     next = now + std::chrono::seconds(2);
     int v = 1;
-    if (FILE *f = std::fopen("/tmp/spectrum-971-gpu-input", "r")) {
+    if (FILE *f = OpenDetectorSwitch("gpu-input")) {
       if (std::fscanf(f, "%d", &v) != 1) v = 1;
       std::fclose(f);
     }
@@ -845,71 +976,68 @@ int NvjpgDecode(const uint8_t *jpeg, size_t size, cv::Mat &mat, bool bgr) {
     t.path_unavailable[bgr] = true;
     return SNJ_UNSUPPORTED;
   }
+  if (!t.dec && !t.counted) {
+    if (nvjpg_users.fetch_add(1) >= MaxNvjpgCameras()) {
+      nvjpg_users--;
+      std::cout << "jpeg decoder: " << MaxNvjpgCameras()
+                << " camera(s) already decode on NVJPG (SPECTRUM_NVJPG_MAX_CAMERAS); this camera "
+                   "uses libjpeg-turbo"
+                << std::endl;
+      t.unavailable = true;
+      return SNJ_UNSUPPORTED;
+    }
+    t.counted = true;
+  }
   if (!t.dec && !(t.dec = api->create())) {
-    std::cout << "971 jpeg: no hardware decoder (" << api->create_error()
+    std::cout << "jpeg decoder: no hardware decoder (" << api->create_error()
               << "); using libjpeg-turbo on this camera" << std::endl;
     t.unavailable = true;
     return SNJ_UNSUPPORTED;
   }
-  t.dev_valid = false;
-  bool to_dev = !bgr && api->decode_gray_dev && GpuInputOn();
-  if (to_dev && (t.dev_w != mat.cols || t.dev_h != mat.rows)) {
-    if (t.dev) cudaFree(t.dev);
-    t.dev = nullptr;
-    t.dev_w = t.dev_h = 0;
-    if (cudaMalloc(reinterpret_cast<void **>(&t.dev), static_cast<size_t>(mat.cols) * mat.rows) ==
-        cudaSuccess) {
-      t.dev_w = mat.cols;
-      t.dev_h = mat.rows;
-    } else {
-      cudaGetLastError();
-      t.dev = nullptr;
-    }
-  }
-  to_dev = to_dev && t.dev;
-  const int rc = to_dev ? api->decode_gray_dev(t.dec, jpeg, size, mat.data, mat.cols, mat.rows,
-                                               mat.step, t.dev)
-                        : (bgr ? api->decode_bgr : api->decode)(t.dec, jpeg, size, mat.data,
-                                                                mat.cols, mat.rows, mat.step);
+  const bool want_dev = !bgr && api->decode_gray_dev && GpuInputOn() && mat.isContinuous();
+  const int slot = want_dev ? TakeFreeGpuFrameSlot(mat.cols, mat.rows) : -1;
+  const int rc = slot >= 0 ? api->decode_gray_dev(t.dec, jpeg, size, mat.data, mat.cols, mat.rows,
+                                                  mat.step, gpu_frames[slot].dev)
+                           : (bgr ? api->decode_bgr : api->decode)(t.dec, jpeg, size, mat.data,
+                                                                   mat.cols, mat.rows, mat.step);
   if (rc == SNJ_OK) {
     t.unsupported_in_a_row[bgr] = 0;
-    if (to_dev) {
-      t.dev_valid = true;
-      FingerprintGpuInput(mat.data, static_cast<size_t>(mat.cols) * mat.rows, t.fp);
-    }
     if (JpegFaultActive()) {
       mat.data[0] ^= 0x80;
-      t.dev_valid = false;  // the host copy no longer matches
+      FreeGpuFrameSlot(slot);  // the host copy no longer matches
+    } else if (slot >= 0) {
+      PublishGpuFrameSlot(slot, mat.data, static_cast<size_t>(mat.cols) * mat.rows);
     }
     if (t.frames++ % kCheckEvery == 0) {
       Checker().Submit(jpeg, size, mat.data, mat.cols, mat.rows, mat.step, bgr ? 3 : 1);
     }
     return rc;
   }
+  FreeGpuFrameSlot(slot);
   if (nvjpg_errors_logged++ < 20) {
-    std::cout << "971 jpeg: hardware decode failed (" << rc << ": " << api->error(t.dec)
+    std::cout << "jpeg decoder: hardware decode failed (" << rc << ": " << api->error(t.dec)
               << "); libjpeg-turbo decodes this frame" << std::endl;
   }
   if (rc == SNJ_UNSUPPORTED && ++t.unsupported_in_a_row[bgr] >= 30) {
-    std::cout << "971 jpeg: this camera's JPEGs can't use the hardware " << (bgr ? "colour" : "gray")
+    std::cout << "jpeg decoder: this camera's JPEGs can't use the hardware " << (bgr ? "colour" : "gray")
               << " decoder (" << api->error(t.dec) << "); using libjpeg-turbo on this camera"
               << std::endl;
     t.path_unavailable[bgr] = true;
   }
   if (rc == SNJ_CUDA && !nvjpg_off.exchange(true)) {
-    std::cout << "971 jpeg: CUDA failed in the hardware decoder; libjpeg-turbo decodes "
+    std::cout << "jpeg decoder: CUDA failed in the hardware decoder; libjpeg-turbo decodes "
                  "everything until PhotonVision restarts"
               << std::endl;
   }
   return rc;
 }
 
-// A "971 jpeg" line every 10 s (not "971 stats", which health-check.sh parses per detector).
+// A "jpeg decoder" line every 10 s (not "detector stats", which health-check.sh parses per detector).
 // Colour frames are also counted on their own, in a clause at the end of the line.
 std::atomic<int> last_timestamp_src{-1};  // WPI_TimestampSource of the last gray frame
-// The capture timestamp (wpi::Now microseconds) of the last gray frame decoded on this thread;
+// The capture timestamp (WPI_Now ticks: us on 2026, ns on 2027) of the last gray frame decoded on this thread;
 // processimage reports how old that frame is when its detection ends ("frame age at result").
-thread_local uint64_t last_capture_us = 0;
+thread_local uint64_t last_capture_ticks = 0;
 
 // age_ms: how old the frame was when its decode started (from cscore's capture timestamp, which
 // the camera driver takes when the frame's first USB packet arrives), or < 0 if unknown.
@@ -943,7 +1071,7 @@ void CountJpeg(JpegDecoder used, int fallback, std::chrono::steady_clock::time_p
   }
   const double window = std::chrono::duration<double>(t1 - start).count();
   if (window < 10) return;
-  std::cout << "971 jpeg " << static_cast<int>(window + 0.5) << " s: nvjpg "
+  std::cout << "jpeg decoder " << static_cast<int>(window + 0.5) << " s: nvjpg "
             << frames[1] / window << " frames/s";
   if (frames[1]) std::cout << " (" << ms[1] / frames[1] << " ms)";
   std::cout << ", libjpeg-turbo " << frames[0] / window << " frames/s";
@@ -992,20 +1120,32 @@ __attribute__((visibility("default"))) void spectrum_cuda_unlock_shared() {
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
   JNIEnv *env;
   if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
-  for (auto &c : classes) {
-    *c.cls = wpi::java::JClass(env, c.name);
-    if (!*c.cls) {
-      std::cout << "971 library could not find class " << c.name << std::endl;
-      return JNI_ERR;
+  // WPILib 2027 moved AprilTagDetection (and made WPI_Now nanoseconds); 2026 is microseconds.
+  for (const auto &[name, ticks_per_ms] :
+       {std::pair{"org/wpilib/vision/apriltag/AprilTagDetection", 1e6},
+        std::pair{"edu/wpi/first/apriltag/AprilTagDetection", 1e3}}) {
+    jclass local = env->FindClass(name);
+    if (!local) {
+      env->ExceptionClear();
+      continue;
     }
+    detectionCls = static_cast<jclass>(env->NewGlobalRef(local));
+    env->DeleteLocalRef(local);
+    wpi_compat::TicksPerMs() = ticks_per_ms;
+    break;
+  }
+  if (!detectionCls) {
+    std::cout << "detector could not find AprilTagDetection (WPILib 2027 or 2026)" << std::endl;
+    return JNI_ERR;
   }
   std::string sync;
   const cudaError_t sync_err = cudaSetDeviceFlags(CudaScheduleFlag(&sync));
   // CUDA reads CUDA_DEVICE_MAX_CONNECTIONS (default 8) from the process environment, which
   // 08-select-detector.sh sets; only reported here.
   const char *connections = std::getenv("CUDA_DEVICE_MAX_CONNECTIONS");
-  std::cout << "971 library loaded (frc971/bos detector, min_white_black_diff "
-            << MinWhiteBlackDiff() << ", max_line_fit_mse " << MaxLineFitMse() << ", threads "
+  std::cout << "detector loaded (GPU AprilTag detector from frc971/bos, min_white_black_diff "
+            << MinWhiteBlackDiff() << ", max_line_fit_mse " << MaxLineFitMse() << ", edge border "
+            << EdgeBorderPx() << " px, threads "
             << DetectorThreads() << ", CUDA wait " << sync
             << (sync_err == cudaSuccess ? "" : std::string(" FAILED: ") + cudaGetErrorString(sync_err))
             << ", GPU connections " << (connections ? connections : "8") << ")" << std::endl;
@@ -1025,32 +1165,33 @@ JNIEXPORT jint JNICALL Java_org_photonvision_jni_GpuDetectorJNI_decodeMjpegGray(
   auto *frame = reinterpret_cast<WPI_RawFrame *>(raw_ptr);
   auto *mat = reinterpret_cast<cv::Mat *>(mat_ptr);
   if (!frame || !mat) return -2;
-  if (frame->pixelFormat != WPI_PIXFMT_MJPEG || !frame->data || frame->size < 4) return -1;
+  if (frame->pixelFormat != kWpiPixfmtMjpeg || !frame->data || frame->size < 4) return -1;
   if (mat->type() != CV_8UC1 || !mat->isContinuous()) return -3;
   const auto *data = reinterpret_cast<const uint8_t *>(frame->data);
   const size_t size = static_cast<size_t>(frame->size);
 
   const auto t0 = std::chrono::steady_clock::now();
   const double age_ms =
-      frame->timestamp ? (static_cast<double>(wpi::Now()) - static_cast<double>(frame->timestamp)) / 1000
-                       : -1;
+      frame->timestamp && wpi_compat::Now()
+          ? (static_cast<double>(wpi_compat::Now()) - static_cast<double>(frame->timestamp)) /
+                wpi_compat::TicksPerMs()
+          : -1;
   last_timestamp_src = frame->timestampSrc;
-  last_capture_us = frame->timestamp;
-  // Latency probe (tests only): while /tmp/spectrum-971-kmsg exists (checked every 60 frames),
+  last_capture_ticks = frame->timestamp;
+  // Latency probe (tests only): while /tmp/spectrum-detector-kmsg exists (checked every 60 frames),
   // log each decode start to the kernel log, next to uvcvideo's "Frame complete" trace lines.
   {
     static std::atomic<int> calls{0};
     static std::atomic<bool> on{false};
-    if (calls++ % 60 == 0) on = access("/tmp/spectrum-971-kmsg", F_OK) == 0;
+    if (calls++ % 60 == 0) on = DetectorSwitchExists("kmsg");
     if (on) {
       if (FILE *k = std::fopen("/dev/kmsg", "w")) {
-        std::fprintf(k, "971 decode start tid %ld age %.3f\n", syscall(SYS_gettid), age_ms);
+        std::fprintf(k, "detector decode start tid %ld age %.3f\n", syscall(SYS_gettid), age_ms);
         std::fclose(k);
       }
     }
   }
   int fallback = SNJ_OK;
-  nvjpg_thread.dev_valid = false;  // until a hardware decode puts this frame on the GPU
   if (WantedJpegDecoder() == JpegDecoder::kNvjpg && HardwareForThisCamera()) {
     {
       std::shared_lock<CudaCaptureLock> cuda(cuda_capture_lock);
@@ -1088,7 +1229,7 @@ JNIEXPORT jint JNICALL Java_org_photonvision_jni_GpuDetectorJNI_decodeMjpegBgr(
   auto *frame = reinterpret_cast<WPI_RawFrame *>(raw_ptr);
   auto *mat = reinterpret_cast<cv::Mat *>(mat_ptr);
   if (!frame || !mat) return -2;
-  if (frame->pixelFormat != WPI_PIXFMT_MJPEG || !frame->data || frame->size < 4) return -1;
+  if (frame->pixelFormat != kWpiPixfmtMjpeg || !frame->data || frame->size < 4) return -1;
   if (mat->type() != CV_8UC3 || !mat->isContinuous()) return -3;
   const auto *data = reinterpret_cast<const uint8_t *>(frame->data);
   const size_t size = static_cast<size_t>(frame->size);
@@ -1114,7 +1255,8 @@ JNIEXPORT jint JNICALL Java_org_photonvision_jni_GpuDetectorJNI_decodeMjpegBgr(
 JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *) {
   JNIEnv *env;
   if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) return;
-  for (auto &c : classes) c.cls->free(env);
+  if (detectionCls) env->DeleteGlobalRef(detectionCls);
+  detectionCls = nullptr;
 }
 
 JNIEXPORT jlong JNICALL Java_org_photonvision_jni_GpuDetectorJNI_createGpuDetector(
@@ -1143,6 +1285,7 @@ JNIEXPORT jlong JNICALL Java_org_photonvision_jni_GpuDetectorJNI_createGpuDetect
   s.mask_rects.clear();
   s.mask_dirty = true;
   s.last_graph_record = {};
+  s.last_stage_graph_record = {};
   // If the GPU build fails, keep the slot: processimage retries the build each frame.
   if (!Rebuild(s, width, height)) s.needs_rebuild = true;
   s.stats = Stats{};
@@ -1164,6 +1307,9 @@ JNIEXPORT void JNICALL Java_org_photonvision_jni_GpuDetectorJNI_destroyGpuDetect
   far_search::Forget(static_cast<int>(handle));
   delete s->gpu;
   s->gpu = nullptr;
+  if (s->dev_in) cudaFree(s->dev_in);
+  s->dev_in = nullptr;
+  s->dev_in_w = s->dev_in_h = 0;
   if (s->td) apriltag_detector_destroy(s->td);
   s->td = nullptr;
   if (s->family) tag36h11_destroy(s->family);
@@ -1214,7 +1360,7 @@ JNIEXPORT void JNICALL Java_org_photonvision_jni_GpuDetectorJNI_setparams(
   SetParams(handle, fx, cx, fy, cy, k1, k2, p1, p2, k3, 0, 0, 0, 5);
 }
 
-// SpectrumJetson (bos-07): the detection mask. mode 0 off, 1 ignore inside the boxes, 2 search
+// SpectrumJetson (detector-07): the detection mask. mode 0 off, 1 ignore inside the boxes, 2 search
 // only inside them; rects: x, y, w, h fractions of the image, 4 per box. Takes effect next frame.
 JNIEXPORT void JNICALL Java_org_photonvision_jni_GpuDetectorJNI_setMask(JNIEnv *env, jclass,
                                                                         jlong handle, jint mode,
@@ -1317,7 +1463,7 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
     workerpool_destroy(s->td->wp);
     s->td->nthreads = n;
     s->td->wp = workerpool_create(n);
-    std::cout << "971 detector h" << handle << ": " << n << " threads" << std::endl;
+    std::cout << "detector h" << handle << ": " << n << " threads" << std::endl;
   }
 
   auto t0 = std::chrono::steady_clock::now();
@@ -1330,16 +1476,32 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
     static bool injected = false;
     if (!injected) {
       injected = true;
-      std::cout << "971 TEST: injecting a sticky CUDA fault" << std::endl;
+      std::cout << "detector TEST: injecting a sticky CUDA fault" << std::endl;
       SpectrumInjectStickyCudaFault();
     }
   }
   // GPU input (GpuInputOn): the frame is already on the GPU when this is the buffer just decoded.
-  NvjpgThread &nt = nvjpg_thread;
   const uint8_t *image_device = nullptr;
-  if (nt.dev_valid && nt.dev_w == img.cols && nt.dev_h == img.rows &&
-      MatchesGpuInput(img.ptr(), static_cast<size_t>(img.cols) * img.rows, nt.fp)) {
-    image_device = nt.dev;
+  int claimed = -1;
+  if (img.isContinuous()) {
+    std::lock_guard<std::mutex> lock(gpu_frames_mu);
+    for (int i = 0; i < kGpuFrameSlots; ++i) {
+      GpuFrameSlot &g = gpu_frames[i];
+      if (g.state == 1 && g.host == img.ptr() && g.w == img.cols && g.h == img.rows &&
+          MatchesGpuInput(img.ptr(), static_cast<size_t>(img.cols) * img.rows, g.fp)) {
+        g.state = 2;
+        claimed = i;
+        image_device = g.dev;
+        break;
+      }
+    }
+  }
+  // Freed when this call returns, whichever way.
+  struct SlotRelease {
+    int i;
+    ~SlotRelease() { FreeGpuFrameSlot(i); }
+  } slot_release{claimed};
+  if (image_device) {
     s->stats.gpu_input++;
     // Safety net, every kCheckEvery such frames per camera (~2 s): the GPU copy must still match
     // the frame Java handed us.
@@ -1350,7 +1512,7 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
           std::memcmp(back.data(), img.ptr(), back.size()) != 0) {
         cudaGetLastError();
         if (!gpu_input_off.exchange(true)) {
-          std::cout << "971 GPU input: the GPU copy of a frame DIFFERS from the frame given; "
+          std::cout << "detector GPU input: the GPU copy of a frame DIFFERS from the frame given; "
                        "copying frames up again until PhotonVision restarts"
                     << std::endl;
         }
@@ -1358,9 +1520,35 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
       }
     }
   }
-  nt.dev_valid = false;  // one frame, one use
+  // Into this detector's fixed buffer (see DetectorSlot::dev_in), and the pool slot back at once.
+  // 2026-10-30: handing the pool's buffer straight to Detect() moved the input every frame, so the
+  // graph was re-recorded about once a second per camera, under an exclusive lock that stalled
+  // every camera, and ran step by step in between.
+  if (image_device) {
+    const size_t n = static_cast<size_t>(img.cols) * img.rows;
+    if (!s->dev_in || s->dev_in_w != img.cols || s->dev_in_h != img.rows) {
+      if (s->dev_in) cudaFree(s->dev_in);
+      s->dev_in = nullptr;
+      s->dev_in_w = s->dev_in_h = 0;
+      if (cudaMalloc(reinterpret_cast<void **>(&s->dev_in), n) == cudaSuccess) {
+        s->dev_in_w = img.cols;
+        s->dev_in_h = img.rows;
+      } else {
+        cudaGetLastError();
+        s->dev_in = nullptr;
+      }
+    }
+    if (s->dev_in && cudaMemcpy(s->dev_in, image_device, n, cudaMemcpyDeviceToDevice) == cudaSuccess) {
+      image_device = s->dev_in;
+    } else {
+      cudaGetLastError();
+      image_device = nullptr;  // copied up from the host frame instead
+    }
+    FreeGpuFrameSlot(slot_release.i);
+    slot_release.i = -1;
+  }
 
-  // Everything from here to the far search can throw: with bos-01, CHECK_CUDA throws instead of
+  // Everything from here to the far search can throw: with detector-01, CHECK_CUDA throws instead of
   // aborting. An exception that left this function would reach the JVM and std::terminate it,
   // taking every camera down, so one try covers the mask upload, the graph recording, Detect() and
   // the far search: a failure skips this frame and rebuilds this camera's detector (RecordFailure).
@@ -1371,13 +1559,13 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
   try {
     if (s->mask_dirty) {
       ApplyMaskToDetector(*s, img.cols, img.rows);
-      std::cout << "971 detector h" << handle << ": mask "
+      std::cout << "detector h" << handle << ": mask "
                 << (s->mask_mode == 0 ? "off" : s->mask_mode == 1 ? "ignoring" : "searching only")
                 << (s->mask_mode ? " " + std::to_string(s->mask_rects.size() / 4) + " box(es)" : "")
                 << std::endl;
     }
 
-    // bos-05: record the first-stage graph (once per detector and input buffer) while no other
+    // detector-05: record the first-stage graph (once per detector and input buffer) while no other
     // thread uses CUDA (see CudaCaptureLock). Meanwhile (a new mask, say) Detect() runs the steps
     // one by one. If recording throws, the stream may be left capturing: the rebuild that
     // RecordFailure asks for destroys it with the detector.
@@ -1389,8 +1577,24 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
       {
         std::lock_guard<CudaCaptureLock> exclusive(cuda_capture_lock);
         absl::Status status = s->gpu->RecordFirstStageGraph(image_device);
-        std::cout << "971 detector h" << handle << ": first-stage graph "
+        std::cout << "detector h" << handle << ": first-stage graph "
                   << (status.ok() ? "recorded" : std::string(status.message())) << std::endl;
+      }
+      cuda.lock();
+    }
+    // detector-11: the later stages' graphs (one per size bucket) that Detect() needed and didn't have,
+    // recorded the same way, all at once, at most once a second per camera. Until then Detect()
+    // runs those frames step by step (same results). SPECTRUM_DETECTOR_GRAPHS=0 switches them off.
+    if (s->gpu && now_graph - s->last_stage_graph_record >= std::chrono::seconds(1) &&
+        s->gpu->StageGraphsWanted()) {
+      s->last_stage_graph_record = now_graph;
+      cuda.unlock();
+      {
+        std::lock_guard<CudaCaptureLock> exclusive(cuda_capture_lock);
+        absl::Status status = s->gpu->RecordStageGraphs();
+        if (!status.ok()) {
+          std::cout << "detector h" << handle << ": " << status.message() << std::endl;
+        }
       }
       cuda.lock();
     }
@@ -1409,12 +1613,12 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
       s->consecutive_failures = 0;
       if (const size_t q = s->gpu->LastNumCandidateQuads(); q >= 2 * s->quads_logged) {
         while (q >= 2 * s->quads_logged) s->quads_logged *= 2;
-        std::cout << "971 detector h" << handle << ": up to " << q
+        std::cout << "detector h" << handle << ": up to " << q
                   << " candidate quads in a frame (limit "
                   << frc::apriltag::GpuDetector::kMaxBlobs << ")" << std::endl;
       }
     } else if (absl::IsResourceExhausted(status)) {
-      // bos-09: too busy a scene for the detector's buffers. The frame is skipped; nothing is
+      // detector-09: too busy a scene for the detector's buffers. The frame is skipped; nothing is
       // broken, so no rebuild (RecordFailure would rebuild the detector on every such frame).
       failed = true;
       static std::atomic<int64_t> last_log_s{0};
@@ -1422,7 +1626,7 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
                                 std::chrono::steady_clock::now().time_since_epoch())
                                 .count();
       if (last_log_s.exchange(now_s) != now_s) {
-        std::cout << "971 detector h" << handle << ": " << status.message() << std::endl;
+        std::cout << "detector h" << handle << ": " << status.message() << std::endl;
       }
     } else {
       failed = true;
@@ -1460,7 +1664,7 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
                                     std::chrono::steady_clock::now().time_since_epoch())
                                     .count() +
                                 10'000'000;
-      std::cout << "971 far search failed (" << e.what() << "); off for 10 s" << std::endl;
+      std::cout << "far search failed (" << e.what() << "); off for 10 s" << std::endl;
     } else {
       failed = true;
       detections = nullptr;
@@ -1478,13 +1682,14 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_GpuDetectorJNI_processi
     result = MakeJObjectArray(env, all);
   }
   auto t2 = std::chrono::steady_clock::now();
-  if (last_capture_us) {
-    const double age = (static_cast<double>(wpi::Now()) - static_cast<double>(last_capture_us)) / 1000;
+  if (last_capture_ticks) {
+    const double age = (static_cast<double>(wpi_compat::Now()) - static_cast<double>(last_capture_ticks)) /
+                       wpi_compat::TicksPerMs();
     if (age >= 0 && age < 1000) {
       s->stats.age_ms += age;
       s->stats.ages++;
     }
-    last_capture_us = 0;  // one frame, one reading
+    last_capture_ticks = 0;  // one frame, one reading
   }
   RecordStats(s->stats, handle, img, detections, failed, t0, t1, t2);
   return result;

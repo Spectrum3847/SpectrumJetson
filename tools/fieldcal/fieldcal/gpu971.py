@@ -21,7 +21,8 @@ from .rewind import Source
 
 DEFAULT_BINARY = Path.home() / "build" / "fieldcal-detect" / "fieldcal_detect"
 # PhotonVision's detector settings, from 08-select-detector.sh.
-DROPIN = Path("/etc/systemd/system/photonvision.service.d/971.conf")
+DROPIN = Path("/etc/systemd/system/photonvision.service.d/detector.conf")
+OLD_DROPIN = Path("/etc/systemd/system/photonvision.service.d/971.conf")  # before 2026-10-31
 # The 971 detector's corners come from AprilTag's code: pixel centres at +0.5 (see tags.py).
 PIXEL_OFFSET = 0.5
 
@@ -32,11 +33,13 @@ def binary() -> Path | None:
 
 
 def photonvision_env() -> dict[str, str]:
-    """The SPECTRUM_971_* settings PhotonVision runs with, so the replay matches it."""
+    """The SPECTRUM_DETECTOR_* settings PhotonVision runs with, so the replay matches it."""
     out = {}
     try:
-        for m in re.finditer(r"Environment=(SPECTRUM_971_\w+)=(\S+)", DROPIN.read_text()):
-            out[m.group(1)] = m.group(2)
+        text = (DROPIN if DROPIN.exists() else OLD_DROPIN).read_text()
+        # SPECTRUM_971_* is the old name of SPECTRUM_DETECTOR_*.
+        for m in re.finditer(r"Environment=SPECTRUM_(?:DETECTOR|971)_(\w+)=(\S+)", text):
+            out["SPECTRUM_DETECTOR_" + m.group(1)] = m.group(2)
     except OSError:
         pass
     return out

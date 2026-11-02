@@ -1,0 +1,285 @@
+diff --git a/third_party/971apriltag/apriltag.cc b/third_party/971apriltag/apriltag.cc
+index 90d5cb1..9ec02c6 100644
+--- a/third_party/971apriltag/apriltag.cc
++++ b/third_party/971apriltag/apriltag.cc
+@@ -1710,6 +1710,7 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+   }
+   if (timing) after_image_memcpy_to_device_.Record(&stream_);
+ 
++  refine_image_device_ = image_device;  // detector-15
+   if (graph) {
+     gray_image_host_ptr_ = image;
+     CHECK_CUDA(cudaGraphLaunch(first_stage_exec_, stream_.get()));
+@@ -2310,4 +2311,201 @@ absl::Status GpuDetector::Detect(const uint8_t* image,
+   return absl::OkStatus();
+ }
+ 
++namespace {
++
++// SpectrumJetson (detector-15): RefineEdges (apriltag_detect.cc) on the GPU, one block per quad, one
++// warp per edge. The same steps as the CPU's, the edge search and undistortion in float (the
++// sums and the line fits in double); corners differ from the CPU's by ~1e-4 px. Corners of a quad that isn't sane (detector-08) are left as they are (the
++// decoder skips it).
++// In float: Orin's GPU runs double at a small fraction of float's rate, and the edge search is
++// most of the work (corners move by ~1e-4 px against the CPU's double).
++__device__ void GpuUnDistortF(float* u, float* v, const CameraMatrix& cm, const DistCoeffs& dc) {
++  const float fx = cm.fx, fy = cm.fy, cx = cm.cx, cy = cm.cy;
++  const float k1 = dc.k1, k2 = dc.k2, k3 = dc.k3, k4 = dc.k4, k5 = dc.k5, k6 = dc.k6;
++  const float p1 = dc.p1, p2 = dc.p2;
++  const float x0 = (*u - cx) / fx, y0 = (*v - cy) / fy;
++  float xP = x0, yP = y0, prev_x, prev_y;
++  int iterations = 0;
++  do {
++    prev_x = xP;
++    prev_y = yP;
++    const float rSq = xP * xP + yP * yP;
++    const float radial = (1 + k1 * rSq + k2 * rSq * rSq + k3 * rSq * rSq * rSq) /
++                         (1 + k4 * rSq + k5 * rSq * rSq + k6 * rSq * rSq * rSq);
++    const float inv = 1 / radial;
++    const float tdx = 2 * p1 * xP * yP + p2 * (rSq + 2 * xP * xP);
++    const float tdy = p1 * (rSq + 2 * yP * yP) + 2 * p2 * xP * yP;
++    xP = (x0 - tdx) * inv;
++    yP = (y0 - tdy) * inv;
++    if (iterations > 100) break;  // kUndistortIterationThreshold
++    iterations++;
++  } while (fabsf(xP - prev_x) > 1e-6f || fabsf(yP - prev_y) > 1e-6f);
++  *u = xP * fx + cx;
++  *v = yP * fy + cy;
++}
++
++__device__ void GpuReDistort(double* x, double* y, const CameraMatrix& cm, const DistCoeffs& dc) {
++  const double xP = (*x - cm.cx) / cm.fx, yP = (*y - cm.cy) / cm.fy;
++  const double rSq = xP * xP + yP * yP;
++  const double lin = (1 + dc.k1 * rSq + dc.k2 * rSq * rSq + dc.k3 * rSq * rSq * rSq) /
++                     (1 + dc.k4 * rSq + dc.k5 * rSq * rSq + dc.k6 * rSq * rSq * rSq);
++  const double xPP = xP * lin + 2 * dc.p1 * xP * yP + dc.p2 * (rSq + 2 * xP * xP);
++  const double yPP = yP * lin + dc.p1 * (rSq + 2 * yP * yP) + 2 * dc.p2 * xP * yP;
++  *x = xPP * cm.fx + cm.cx;
++  *y = yPP * cm.fy + cm.cy;
++}
++
++__global__ void RefineEdgesKernel(const QuadCorners* in, float (*out)[4][2], const int* count,
++                                  const uint8_t* im, int width, int height, float quad_decimate,
++                                  CameraMatrix cm, DistCoeffs dc) {
++  const int q = blockIdx.x;
++  if (q >= *count) return;
++  const int edge = threadIdx.x / 32, lane = threadIdx.x % 32;
++  __shared__ double lines[4][4];
++  __shared__ float p[4][2];
++  __shared__ bool sane;
++  if (threadIdx.x < 8) p[threadIdx.x / 2][threadIdx.x % 2] = in[q].corners[threadIdx.x / 2][threadIdx.x % 2];
++  __syncthreads();
++  if (threadIdx.x == 0) {
++    bool ok = true;
++    const float w = static_cast<float>(width), h = static_cast<float>(height);
++    for (int k = 0; k < 4 && ok; ++k) {
++      const float x = p[k][0], y = p[k][1];
++      ok = isfinite(x) && isfinite(y) && x > -w && x < 2 * w && y > -h && y < 2 * h;
++    }
++    sane = ok;
++  }
++  __syncthreads();
++  if (!sane) {
++    if (threadIdx.x < 8) out[q][threadIdx.x / 2][threadIdx.x % 2] = p[threadIdx.x / 2][threadIdx.x % 2];
++    return;
++  }
++  {
++    const int a = edge, b = (edge + 1) & 3;
++    float nx = p[b][1] - p[a][1];
++    float ny = -p[b][0] + p[a][0];
++    const float mag = sqrtf(nx * nx + ny * ny);
++    nx /= mag;
++    ny /= mag;
++    if (in[q].reversed_border) {
++      nx = -nx;
++      ny = -ny;
++    }
++    int nsamples = max(16, static_cast<int>(mag / 8));
++    nsamples = min(nsamples, max(16, (width + height) / 8));
++    double Mx = 0, My = 0, Mxx = 0, Mxy = 0, Myy = 0, N = 0;
++    const float range = quad_decimate + 1;
++    for (int s = lane; s < nsamples; s += 32) {
++      const float alpha = (1.0f + s) / (nsamples + 1);
++      const float x0 = alpha * p[a][0] + (1 - alpha) * p[b][0];
++      const float y0 = alpha * p[a][1] + (1 - alpha) * p[b][1];
++      float Mn = 0, Mcount = 0;
++      for (float n = -range; n <= range; n += 0.25f) {
++        const int x1 = x0 + (n + 1) * nx;
++        const int y1 = y0 + (n + 1) * ny;
++        if (x1 < 0 || x1 >= width || y1 < 0 || y1 >= height) continue;
++        const int x2 = x0 + (n - 1) * nx;
++        const int y2 = y0 + (n - 1) * ny;
++        if (x2 < 0 || x2 >= width || y2 < 0 || y2 >= height) continue;
++        const int g1 = __ldg(&im[y1 * width + x1]);
++        const int g2 = __ldg(&im[y2 * width + x2]);
++        if (g1 < g2) continue;
++        const float weight = (g2 - g1) * (g2 - g1);
++        Mn += weight * n;
++        Mcount += weight;
++      }
++      if (Mcount == 0) continue;
++      const float n0 = Mn / Mcount;
++      float bx = x0 + n0 * nx, by = y0 + n0 * ny;
++      GpuUnDistortF(&bx, &by, cm, dc);
++      const double bestx = bx, besty = by;
++      Mx += bestx;
++      My += besty;
++      Mxx += bestx * bestx;
++      Mxy += bestx * besty;
++      Myy += besty * besty;
++      N++;
++    }
++    for (int o = 16; o > 0; o /= 2) {
++      Mx += __shfl_down_sync(0xffffffff, Mx, o);
++      My += __shfl_down_sync(0xffffffff, My, o);
++      Mxx += __shfl_down_sync(0xffffffff, Mxx, o);
++      Mxy += __shfl_down_sync(0xffffffff, Mxy, o);
++      Myy += __shfl_down_sync(0xffffffff, Myy, o);
++      N += __shfl_down_sync(0xffffffff, N, o);
++    }
++    if (lane == 0) {
++      const double Ex = Mx / N, Ey = My / N;
++      const double Cxx = Mxx / N - Ex * Ex;
++      const double Cxy = Mxy / N - Ex * Ey;
++      const double Cyy = Myy / N - Ey * Ey;
++      const double normal_theta = .5 * atan2f(-2 * Cxy, (Cyy - Cxx));
++      lines[edge][0] = Ex;
++      lines[edge][1] = Ey;
++      lines[edge][2] = cosf(normal_theta);
++      lines[edge][3] = sinf(normal_theta);
++    }
++  }
++  __syncthreads();
++  if (threadIdx.x < 4) {
++    const int i = threadIdx.x;
++    const int c = (i + 1) & 3;
++    const double A00 = lines[i][3], A01 = -lines[c][3];
++    const double A10 = -lines[i][2], A11 = lines[c][2];
++    const double B0 = -lines[i][0] + lines[c][0];
++    const double B1 = -lines[i][1] + lines[c][1];
++    const double det = A00 * A11 - A10 * A01;
++    if (fabs(det) > 0.001) {
++      const double W00 = A11 / det, W01 = -A01 / det;
++      const double L0 = W00 * B0 + W01 * B1;
++      double px = lines[i][0] + L0 * A00;
++      double py = lines[i][1] + L0 * A10;
++      GpuReDistort(&px, &py, cm, dc);
++      out[q][c][0] = px;
++      out[q][c][1] = py;
++    } else {
++      out[q][c][0] = p[c][0];
++      out[q][c][1] = p[c][1];
++    }
++  }
++}
++
++}  // namespace
++
++// detector-15: SPECTRUM_DETECTOR_GPU_REFINE=1 (at start) or 1 in /tmp/spectrum-detector-gpu-refine
++// (live): RefineEdges on the GPU. Default off.
++bool SpectrumGpuRefine() {
++  static const int env = [] {
++    const char* v = std::getenv("SPECTRUM_DETECTOR_GPU_REFINE");
++    return v ? std::atoi(v) : 0;
++  }();
++  static SpectrumKnob knob("/tmp/spectrum-detector-gpu-refine", env);
++  return knob.Get() != 0;
++}
++
++// Refines quad_corners_host_'s corners on the GPU, into refine_out_pinned_ (RefinedCorners()); false when it can't
++// (then the CPU refines as before).
++bool GpuDetector::RefineEdgesOnGpu() {
++  const size_t n = quad_corners_host_.size();
++  if (n == 0 || n > kMaxBlobs || !refine_image_device_) return false;
++  std::memcpy(refine_in_pinned_.get(), quad_corners_host_.data(), n * sizeof(QuadCorners));
++  *refine_count_pinned_.get() = static_cast<int>(n);
++  if (!refine_in_device_) {  // the pinned buffers' device addresses, once
++    refine_in_device_ = DeviceAddress(refine_in_pinned_.get());
++    refine_out_device_ = DeviceAddress(refine_out_pinned_.get());
++    refine_count_device_ = DeviceAddress(refine_count_pinned_.get());
++  }
++  auto* in = static_cast<QuadCorners*>(refine_in_device_);
++  auto* out = static_cast<float(*)[4][2]>(refine_out_device_);
++  auto* count = static_cast<int*>(refine_count_device_);
++  if (!in || !out || !count) return false;
++  RefineEdgesKernel<<<n, 128, 0, stream_.get()>>>(in, out, count, refine_image_device_,
++                                                  static_cast<int>(width_), static_cast<int>(height_),
++                                                  tag_detector_->quad_decimate, camera_matrix_,
++                                                  distortion_coefficients_);
++  if (cudaGetLastError() != cudaSuccess) return false;
++  CHECK_CUDA(cudaStreamSynchronize(stream_.get()));
++  return true;
++}
++
+ }  // namespace frc::apriltag
+diff --git a/third_party/971apriltag/apriltag.h b/third_party/971apriltag/apriltag.h
+index cfe41f7..60e44af 100644
+--- a/third_party/971apriltag/apriltag.h
++++ b/third_party/971apriltag/apriltag.h
+@@ -474,6 +474,19 @@ class GpuDetector {
+   void NoteStageCounts(size_t points, size_t selected, size_t quads);
+   // detector-14: the first stage's point count fits its buffer (after a wait for the GPU).
+   absl::Status CheckPointCount() const;
++  // detector-15: RefineEdges on the GPU (SpectrumGpuRefine), the corners in pinned memory the kernel
++  // reads and writes directly (CPU and GPU share DRAM: no copies).
++ public:
++  bool RefineEdgesOnGpu();
++  const float (*RefinedCorners() const)[4][2] { return refine_out_pinned_.get(); }
++ private:
++  const uint8_t* refine_image_device_ = nullptr;
++  HostMemory<QuadCorners> refine_in_pinned_{kMaxBlobs};
++  HostMemory<float[4][2]> refine_out_pinned_{kMaxBlobs};
++  HostMemory<int> refine_count_pinned_{1};
++  void* refine_in_device_ = nullptr;
++  void* refine_out_device_ = nullptr;
++  void* refine_count_device_ = nullptr;
+   // The largest counts of the last few frames (decaying), for the guessed buckets.
+   size_t chain_points_ = 0, chain_selected_ = 0, chain_quads_ = 0;
+   GpuMemory<int> stage3_points_device_{1};  // GuardStage3's count
+diff --git a/third_party/971apriltag/apriltag_detect.cc b/third_party/971apriltag/apriltag_detect.cc
+index 4a23427..456bc23 100644
+--- a/third_party/971apriltag/apriltag_detect.cc
++++ b/third_party/971apriltag/apriltag_detect.cc
+@@ -305,6 +305,7 @@ struct QuadDecodeTaskStruct {
+ 
+   CameraMatrix* camera_matrix;
+   DistCoeffs* distortion_coefficients;
++  const float (*refined)[4][2] = nullptr;  // detector-15: the GPU's refined corners, or nullptr
+ };
+ 
+ // Dewarps points from the image based on various constants
+@@ -610,7 +611,9 @@ void GpuDetector::QuadDecodeTask(void* _u) {
+       if (!sane) continue;
+     }
+ 
+-    if (td->refine_edges) {
++    if (td->refine_edges && task->refined) {
++      std::memcpy(quad_original.p, task->refined[quadidx], sizeof(quad_original.p));
++    } else if (td->refine_edges) {
+       RefineEdges(td, im, &quad_original, task->camera_matrix,
+                   task->distortion_coefficients);
+     }
+@@ -653,6 +656,8 @@ void GpuDetector::QuadDecodeTask(void* _u) {
+   }
+ }
+ 
++bool SpectrumGpuRefine();  // apriltag.cc (detector-15)
++
+ void GpuDetector::DecodeTags() {
+   size_t chunksize =
+       1 + quad_corners_host_.size() /
+@@ -676,8 +681,14 @@ void GpuDetector::DecodeTags() {
+       .buf = const_cast<uint8_t*>(gray_image_host_ptr_),
+   };
+ 
++  const float(*refined)[4][2] = nullptr;
++  if (tag_detector_->refine_edges && SpectrumGpuRefine() && RefineEdgesOnGpu()) {
++    refined = RefinedCorners();
++  }
++
+   int ntasks = 0;
+   for (size_t i = 0; i < quad_corners_host_.size(); i += chunksize) {
++    tasks[ntasks].refined = refined;
+     tasks[ntasks].i0 = i;
+     tasks[ntasks].i1 = std::min(quad_corners_host_.size(), i + chunksize);
+     tasks[ntasks].quads = quad_corners_host_.data();

@@ -71,12 +71,12 @@
       <p>Here's that line on our Jetson on Sept 25, running 4 cameras at full speed.</p>
     </div>
   <div class="block reveal">
-    <div class="term-line" aria-label="Real 971 stats and 971 jpeg log lines from our Jetson"><span class="dim">$ journalctl -u photonvision -f        <span style="color:#8f80ad"># Sept 25, 2026, 07:53 UTC, 4 cameras</span></span>
-971 stats <span class="k1">h1</span> <span class="k2">1280x800</span>: <span class="k3">122.405 calls/s</span>, detect avg <span class="k4">0.905 ms</span> max <span class="k4">1.487 ms</span>, jni <span class="k5">0.004 ms</span>, <span class="k6">tags/frame 0</span> <span class="k7">[bos]</span>
-971 stats h3 1280x800: 122.411 calls/s, detect avg 0.981 ms max 1.979 ms, jni 0.004 ms, tags/frame 0 [bos]
-971 stats h0 1280x720: 60.940 calls/s, detect avg 1.004 ms max 1.506 ms, jni 0.005 ms, tags/frame 0 [bos]
-971 stats h2 1280x720: 60.703 calls/s, detect avg 1.133 ms max 1.575 ms, jni 0.005 ms, tags/frame 0 [bos]
-971 jpeg 10 s: <span class="k8">nvjpg 362.13 frames/s (2.587 ms)</span>, <span class="k9">libjpeg-turbo 0 frames/s</span>; <span class="k10">checks since start 19925 ok, 0 differ</span></div>
+    <div class="term-line" aria-label="Real detector stats and jpeg decoder log lines from our Jetson"><span class="dim">$ journalctl -u photonvision -f        <span style="color:#8f80ad"># Sept 25, 2026, 07:53 UTC, 4 cameras</span></span>
+detector stats <span class="k1">h1</span> <span class="k2">1280x800</span>: <span class="k3">122.405 calls/s</span>, detect avg <span class="k4">0.905 ms</span> max <span class="k4">1.487 ms</span>, jni <span class="k5">0.004 ms</span>, <span class="k6">tags/frame 0</span> <span class="k7">[bos]</span>
+detector stats h3 1280x800: 122.411 calls/s, detect avg 0.981 ms max 1.979 ms, jni 0.004 ms, tags/frame 0 [bos]
+detector stats h0 1280x720: 60.940 calls/s, detect avg 1.004 ms max 1.506 ms, jni 0.005 ms, tags/frame 0 [bos]
+detector stats h2 1280x720: 60.703 calls/s, detect avg 1.133 ms max 1.575 ms, jni 0.005 ms, tags/frame 0 [bos]
+jpeg decoder 10 s: <span class="k8">nvjpg 362.13 frames/s (2.587 ms)</span>, <span class="k9">libjpeg-turbo 0 frames/s</span>; <span class="k10">checks since start 19925 ok, 0 differ</span></div>
     <div class="legend-grid">
       <div><i class="k1">h1</i> the detector's handle: one per camera, so 4 lines a second</div>
       <div><i class="k2">1280x800</i> frame size: the Thriftiest Cams; 1280x720 lines are the two Global Shutter cameras</div>
@@ -121,24 +121,24 @@
   <div class="split top">
     <div class="prose">
       <p>The first time four Thriftiest Cams ran together (Sept 29), PhotonVision used <strong>2.2 CPU cores</strong>, the GPU was 40% busy, and each frame took <strong>4.4 ms</strong> to detect instead of 1.5. The clue was in the scaling: with 3 cameras it was 2.2 ms and 1.1 cores, so the fourth camera cost far more than the third.</p>
-      <p>The second clue: over half the CPU time was inside the Linux kernel, not in our code. Tracing which threads woke which (Linux <code>ftrace</code>) and pausing PhotonVision in <code>gdb</code> to see where they waited showed the camera threads handing one lock around, in strict rotation, every 15–20 µs. It was CUDA's own lock, which every camera shares. At the end of every frame, the detector took it ~60 times to build a timing report that's only printed in debug mode, which is always off. <a href="#cuda">Chapter 08</a> has the bug; <code>bos-03</code> fixed it.</p>
+      <p>The second clue: over half the CPU time was inside the Linux kernel, not in our code. Tracing which threads woke which (Linux <code>ftrace</code>) and pausing PhotonVision in <code>gdb</code> to see where they waited showed the camera threads handing one lock around, in strict rotation, every 15–20 µs. It was CUDA's own lock, which every camera shares. At the end of every frame, the detector took it ~60 times to build a timing report that's only printed in debug mode, which is always off. <a href="#cuda">Chapter 08</a> has the bug; <code>detector-03</code> fixed it.</p>
       <p>That was the first of five changes. Each frame now takes less time with four cameras than one camera did before.</p>
     </div>
     <div class="table-wrap">
       <table class="data">
         <tr><th>Change</th><th>Detect</th><th>CPU</th><th>GPU</th></tr>
         <tr><td>Starting point, 4 cameras</td><td>4.4 ms</td><td>2.2 cores</td><td>40–43%</td></tr>
-        <tr><td>Stop the debug timing on every frame (<code>bos-03</code>)</td><td>2.2 ms</td><td>1.5</td><td>35%</td></tr>
-        <tr><td>Find blob edges and drop the empty ones in one GPU step, not two (<code>bos-04</code>)</td><td>1.9 ms</td><td>1.4</td><td>28%</td></tr>
+        <tr><td>Stop the debug timing on every frame (<code>detector-03</code>)</td><td>2.2 ms</td><td>1.5</td><td>35%</td></tr>
+        <tr><td>Find blob edges and drop the empty ones in one GPU step, not two (<code>detector-04</code>)</td><td>1.9 ms</td><td>1.4</td><td>28%</td></tr>
         <tr><td>Keep each frame on the GPU after the JPEG hardware decodes it, instead of copying it down and back up</td><td>1.3 ms</td><td>1.26</td><td>27%</td></tr>
-        <tr><td>Launch the first 13 GPU steps as one CUDA graph (<code>bos-05</code>)</td><td>1.2 ms</td><td>1.23</td><td>25.6%</td></tr>
+        <tr><td>Launch the first 13 GPU steps as one CUDA graph (<code>detector-05</code>)</td><td>1.2 ms</td><td>1.23</td><td>25.6%</td></tr>
         <tr class="hl"><td>Stop copying every gray frame in PhotonVision (<code>photonvision-37</code>)</td><td>1.2 ms</td><td>1.14</td><td>25.7%</td></tr>
       </table>
       <p class="small muted">From our Jetson, Sept 29, 2026: 4 Thriftiest Cams at 1280×800 and 122 fps, no tags in view, no dashboard streams. Most changes were measured live, switching them on and off 3 times.</p>
     </div>
   </div>
   <div class="callout pitfall"><h5>Lesson: code that does nothing visible can still cost a lot</h5><p>The timing report never printed a single line, and it was the biggest cost of all, because it held a lock every camera needed. Look for work whose result nobody uses, especially inside a shared lock.</p></div>
-  <div class="callout idea"><h5>A speed-up must not change the answer</h5><p>The fused blob step (<code>bos-04</code>) finds its points in a different order. So we replayed ~5,000 recorded frames through it: every one of 3,567 tag detections came out <strong>byte-for-byte identical</strong>. The CUDA graph got the same check.</p></div>
+  <div class="callout idea"><h5>A speed-up must not change the answer</h5><p>The fused blob step (<code>detector-04</code>) finds its points in a different order. So we replayed ~5,000 recorded frames through it: every one of 3,567 tag detections came out <strong>byte-for-byte identical</strong>. The CUDA graph got the same check.</p></div>
   <div class="split top">
     <div class="prose">
       <h4 style="margin-top:0">Five cameras, and a new limit</h4>

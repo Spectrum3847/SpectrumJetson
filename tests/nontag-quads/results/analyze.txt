@@ -1,0 +1,41 @@
+session                              camera     frames  busy%  quads   tags nontag  cpu_us   nt_us   early   keep%
+TXMAN1_Q17/0001_Q17_20261015-152820  orin-left     356   100%   20.1   0.95    95%     556     529     133   91.1%
+TXMAN1_Q17/0001_Q17_20261015-152820  orin-right    356   100%   16.3   1.00    94%     570     541     108   99.4%
+TXMAN1_Q17/0002_Q17_20261015-152843  orin-left    4242   100%   17.6   1.02    94%     479     450     117   96.5%
+TXMAN1_Q17/0002_Q17_20261015-152843  orin-right   4239   100%   16.5   0.56    97%     597     580     108   97.4%
+TXMAN1_Q19/0003_Q19_20261015-152741  orin-left     604    99%   18.0   1.13    94%     500     467     121   91.4%
+TXMAN1_Q19/0003_Q19_20261015-152741  orin-right    604   100%   20.0   0.85    96%     702     678     130   98.8%
+TXMAN1_Q19/0005_Q19_20261015-152902  orin-left    2497    99%   16.7   0.85    95%     465     437     108   97.1%
+TXMAN1_Q19/0005_Q19_20261015-152902  orin-right   2496   100%   16.5   0.98    94%     566     538     110   98.6%
+TXMAN1_Q24/0006_Q24_20261015-152624  orin-left     544   100%   17.5   0.83    95%     479     456     115   96.5%
+TXMAN1_Q24/0006_Q24_20261015-152624  orin-right    544   100%   15.6   0.50    97%     537     522     102   98.2%
+TXMAN1_Q24/0007_Q24_20261015-152647  orin-left    4241   100%   15.8   0.86    95%     423     399     105   96.6%
+TXMAN1_Q24/0007_Q24_20261015-152647  orin-right   4237   100%   14.6   0.73    95%     535     513      98   97.2%
+TXMAN1_Q27/0008_Q27_20261015-152420  orin-left     416   100%   19.1   0.93    95%     522     495     123   88.8%
+TXMAN1_Q27/0008_Q27_20261015-152420  orin-right    417   100%   18.0   1.40    92%     688     645     118   92.8%
+TXMAN1_Q27/0009_Q27_20261015-152443  orin-left    4240   100%   13.5   0.64    95%     365     348      92   92.9%
+TXMAN1_Q27/0009_Q27_20261015-152443  orin-right    170   100%   16.9   1.46    91%     570     528     115   92.7%
+TXMAN1_Q32/0013_TXMAN1-Q32-r1_202610 orin-left    1022    99%   15.3   1.08    93%     408     378     102   97.4%
+TXMAN1_Q32/0013_TXMAN1-Q32-r1_202610 orin-right   1022   100%   16.7   1.19    93%     607     573     113   97.1%
+TXMAN1_Q32/0014_TXMAN1-Q32-r1_202610 orin-left    2440   100%   12.4   0.58    95%     332     316      84   91.5%
+TXMAN1_Q32/0014_TXMAN1-Q32-r1_202610 orin-right   2442   100%   14.0   0.75    95%     504     482      95   98.0%
+TXMAN1_Q32/0015_TXMAN1-Q32-r1_202610 orin-left    2745   100%    8.0   0.47    94%     221     208      60   95.0%
+TXMAN1_Q32/0015_TXMAN1-Q32-r1_202610 orin-right   2746   100%   14.7   0.14    99%     498     493      95   99.0%
+TXMAN1_Test_r19/0025_TXMAN1-M999-r19 orin-left    4604    98%   11.0   0.62    94%     294     277      79   98.5%
+TXMAN1_Test_r19/0025_TXMAN1-M999-r19 orin-right   4605   100%   15.8   0.52    97%     554     538     102   98.3%
+TXMAN1_Test_r19/0026_TXMAN1-M999-r19 orin-left    1285   100%    8.4   0.03   100%     231     230      67   89.7%
+TXMAN1_Test_r19/0026_TXMAN1-M999-r19 orin-right   1286   100%   24.0   1.21    95%     842     807     144   96.7%
+
+Totals (per busy frame; CPU = decode workers' CPU, us)
+  ALL: 54400 frames, 100% busy; quads 14.9 (after the sanity check 14.9), tags 0.71, non-tag 14.2 (95.2% of quads)
+    CPU: RefineEdges 394 us (non-tag 378), decode 72 us (non-tag 68); wall 178 us
+    early decode on unrefined corners: 99 us; passes 0.70 quads (0.10% of non-tags); keeps 96.5% of tags (no slack)
+    saved if non-tags stopped at the early decode: 347 us CPU per busy frame (74% of refine + decode)
+  orin-left: 29236 frames, 99% busy; quads 13.9 (after the sanity check 13.9), tags 0.73, non-tag 13.1 (94.7% of quads)
+    CPU: RefineEdges 310 us (non-tag 293), decode 67 us (non-tag 62); wall 141 us
+    early decode on unrefined corners: 94 us; passes 0.70 quads (0.05% of non-tags); keeps 95.6% of tags (no slack)
+    saved if non-tags stopped at the early decode: 261 us CPU per busy frame (69% of refine + decode)
+  orin-right: 25164 frames, 100% busy; quads 16.1 (after the sanity check 16.1), tags 0.69, non-tag 15.4 (95.7% of quads)
+    CPU: RefineEdges 492 us (non-tag 476), decode 79 us (non-tag 74); wall 221 us
+    early decode on unrefined corners: 105 us; passes 0.69 quads (0.14% of non-tags); keeps 97.5% of tags (no slack)
+    saved if non-tags stopped at the early decode: 445 us CPU per busy frame (78% of refine + decode)

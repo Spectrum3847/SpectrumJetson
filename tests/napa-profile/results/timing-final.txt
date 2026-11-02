@@ -1,0 +1,25 @@
+napa16_s2: 44954 sightings, napa16_ABH: 44954; only napa16_s2 0, only napa16_ABH 0; common 44954, corners moved > 1e-4 px: 0
+IDENTICAL
+napafar_s2: 43057 sightings, napafar_ABH: 43057; only napafar_s2 0, only napafar_ABH 0; common 43057, corners moved > 1e-4 px: 0
+IDENTICAL
+| Case | Build | frames | mean ms | median | p95 | vs base (mean) |
+|---|---|---|---|---|---|---|
+| napa16_t1 | base | 13551 | 2.321 | 2.376 | 2.672 |  |
+| napa16_t1 | ABH | 13551 | 2.091 | 2.143 | 2.440 | -9.9% |
+| napa_t1 | base | 13551 | 0.486 | 0.484 | 0.607 |  |
+| napa_t1 | ABH | 13551 | 0.469 | 0.466 | 0.590 | -3.5% |
+| napafar_t1 | base | 54171 | 1.243 | 1.245 | 1.631 |  |
+| napafar_t1 | ABH | 54171 | 1.164 | 1.162 | 1.557 | -6.4% |
+exp done
+
+## early slack (napa-01 build)
+| Case | Build | frames | mean ms | median | p95 | vs base (mean) |
+|---|---|---|---|---|---|---|
+| napa16_t1 | s0 | 4517 | 2.312 | 2.369 | 2.654 |  |
+| napa16_t1 | s1 | 4517 | 2.321 | 2.378 | 2.662 |  |
+| napa16_t1 | s2 | 4517 | 2.321 | 2.377 | 2.679 |  |
+| napa16_t1 | s3 | 4517 | 2.325 | 2.380 | 2.677 |  |
+| napafar_t1 | s0 | 18057 | 1.237 | 1.241 | 1.609 |  |
+| napafar_t1 | s1 | 18057 | 1.241 | 1.245 | 1.623 |  |
+| napafar_t1 | s2 | 18057 | 1.242 | 1.245 | 1.629 |  |
+| napafar_t1 | s3 | 18057 | 1.247 | 1.248 | 1.642 |  |
