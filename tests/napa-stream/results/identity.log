@@ -1,0 +1,27 @@
+min16 TXMAN1_Q17 0001_Q17_20261015-152820: Whole-frame sightings (margin >= 15): 872; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+min16 TXMAN1_Q17 0002_Q17_20261015-152843: Whole-frame sightings (margin >= 15): 7752; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+min16 TXMAN1_Q19 0003_Q19_20261015-152741: Whole-frame sightings (margin >= 15): 1402; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+min16 TXMAN1_Q19 0005_Q19_20261015-152902: Whole-frame sightings (margin >= 15): 5132; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+min16 TXMAN1_Q24 0006_Q24_20261015-152624: Whole-frame sightings (margin >= 15): 822; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+min16 TXMAN1_Q24 0007_Q24_20261015-152647: Whole-frame sightings (margin >= 15): 7686; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+min16 TXMAN1_Q27 0008_Q27_20261015-152420: Whole-frame sightings (margin >= 15): 1193; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+min16 TXMAN1_Q27 0009_Q27_20261015-152443: Whole-frame sightings (margin >= 15): 3379; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+min16 TXMAN1_Q32 0013_TXMAN1-Q32-r1_20261017-004206: Whole-frame sightings (margin >= 15): 2758; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+min16 TXMAN1_Q32 0014_TXMAN1-Q32-r1_20261017-004240: Whole-frame sightings (margin >= 15): 3697; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+min16 TXMAN1_Q32 0015_TXMAN1-Q32-r1_20261017-004401: Whole-frame sightings (margin >= 15): 1929; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+min16 TXMAN1_Test_r19 0025_TXMAN1-M999-r19_20261017-075822: Whole-frame sightings (margin >= 15): 6375; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+min16 TXMAN1_Test_r19 0026_TXMAN1-M999-r19_20261017-080054: Whole-frame sightings (margin >= 15): 1957; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+far TXMAN1_Q17 0001_Q17_20261015-152820: Whole-frame sightings (margin >= 15): 819; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+far TXMAN1_Q17 0002_Q17_20261015-152843: Whole-frame sightings (margin >= 15): 7478; stream mismatches: 0 frames; base-stream reruns 20 IDENTICAL 
+far TXMAN1_Q19 0003_Q19_20261015-152741: Whole-frame sightings (margin >= 15): 1327; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+far TXMAN1_Q19 0005_Q19_20261015-152902: Whole-frame sightings (margin >= 15): 4916; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+far TXMAN1_Q24 0006_Q24_20261015-152624: Whole-frame sightings (margin >= 15): 733; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+far TXMAN1_Q24 0007_Q24_20261015-152647: Whole-frame sightings (margin >= 15): 7225; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+far TXMAN1_Q27 0008_Q27_20261015-152420: Whole-frame sightings (margin >= 15): 1125; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+far TXMAN1_Q27 0009_Q27_20261015-152443: Whole-frame sightings (margin >= 15): 3262; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+far TXMAN1_Q32 0013_TXMAN1-Q32-r1_20261017-004206: Whole-frame sightings (margin >= 15): 2636; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+far TXMAN1_Q32 0014_TXMAN1-Q32-r1_20261017-004240: Whole-frame sightings (margin >= 15): 3533; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+far TXMAN1_Q32 0015_TXMAN1-Q32-r1_20261017-004401: Whole-frame sightings (margin >= 15): 1872; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+far TXMAN1_Test_r19 0025_TXMAN1-M999-r19_20261017-075822: Whole-frame sightings (margin >= 15): 6179; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+far TXMAN1_Test_r19 0026_TXMAN1-M999-r19_20261017-080054: Whole-frame sightings (margin >= 15): 1952; stream mismatches: 0 frames; base-stream reruns 0 IDENTICAL 
+ALL IDENTICAL

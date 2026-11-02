@@ -11,6 +11,7 @@ pinned to cores 0-3, 1280x800 gray frames, JPEG decode not included.
 - `patches/napa-01-early-slack.patch`: `napa_set_early_slack(det, 0..3)`. The default is 2, NAPA's
   built-in value.
 - `patches/napa-02-speed.patch`: the speed-ups below.
+- `patches/napa-03-streaming.patch`: streaming NAPA (`napa_stream_*`, identical results while the frame arrives): `../napa-stream`.
 
 `scripts/jetson/napa-src.sh DIR` copies the vendored source and applies `patches/napa-*.patch` in name
 order. Both `scripts/jetson/07-build-napa-detector.sh` (the library PhotonVision loads) and
