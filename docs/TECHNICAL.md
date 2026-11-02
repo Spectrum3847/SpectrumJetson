@@ -1670,7 +1670,11 @@ time and applies when a stream next starts. `tests/`: `urbtest.sh`-style runs, 4
 | **16**, 3 runs | 8.25 ms | **11.76 ms** | 1.18 cores (1.16-1.20) | 17,900 |
 | 8, 2 runs | 7.94 ms | 11.61 ms | 1.30 cores (1.19-1.40) | 20,000 |
 
-- **16 kept:** 1.2 ms lower latency at the result, every run, worst frame age 17 ms instead of
+- **2026-11-02: 4 is now the default** (`tests/latency-breakdown`). Hardware timestamp to
+  DQBUF: 8.51/9.48 -> 7.49/7.73 ms (p50/p99) with 1 camera, 8.31/9.33 -> 7.80/8.10 with 2, 0 drops,
+  about 2k IRQ/s per camera. It matters most for the stream decoder (tail 0.41 -> 0.11 ms).
+  1 won't stream (ENOMEM). See the latency breakdown section.
+- **16 kept (before 2026-11-02):** 1.2 ms lower latency at the result, every run, worst frame age 17 ms instead of
   18-21 ms, 122.2 fps, no USB errors, about 0.1 core more (within the stock runs' spread).
   PhotonVision's own CPU is unchanged; the extra is kernel time.
 - 8 gains only 0.15 ms more for more CPU and interrupts: the host controller doesn't interrupt
@@ -2903,6 +2907,64 @@ only 2.
   84 °C on that last round, so the yolo runs stopped there.
 - Expect pinning to matter only at 4 cameras with YOLO and a busy system, where threads compete for cores. Re-run
   `tests/pin-cameras/run.sh 60 3 30` then, and also with `SPECTRUM_PIN_FIFO`.
+
+## Latency breakdown vs VenomEdge; stream decoder (photonvision-103, 2026-11-02)
+
+The test is `tests/latency-breakdown`; the full tables are in its README. It joins per-frame
+kernel ftrace (USB URBs, DQBUF) with PhotonVision's `SPECTRUM_LATENCY_TRACE` CSV (off by default)
+on `CLOCK_MONOTONIC`.
+
+Setup: bench, no tags, clocks full, 1 or 2 Thriftiest Cams at 1280x800 and 122 fps, exposure
+5 ms, `urb_packets=4`.
+
+p50 from mid-exposure, 1 camera, GPU detector:
+
+| Stage | ms |
+|---|---|
+| Mid-exposure to first USB packet | ~4.5 (2.5 is half the exposure; 2.5 is the assumed camera delay) |
+| Frame over USB | 8.1 (paced by the sensor readout; bytes arrive evenly) |
+| DQBUF and cscore | 0.1 |
+| NVJPG decode | 2.64 |
+| Detect | 0.86 (NAPA 1.07) |
+| Pose | < 0.01 (no tags) |
+| NT | 0.05 |
+| **Total** | **16.54** (VenomEdge 9.45, their stock 16.25) |
+
+- **The stream:** YUV 4:2:2 MJPEG (not Y-only), DRI 80, so one restart interval per 8-row band.
+  About 54 KB per frame.
+- **Stream decoder** (`SPECTRUM_JPEG_DECODER=stream`, off by default; `detector/stream_decode.cc`):
+  - How it works:
+    - A watcher thread per camera mmaps cscore's V4L2 buffers through its own fd. It takes no
+      queue ownership and has no USB effect.
+    - It wipes a consumed buffer with 0xFF and finds the fill point.
+    - It decodes Y-only with a suspending libjpeg-turbo source while the frame arrives.
+    - PhotonVision matches cscore's copy by length plus byte samples, and falls back to a
+      normal decode otherwise.
+    - Every 64th frame is compared byte for byte against a whole-frame decode.
+  - Results (stream vs NVJPG, mid-exposure to pose, p50/p95/p99):
+    - **GPU, 1 camera: 13.89/14.35/15.93 vs 16.54/16.98/18.88.**
+    - GPU, 2 cameras: 14.26/15.00/17.34 vs 16.54/17.31/19.35.
+    - NAPA: 14.15 to 14.17 vs 16.60 to 16.78.
+  - Tail after the last byte: 0.11/0.19/0.20 ms.
+  - CPU: 38% of a core per camera (about 25% of the CPU for 4 cameras).
+  - 0 drops. Checks: 189 ok, 0 differ.
+  - Open issue: with 2 cameras, the cscore handoff p99 spikes to 1.3 to 2.9 ms.
+- **`urb_packets` 16 -> 4** (now the default):
+  - Hardware timestamp to DQBUF: 8.51/9.48 -> 7.49/7.73 ms with 1 camera, and 8.31/9.33 ->
+    7.80/8.10 with 2.
+  - 0 drops, about 2k IRQ/s per camera.
+  - End to end with NVJPG, the change is within noise (-0.15 ms p50). With the stream decoder,
+    the tail goes from 0.41 to 0.11 ms.
+  - 1 won't stream (ENOMEM). 2 gains at most about 0.2 ms for 3k IRQ/s per camera.
+- **Exposure** 0.5 ms instead of 5 ms saves 2.25 ms. The readout doesn't move relative to the
+  hardware timestamp.
+- **Ranked fixes:**
+  1. Stream decoder, -2.5 ms measured
+  2. Exposure, -2.25 ms
+  3. `urb_packets=4`, done
+  4. Measure the camera delay (accuracy)
+
+  With 1 and 2, the estimate is about 11.8 ms.
 
 ## Changes from the handoff
 

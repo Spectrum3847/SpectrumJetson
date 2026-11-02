@@ -54,6 +54,7 @@
 #include <jpeglib.h>
 #include "far_search.h"
 #include "nvjpg_decoder.h"
+#include "stream_decode.h"
 #include "wpi_compat.h"
 #include "absl/status/status.h"
 #include <opencv2/core/mat.hpp>
@@ -677,7 +678,7 @@ const Nvjpg *LoadNvjpg() {
   return api;
 }
 
-enum class JpegDecoder { kTurbo, kNvjpg };
+enum class JpegDecoder { kTurbo, kNvjpg, kStream };
 
 // Set when a check finds the hardware's output differs, or on a CUDA failure: from then on
 // libjpeg-turbo decodes everything until PhotonVision restarts.
@@ -711,7 +712,9 @@ JpegDecoder WantedJpegDecoder() {
       if (limit < 0) limit = -1;
     }
     nvjpg_camera_limit = limit;
-    mode = v.rfind("nvjpg", 0) == 0 ? JpegDecoder::kNvjpg : JpegDecoder::kTurbo;
+    mode = v.rfind("nvjpg", 0) == 0 ? JpegDecoder::kNvjpg
+           : v == "stream"          ? JpegDecoder::kStream
+                                    : JpegDecoder::kTurbo;
     if (v != logged) {
       logged = v;
       std::cout << "jpeg decoder mode: "
@@ -719,12 +722,14 @@ JpegDecoder WantedJpegDecoder() {
                         ? (limit >= 0 ? "nvjpg (hardware) for the first " + std::to_string(limit) +
                                             " cameras, libjpeg-turbo for the rest"
                                       : std::string("nvjpg (hardware)"))
-                        : std::string("libjpeg-turbo"))
+                        : mode == JpegDecoder::kStream
+                            ? std::string("stream (libjpeg-turbo while the frame arrives over USB)")
+                            : std::string("libjpeg-turbo"))
                 << (nvjpg_off ? " requested, but the hardware decoder is off (see above)" : "")
                 << std::endl;
     }
   }
-  return nvjpg_off ? JpegDecoder::kTurbo : mode;
+  return nvjpg_off && mode == JpegDecoder::kNvjpg ? JpegDecoder::kTurbo : mode;
 }
 
 // This camera thread's place in the order cameras first decoded, for nvjpg:N.
@@ -1192,6 +1197,13 @@ JNIEXPORT jint JNICALL Java_org_photonvision_jni_GpuDetectorJNI_decodeMjpegGray(
     }
   }
   int fallback = SNJ_OK;
+  // SPECTRUM_JPEG_DECODER=stream (tests/latency-breakdown): the frame was decoded while it
+  // arrived over USB (stream_decode.cc); otherwise decode it here with libjpeg-turbo.
+  if (WantedJpegDecoder() == JpegDecoder::kStream &&
+      spectrum_stream::DecodeGray(data, size, mat->data, mat->cols, mat->rows, mat->step) == 0) {
+    CountJpeg(JpegDecoder::kTurbo, SNJ_OK, t0, false, age_ms, size);
+    return 0;
+  }
   if (WantedJpegDecoder() == JpegDecoder::kNvjpg && HardwareForThisCamera()) {
     {
       std::shared_lock<CudaCaptureLock> cuda(cuda_capture_lock);
