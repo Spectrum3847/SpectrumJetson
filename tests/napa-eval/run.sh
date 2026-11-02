@@ -23,16 +23,26 @@ declare -A OPTS=(
   [napa_h3]="--backend napa --min-tag 16 --hamming 3"   # NAPA's recommended hamming (3, connected errors)
   [napafar]="--backend napafar --base-min 32 --far-min 16"    # detector/napa far search: 32 full frame, 16 crops/sweeps
   [napafar12]="--backend napafar --base-min 32 --far-min 12"  # same with 12 in crops/sweeps
+  # Early-decode slack sweep (patches/napa-01-early-slack.patch; tests/napa-profile): 2 is NAPA's built-in value
+  [napa16_s0]="--backend napa --min-tag 16 --hamming 1 --early-slack 0"
+  [napa16_s1]="--backend napa --min-tag 16 --hamming 1 --early-slack 1"
+  [napa16_s2]="--backend napa --min-tag 16 --hamming 1 --early-slack 2"
+  [napa16_s3]="--backend napa --min-tag 16 --hamming 1 --early-slack 3"
+  [napafar_s0]="--backend napafar --base-min 32 --far-min 16 --early-slack 0"
+  [napafar_s1]="--backend napafar --base-min 32 --far-min 16 --early-slack 1"
+  [napafar_s2]="--backend napafar --base-min 32 --far-min 16 --early-slack 2"
+  [napafar_s3]="--backend napafar --base-min 32 --far-min 16 --early-slack 3"
   [at3_d2]="--backend at3 --decimate 2"                 # PhotonVision CPU settings, decimate 2
   [at3_d1]="--backend at3 --decimate 1"                 # PhotonVision's default decimate 1
 )
-ORDER=(napa napa22 napa16 napa_h3 at3_d2 at3_d1)  # napafar, napafar12: name them
+ORDER=(napa napa22 napa16 napa_h3 at3_d2 at3_d1)  # napafar, napafar12, napa16_s0..3, napafar_s0..3: name them
 (($#)) && ORDER=("$@")
 tj() { timeout 5 tegrastats --interval 1000 2>/dev/null | head -1 | grep -o 'tj@[0-9.]*' | cut -d@ -f2; }
 wait_turn() {
   local t
   for _ in $(seq 720); do
-    if ! pgrep -x detector-replay >/dev/null && ! pgrep -f graph_bench >/dev/null && ! pgrep -x napa_replay >/dev/null; then
+    if ! pgrep -x detector-replay >/dev/null && ! pgrep -f graph_bench >/dev/null && ! pgrep -x napa_replay >/dev/null &&
+      ! pgrep -f photonvision.jar >/dev/null; then
       t=$(tj)
       [[ -z $t ]] && return 0
       awk -v t="$t" 'BEGIN{exit !(t < 85)}' && return 0

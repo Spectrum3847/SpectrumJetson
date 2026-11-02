@@ -10,6 +10,7 @@
 //   void destroy(long handle)
 //   void setParams(long handle, int minTagPx, int maxHamming, boolean far, int baseMinTagPx,
 //                  int farMinTagPx, double sweepsPerSecond)
+//   void setEarlySlack(long handle, int slack)      early-decode slack bits 0-3 (default 2, NAPA's)
 //   AprilTagDetection[] detect(long handle, long dataAddr, int width, int height, int step)
 //   double[] stats(long handle)  frames, base ms, crops, crop ms, sweeps, sweep ms, far tags
 #include <jni.h>
@@ -93,6 +94,15 @@ JNIEXPORT void JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setParams(JNIEn
   c.base_min_tag_px = std::clamp<int>(baseMinTagPx, 8, 30000);
   c.far_min_tag_px = std::clamp<int>(farMinTagPx, 8, 30000);
   c.sweeps_per_s = sweepsPerSecond;
+  d->SetConfig(c);
+}
+
+JNIEXPORT void JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setEarlySlack(JNIEnv *, jclass, jlong h,
+                                                                               jint slack) {
+  auto *d = Handle(h);
+  if (!d) return;
+  auto c = d->GetConfig();
+  c.early_slack = std::clamp<int>(slack, 0, 3);
   d->SetConfig(c);
 }
 

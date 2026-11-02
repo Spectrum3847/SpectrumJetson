@@ -1,0 +1,230 @@
+--- a/third_party/napa/napa_core.c
++++ b/third_party/napa/napa_core.c
++++ c/napa_core.c	2026-11-01 17:33:43.937359257 -0600
+@@ -575,19 +575,37 @@
+ 
+ /* Debug-only stage timers (compile with -DNAPA_PROFILE): cumulative nanoseconds per stage. */
+ #ifdef NAPA_PROFILE
+-enum { PROF_RAKE, PROF_THRESHOLD, PROF_BLOBS, PROF_QUAD, PROF_FIT1, PROF_DECODE1, PROF_REFINE, PROF_DECODE2, PROF_N };
+-static uint64_t napa_prof[PROF_N + 1];
++/* SpectrumJetson (tests/napa-profile/napa-profile.patch): finer stages, per-level time and candidate
++ * counts, thread-local so parallel replays work. napa_profile_read(out, max): PROF_N + 1 stage totals,
++ * then 8 per-level totals (ns), then 8 x CNT_N counts (level-major); all reset. */
++enum { PROF_RAKE, PROF_THRESHOLD, PROF_BLOBS, PROF_QUAD, PROF_FIT1, PROF_DECODE1, PROF_REFINE, PROF_DECODE2,
++       PROF_FLOORS, PROF_RUNS, PROF_UNION, PROF_RESOLVE, PROF_PROBE, PROF_REPAIR, PROF_N };
++enum { CNT_RUNS, CNT_ROOTS, CNT_CANDS, CNT_COVERED, CNT_QUAD, CNT_PROBE, CNT_FIT1, CNT_FAILSKIP, CNT_EARLY,
++       CNT_RESCUE, CNT_REFINE, CNT_FINAL, CNT_TAGS, CNT_N };
++static __thread uint64_t napa_prof[PROF_N + 1];
++static __thread uint64_t napa_prof_lvl[8];
++static __thread uint64_t napa_cnt[8][CNT_N];
++static __thread int napa_lvl;
++#define CNT(k) (napa_cnt[napa_lvl][k]++)
+ static uint64_t prof_now(void) {
+     struct timespec ts;
+     clock_gettime(CLOCK_MONOTONIC, &ts);
+     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+ }
+ NAPA_API int napa_profile_read(uint64_t *out, int max) {
+-    int n = PROF_N + 1 < max ? PROF_N + 1 : max;
+-    memcpy(out, napa_prof, sizeof(uint64_t) * (size_t)n);
++    uint64_t all[PROF_N + 1 + 8 + 8 * CNT_N];
++    memcpy(all, napa_prof, sizeof napa_prof);
++    memcpy(all + PROF_N + 1, napa_prof_lvl, sizeof napa_prof_lvl);
++    memcpy(all + PROF_N + 9, napa_cnt, sizeof napa_cnt);
++    int n = (int)(sizeof all / sizeof all[0]) < max ? (int)(sizeof all / sizeof all[0]) : max;
++    memcpy(out, all, sizeof(uint64_t) * (size_t)n);
+     memset(napa_prof, 0, sizeof napa_prof);
++    memset(napa_prof_lvl, 0, sizeof napa_prof_lvl);
++    memset(napa_cnt, 0, sizeof napa_cnt);
+     return n;
+ }
++#define PROF_T(var) uint64_t var = prof_now()
++#define PROF_ADD(stage, var) (napa_prof[stage] += prof_now() - (var))
+ #define PROF_START uint64_t prof_t_ = prof_now(), prof_c_ = 0
+ #define PROF_MARK(stage)                                                                                     \
+     do {                                                                                                     \
+@@ -598,6 +616,9 @@
+ #else
+ #define PROF_START ((void)0)
+ #define PROF_MARK(stage) ((void)0)
++#define PROF_T(var) ((void)0)
++#define PROF_ADD(stage, var) ((void)0)
++#define CNT(k) ((void)0)
+ #endif
+ 
+ #if defined(__GNUC__) || defined(__clang__)
+@@ -886,6 +907,7 @@
+         int y0 = ty * TILE;
+         int y1 = y0 + TILE < lh ? y0 + TILE : lh;
+         if (!any) continue; /* no contrast anywhere in this band: no dark samples, no runs */
++        PROF_T(prof_r_);
+         expand4(trow, tt, tw);
+         memset(trow + lw, 0, (size_t)(4 * tw + 64 - lw)); /* nothing past the row is dark */
+         uint64_t *bits = det->row_bits;
+@@ -894,6 +916,8 @@
+             int start = n;
+             n = extract_runs(bits, lw, y, R, n);
+             for (int i = start; i < n; i++) P[i] = i;
++            PROF_ADD(PROF_RUNS, prof_r_);
++            PROF_T(prof_u_);
+             if (prev_y == y - 1) {
+                 int a = prev_start, b = start;
+                 while (a < prev_end && b < n) {
+@@ -918,6 +942,10 @@
+                 }
+             }
+             prev_y = y, prev_start = start, prev_end = n;
++            PROF_ADD(PROF_UNION, prof_u_);
++#ifdef NAPA_PROFILE
++            prof_r_ = prof_now();
++#endif
+         }
+     }
+     return n;
+@@ -1733,6 +1761,11 @@
+         size_t tiles = (size_t)((lw + TILE - 1) / TILE) * ((lh + TILE - 1) / TILE);
+         if (ensure_buffers(det, pixels, tiles, (size_t)lw, pixels / 2 + (size_t)lh + 1) != 0) return -2;
+ 
++#ifdef NAPA_PROFILE
++        napa_lvl = 0;
++        for (int s_ = base; s_ < s && napa_lvl < 7; s_ *= 2) napa_lvl++;
++        uint64_t prof_lvl0_ = prof_now();
++#endif
+         PROF_START;
+         /* The rake: one point sample per stride, row by row. A coarser level is every second
+          * sample of the level before (s doubles), so it comes from the small, cached level
+@@ -1771,8 +1804,16 @@
+             }
+             if (contrast < 0) return -2;
+         }
++        PROF_MARK(PROF_FLOORS);
++#ifdef NAPA_PROFILE
++        uint64_t prof_ru0_ = napa_prof[PROF_RUNS] + napa_prof[PROF_UNION];
++#endif
+         int nruns = threshold_level(det, lw, lh, s / floor_stride);
+         PROF_MARK(PROF_THRESHOLD);
++#ifdef NAPA_PROFILE
++        napa_prof[PROF_THRESHOLD] -= napa_prof[PROF_RUNS] + napa_prof[PROF_UNION] - prof_ru0_;
++        napa_cnt[napa_lvl][CNT_RUNS] += (uint64_t)nruns;
++#endif
+ 
+         /* Resolve runs into packed components, preserving root raster order. */
+         napa_run *R = det->runs;
+@@ -1797,6 +1838,10 @@
+             }
+             P[i] = -r - 1;
+         }
++        PROF_MARK(PROF_RESOLVE);
++#ifdef NAPA_PROFILE
++        napa_cnt[napa_lvl][CNT_ROOTS] += (uint64_t)nroots;
++#endif
+         /* Keep tag-sized, tag-shaped blobs as candidates, in raster order of their first sample. A tag
+          * tilted by t looks about 1 / cos(t) times longer than it is wide, more with perspective: an 8:1
+          * box admits tilts to about 80 degrees. Clean tags stay readable past 75 degrees whenever their
+@@ -1841,6 +1886,9 @@
+         }
+         for (int ci = 0; ci < ncand; ci++) comp_flush_row(&det->cands[ci]);
+         PROF_MARK(PROF_BLOBS);
++#ifdef NAPA_PROFILE
++        napa_cnt[napa_lvl][CNT_CANDS] += (uint64_t)ncand;
++#endif
+ 
+         for (int ci = 0; ci < ncand; ci++) {
+             component comp = det->cands[ci];
+@@ -1850,6 +1898,7 @@
+             /* Levels run fine to coarse; skip a blob whose centre a finer level already decoded. */
+             double ccx = 0.5 * (comp.minx + comp.maxx) * s, ccy = 0.5 * (comp.miny + comp.maxy) * s;
+             if (covered(out, found < max_out ? found : max_out, ccx, ccy, 0.3 * big * s + 2.0)) {
++                CNT(CNT_COVERED);
+                 TRACE(5);
+                 continue;
+             }
+@@ -1908,6 +1957,7 @@
+                 continue;
+             }
+             PROF_MARK(PROF_QUAD);
++            CNT(CNT_QUAD);
+             vec2 rough[4], fine[4], finer[4];
+             for (int k = 0; k < 4; k++) {
+                 rough[k].x = pick[k][0] * (double)s;
+@@ -1939,11 +1989,13 @@
+                     good_sides += contrast_sum >= params->min_contrast * 0.25;
+                 }
+                 if (good_sides < 3) {
+-                    PROF_MARK(PROF_FIT1);
++                    PROF_MARK(PROF_PROBE);
+                     TRACE(7);
+                     continue;
+                 }
++                PROF_MARK(PROF_PROBE);
+             }
++            CNT(CNT_PROBE);
+             double reach = 0.5 * ((1.5 * s + 1.0) + (0.5 * s + 1.0));
+             double edge_w = 0;
+             if (!fit_sides(&view, rough, fine, 1.5 * s + 1.0, 0.5 * s + 1.0, params->min_contrast, 1, 6, &edge_w, NULL, cells)) {
+@@ -1955,10 +2007,12 @@
+              * slack, and spend the refinement passes only on quads that are tags. A random quad
+              * passes this only about 1.5% of the time. */
+             PROF_MARK(PROF_FIT1);
++            CNT(CNT_FIT1);
+             /* Levels overlap, so a blob that failed to decode at a finer level often comes back at this one.
+              * The early decode depends only on the fitted quad: if it's within 0.3 px of a failed one, it
+              * fails again. (The rough quads can match while the fits differ: the window grows with s.) */
+             if (failed_before(det, fine, s, 0.3)) {
++                CNT(CNT_FAILSKIP);
+                 PROF_MARK(PROF_DECODE1);
+                 TRACE(8);
+                 continue;
+@@ -1990,6 +2044,7 @@
+                         memcpy(fine, finer, sizeof fine);
+                         reach = r;
+                         rescued = 1;
++                        CNT(CNT_RESCUE);
+                     }
+                 }
+                 if (!rescued) {
+@@ -2000,6 +2055,7 @@
+                 }
+             }
+             PROF_MARK(PROF_DECODE1);
++            CNT(CNT_EARLY);
+             double cell = 0;
+             for (int k = 0; k < 4; k++) {
+                 double ex = fine[(k + 1) & 3].x - fine[k].x, ey = fine[(k + 1) & 3].y - fine[k].y;
+@@ -2030,6 +2086,7 @@
+                 continue;
+             }
+             PROF_MARK(PROF_REFINE);
++            CNT(CNT_REFINE);
+             napa_detection d;
+             double side_level[4];
+             edge_levels final_lv = {255, 0};
+@@ -2039,6 +2096,7 @@
+                 TRACE(10);
+                 continue;
+             }
++            CNT(CNT_FINAL);
+             /* A side whose border cells read white was fitted one cell out, on the quiet zone's outer
+              * edge (the payload still decodes through error correction). Move it in by a cell, refit,
+              * and keep the result if it decodes the same tag with a darker border. */
+@@ -2087,15 +2145,20 @@
+                     if (decode_quad(det, &view, grown, params, 0, &d3, NULL, NULL) && d3.id == d.id) d = d3;
+                 }
+             }
++            PROF_MARK(PROF_REPAIR);
+             if (already_found(out, found < max_out ? found : max_out, &d)) {
+                 TRACE(11);
+                 continue;
+             }
+             TRACE(12);
++            CNT(CNT_TAGS);
+             if (found < max_out) out[found] = d;
+             found++;
+         }
+         PROF_MARK(PROF_BLOBS);
++#ifdef NAPA_PROFILE
++        napa_prof_lvl[napa_lvl] += prof_now() - prof_lvl0_;
++#endif
+         if (last) break;
+     }
+     return found < max_out ? found : max_out;

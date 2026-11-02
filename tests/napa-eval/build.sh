@@ -16,7 +16,9 @@ if [[ ! -f $AT/apriltag.c ]]; then
   [[ -d apriltag ]] || timeout 300 git clone -q https://github.com/AprilRobotics/apriltag apriltag
   AT=$WORK/apriltag
 fi
-N=$REPO/third_party/napa
+# Vendored NAPA plus patches/napa-*.patch (early-decode slack setting, ...): scripts/jetson/napa-src.sh.
+N=$WORK/napa-src
+"$REPO/scripts/jetson/napa-src.sh" "$N"
 # Tile counters for --tile-stats: per pyramid level, tiles tested and tiles not flat (threshold != 0).
 sed -e 's|^/\* -* threshold \*/|__thread long napa_stat_tot[8], napa_stat_act[8];\nstatic __thread int napa_stat_lvl;\n&|' \
     -e 's/^static int threshold_level(napa_detector \*det, int lw, int lh, int factor) {/&\n    int napa_lvl_ = napa_stat_lvl++ \& 7;/' \

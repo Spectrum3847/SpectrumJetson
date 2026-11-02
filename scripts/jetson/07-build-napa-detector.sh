@@ -10,7 +10,9 @@
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 OUT=${1:-$HOME/build/napa-detector}
-N=$REPO/third_party/napa
+# NAPA as vendored plus our patches (patches/napa-*.patch): scripts/jetson/napa-src.sh.
+N=$OUT/napa-src
+"$REPO/scripts/jetson/napa-src.sh" "$N"
 D=$REPO/detector/napa
 mkdir -p "$OUT"
 JAVA_HOME=${JAVA_HOME:-$(ls -d /usr/lib/jvm/java-25-openjdk-* /usr/lib/jvm/java-21-openjdk-* /usr/lib/jvm/java-17-openjdk-* $HOME/wpilib/2027/jdk 2>/dev/null | head -1 || true)}

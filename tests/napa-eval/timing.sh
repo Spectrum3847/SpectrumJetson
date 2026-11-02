@@ -3,7 +3,8 @@
 # has 4 Cortex-A76): every 4th frame of TXMAN1 Q17 (session 2) and Q24 (all), 1280x800.
 #   tests/napa-eval/timing.sh [DATA] [OUT_DIR] [CASE...]     then: python3 tests/napa-eval/timing.py OUT_DIR
 # Clocks should be at full (sudo spectrum-clocks mode full; mode auto after). Waits for no other replay and
-# tj < 85 C before each case; 1 h deadline (prints TIMEOUT). Cases:
+# tj < 85 C before each case; 1 h deadline (prints TIMEOUT). NAPA_EXTRA: more napa_replay options for every
+# case (e.g. "--early-slack 3"). Cases:
 #   <det>_t1   one frame at a time, one thread          (latency, one camera)
 #   at3_*_t4   one frame at a time, AprilTag's 4 threads (latency, one camera, 4 cores)
 #   <det>_p4   4 frames at once, one thread each        (4 cameras sharing 4 cores: latency and throughput)
@@ -47,7 +48,7 @@ for c in "${ORDER[@]}"; do
   : >"$OUT/$c.csv"
   for s in "${SESSIONS[@]}"; do
     # shellcheck disable=SC2086
-    taskset -c 0-3 timeout 900 "$WORK/napa_replay" "$s" --every 4 ${CASES[$c]} --times "$OUT/$c.tmp" >/dev/null ||
+    taskset -c 0-3 timeout 900 "$WORK/napa_replay" "$s" --every 4 ${CASES[$c]} ${NAPA_EXTRA:-} --times "$OUT/$c.tmp" >/dev/null ||
       echo "TIMEOUT/failure: $c $s" >&2
     if [[ -s $OUT/$c.csv ]]; then tail -n +2 "$OUT/$c.tmp" >>"$OUT/$c.csv"; else cat "$OUT/$c.tmp" >"$OUT/$c.csv"; fi
   done

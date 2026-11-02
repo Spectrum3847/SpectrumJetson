@@ -62,6 +62,9 @@ struct Config {
   double sweeps_per_s = 60;
   double fixed_sweep_ms = 0;
   float min_margin = 0;  // drop detections below this decision margin (0: keep all)
+  // Bits of slack of NAPA's early decode (on the first, unrefined fit; patches/napa-01-early-slack.patch).
+  // 2 is NAPA's built-in value; tests/napa-profile/README.md has the sweep.
+  int early_slack = 2;
 };
 
 struct Counters {

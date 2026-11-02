@@ -1,0 +1,141 @@
+--- a/third_party/napa/napa_core.c
++++ b/third_party/napa/napa_core.c
+@@ -150,6 +150,10 @@
+     size_t tile_capacity;
+     failed_quad *failed; /* this frame's failed candidates, for skipping the same blob at a coarser level */
+     size_t failed_n, failed_capacity;
++    const uint8_t *lp; /* SpectrumJetson: the current level's samples (det->level, or the frame at stride 1) */
++    size_t ls;         /* and its row stride */
++    uint8_t *tail_row; /* a padded copy of an aliased level's last row, for the SIMD over-read */
++    size_t tail_capacity;
+     int early_slack; /* SpectrumJetson: bits of slack for the early decode (napa_set_early_slack), default 2 */
+ };
+ 
+@@ -417,6 +421,7 @@
+         return;
+     }
+     free(det->level);
++    free(det->tail_row);
+     free(det->failed);
+     free_family(&det->fam);
+     free(det->tile_min);
+@@ -727,6 +732,17 @@
+             __m128i ge = _mm_cmpeq_epi8(_mm_max_epu8(a, b), a); /* a >= b, unsigned */
+             word |= (uint64_t)(uint16_t)~_mm_movemask_epi8(ge) << (16 * k);
+         }
++#elif defined(__aarch64__) && defined(__ARM_NEON) && !defined(NAPA_NO_SIMD)
++        /* SpectrumJetson (patches/napa-02-speed.patch): 64 samples to one 64-bit mask with three pairwise-add
++         * rounds over all four vectors, instead of a movemask emulation per 16. Same bits. */
++        static const uint8_t weights[16] = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
++        const uint8x16_t wv = vld1q_u8(weights);
++        uint8x16_t m0 = vandq_u8(vcltq_u8(vld1q_u8(r), vld1q_u8(t)), wv);
++        uint8x16_t m1 = vandq_u8(vcltq_u8(vld1q_u8(r + 16), vld1q_u8(t + 16)), wv);
++        uint8x16_t m2 = vandq_u8(vcltq_u8(vld1q_u8(r + 32), vld1q_u8(t + 32)), wv);
++        uint8x16_t m3 = vandq_u8(vcltq_u8(vld1q_u8(r + 48), vld1q_u8(t + 48)), wv);
++        uint8x16_t s4 = vpaddq_u8(vpaddq_u8(m0, m1), vpaddq_u8(m2, m3));
++        word = vgetq_lane_u64(vreinterpretq_u64_u8(vpaddq_u8(s4, s4)), 0);
+ #elif defined(__ARM_NEON) && !defined(NAPA_NO_SIMD)
+         static const uint8_t weights[16] = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
+         const uint8x16_t wv = vld1q_u8(weights);
+@@ -806,7 +822,8 @@
+ /* Threshold the level and label its dark samples as runs joined by union-find (8-connected:
+  * runs in adjacent rows touch if they overlap within one sample). Returns the run count. */
+ static int threshold_level(napa_detector *det, int lw, int lh, int factor) {
+-    const uint8_t *L = det->level;
++    const uint8_t *L = det->lp;
++    const size_t ls = det->ls;
+     napa_run *R = det->runs;
+     int32_t *P = det->parent;
+     int n = 0, prev_y = -2, prev_start = 0, prev_end = 0;
+@@ -819,10 +836,10 @@
+     for (int ty = 0; ty < th; ty++) {
+         int y0 = ty * TILE;
+         int y1 = y0 + TILE < lh ? y0 + TILE : lh;
+-        memcpy(vmin, L + (size_t)y0 * lw, (size_t)lw);
+-        memcpy(vmax, L + (size_t)y0 * lw, (size_t)lw);
++        memcpy(vmin, L + (size_t)y0 * ls, (size_t)lw);
++        memcpy(vmax, L + (size_t)y0 * ls, (size_t)lw);
+         for (int y = y0 + 1; y < y1; y++) {
+-            const uint8_t *row = L + (size_t)y * lw;
++            const uint8_t *row = L + (size_t)y * ls;
+             for (int x = 0; x < lw; x++) {
+                 uint8_t v = row[x];
+                 vmin[x] = v < vmin[x] ? v : vmin[x];
+@@ -890,7 +907,12 @@
+         memset(trow + lw, 0, (size_t)(4 * tw + 64 - lw)); /* nothing past the row is dark */
+         uint64_t *bits = det->row_bits;
+         for (int y = y0; y < y1; y++) {
+-            dark_bits(L + (size_t)y * lw, trow, lw, bits);
++            const uint8_t *lrow = L + (size_t)y * ls;
++            if (y == lh - 1 && L != det->level) { /* the frame's last row: no readable bytes past it */
++                memcpy(det->tail_row, lrow, (size_t)lw);
++                lrow = det->tail_row;
++            }
++            dark_bits(lrow, trow, lw, bits);
+             int start = n;
+             n = extract_runs(bits, lw, y, R, n);
+             for (int i = start; i < n; i++) P[i] = i;
+@@ -1619,7 +1641,7 @@
+ 
+ /* Each region's floor into det->floors (from pairs of samples on every 8th row), at most the frame's,
+  * which is returned; a region too small to measure takes the frame's. Returns -1 if out of memory. */
+-static int contrast_floors(napa_detector *det, const uint8_t *L, int lw, int lh, int min_contrast, double sigmas, int cap) {
++static int contrast_floors(napa_detector *det, const uint8_t *L, size_t ls, int lw, int lh, int min_contrast, double sigmas, int cap) {
+     int cols = (lw + NAPA_REGION - 1) / NAPA_REGION, rows = (lh + NAPA_REGION - 1) / NAPA_REGION;
+     if ((size_t)cols * rows > det->floor_alloc) {
+         uint8_t *p = (uint8_t *)realloc(det->floors, (size_t)cols * rows);
+@@ -1640,7 +1662,7 @@
+             int pairs = (x1 - x0) / 2;
+             for (int y = ry * NAPA_REGION; y < y1; y += 8) {
+                 uint8_t d[NAPA_REGION / 2];
+-                pair_diffs(L + (size_t)y * lw + x0, pairs, d);
++                pair_diffs(L + (size_t)y * ls + x0, pairs, d);
+                 for (int k = 0; k < pairs; k++) h4[k & 3][d[k]]++;
+             }
+             for (int k = 0; k < 64; k++) {
+@@ -1737,13 +1759,25 @@
+         /* The rake: one point sample per stride, row by row. A coarser level is every second
+          * sample of the level before (s doubles), so it comes from the small, cached level
+          * buffer, in place (each output sample sits at or before its source). */
+-        if (s == base) {
++        int aliased = s == base && s == 1 && !view.invert; /* stride one: read the frame itself, no copy */
++        if (aliased) {
++            if ((size_t)lw + 64 > det->tail_capacity) {
++                uint8_t *p = (uint8_t *)realloc(det->tail_row, (size_t)lw + 64);
++                if (p == NULL) return -2;
++                memset(p, 0, (size_t)lw + 64);
++                det->tail_row = p, det->tail_capacity = (size_t)lw + 64;
++            }
++        } else if (s == base) {
+             for (int y = 0; y < lh; y++)
+                 gather_row(det->level + (size_t)y * lw, img + (size_t)y * s * stride, lw, s, det->ssse3);
+             if (view.invert) invert_bytes(det->level, pixels);
++        } else if (det->lp != det->level) {
++            for (int y = 0; y < lh; y++) gather2(det->level + (size_t)y * lw, img + (size_t)(2 * y) * stride, lw);
+         } else {
+             for (int y = 0; y < lh; y++) gather2(det->level + (size_t)y * lw, det->level + (size_t)(2 * y) * prev_lw, lw);
+         }
++        det->lp = aliased ? img : det->level;
++        det->ls = aliased ? (size_t)stride : (size_t)lw;
+         prev_lw = lw;
+         PROF_MARK(PROF_RAKE);
+         if (s == base || (base == 1 && s == 2 && contrast > NAPA_NOISY_FLOOR)) {
+@@ -1753,7 +1787,7 @@
+             floor_stride = s;
+             double sigmas = s == 1 && !last ? 7.0 : NAPA_FLOOR_SIGMAS;
+             int cap = s == 1 && !last ? 255 : NAPA_FLOOR_CAP;
+-            contrast = contrast_floors(det, det->level, lw, lh, params->min_contrast, sigmas, cap);
++            contrast = contrast_floors(det, det->lp, det->ls, lw, lh, params->min_contrast, sigmas, cap);
+             /* A noisy frame: rake again, averaging each sample's block, and re-measure the noise. */
+             if (contrast > NAPA_NOISY_FLOOR && s > 1 && s <= 16) {
+                 if ((size_t)width > det->box_capacity) {
+@@ -1767,7 +1801,8 @@
+                 /* Stride-two 3x3 means share one column: their difference measures sqrt(2/3)
+                  * times their noise sigma. Disjoint averaging blocks need no correction. */
+                 double sigmas = base == 1 && s == 2 ? NAPA_BOX_SIGMAS * sqrt(1.5) : NAPA_BOX_SIGMAS;
+-                contrast = contrast_floors(det, det->level, lw, lh, params->min_contrast, sigmas, NAPA_FLOOR_CAP);
++                det->lp = det->level, det->ls = (size_t)lw; /* box_rake wrote the level */
++                contrast = contrast_floors(det, det->lp, det->ls, lw, lh, params->min_contrast, sigmas, NAPA_FLOOR_CAP);
+             }
+             if (contrast < 0) return -2;
+         }

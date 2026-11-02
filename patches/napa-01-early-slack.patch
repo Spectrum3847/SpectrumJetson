@@ -1,0 +1,62 @@
+--- a/third_party/napa/napa_core.c
++++ b/third_party/napa/napa_core.c
+@@ -150,6 +150,7 @@
+     size_t tile_capacity;
+     failed_quad *failed; /* this frame's failed candidates, for skipping the same blob at a coarser level */
+     size_t failed_n, failed_capacity;
++    int early_slack; /* SpectrumJetson: bits of slack for the early decode (napa_set_early_slack), default 2 */
+ };
+ 
+ typedef struct {
+@@ -385,11 +386,20 @@
+ 
+ napa_detector *napa_create(void) { return napa_create_family("tag36h11"); }
+ 
++/* SpectrumJetson: the early decode's slack (bits looser than the final decode, on border cells and the
++ * Hamming limit). 2 is NAPA's built-in value. Returns 0, or -1 for a NULL handle or slack outside 0-3. */
++int napa_set_early_slack(napa_detector *det, int slack) {
++    if (det == NULL || slack < 0 || slack > 3) return -1;
++    det->early_slack = slack;
++    return 0;
++}
++
+ napa_detector *napa_create_family(const char *family) {
+     const napa_family *f = find_family(family);
+     if (f == NULL) return NULL;
+     napa_detector *det = (napa_detector *)calloc(1, sizeof(napa_detector));
+     if (det != NULL) {
++        det->early_slack = 2;
+         if (load_family(&det->fam, f) != 0) {
+             napa_destroy(det);
+             return NULL;
+@@ -1957,7 +1967,7 @@
+             napa_detection early;
+             edge_levels lv = {255, 0};
+             memcpy(probe, fine, sizeof probe);
+-            if (!decode_quad(det, &view, probe, params, 2, &early, NULL, &lv)) {
++            if (!decode_quad(det, &view, probe, params, det->early_slack, &early, NULL, &lv)) {
+                 /* The blob can include the white quiet zone when that margin is darker than the
+                  * background around it (a grey card on a bright wall): then this quad is the margin's
+                  * outline and the black square is its inner 8/10. Refit there and try once more. */
+@@ -1976,7 +1986,7 @@
+                                      min_border(&det->fam, params->min_border_cells) - 6) &&
+                     fit_sides(&view, inner, finer, r, r, params->min_contrast, 0, 8, &edge_w, NULL, cells)) {
+                     memcpy(probe, finer, sizeof probe);
+-                    if (decode_quad(det, &view, probe, params, 2, &early, NULL, &lv)) {
++                    if (decode_quad(det, &view, probe, params, det->early_slack, &early, NULL, &lv)) {
+                         memcpy(fine, finer, sizeof fine);
+                         reach = r;
+                         rescued = 1;
+diff -u a/napa_core.h b/napa_core.h
+--- a/third_party/napa/napa_core.h
++++ b/third_party/napa/napa_core.h
+@@ -60,6 +60,9 @@
+ /* Code `id` of a family, bits as napa_family_layout describes, a set bit for a white cell. 0 or -1. */
+ NAPA_API int napa_family_code(const char *family, int id, uint64_t *code);
+ NAPA_API void napa_destroy(napa_detector *det);
++/* SpectrumJetson (patches/napa-01-early-slack.patch): the early decode's slack in bits, 0-3 (default 2,
++ * NAPA's built-in value). 0 or -1 if det is NULL or slack is out of range. */
++NAPA_API int napa_set_early_slack(napa_detector *det, int slack);
+ /* Detect the detector's family of tags in an 8-bit grayscale image. Returns the number of detections written
+  * (at most max_out), -1 on invalid input or parameters (see napa_params for ranges), or -2 if
+  * allocation fails. A detector handle is not thread-safe; use one per thread or camera stream. */

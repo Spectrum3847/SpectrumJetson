@@ -5,6 +5,10 @@
 //               [--hamming N] [--contrast N] [--border N] [--decimate D] [--nthreads N] [--parallel P]
 //               [--every N] [--max-frames N] [--tile-stats]
 //               [--base-min N] [--far-min N] [--bands N] [--sweeps S] [--fixed-sweep-ms MS]
+//               [--early-slack N] [--profile P.csv]
+// --early-slack N: NAPA's early-decode slack (0-3, default 2: NAPA's built-in value; napa and napafar).
+// --profile P.csv: (napa_replay_prof, built by tests/napa-profile/build.sh with -DNAPA_PROFILE) one row per
+//   frame of NAPA's stage times (ns), per-level times and per-level candidate counts.
 // --backend napafar: detector/napa/napa_far.cc with its far search on (base pass --base-min 32 every frame,
 //   crops and sweep bands at --far-min 16), one detector per camera fed that camera's frames in order with
 //   their recording times; the time guard uses --fixed-sweep-ms (0.5) so runs repeat. Rows found by crops
@@ -48,6 +52,9 @@ extern "C" {
 #ifdef NAPA_STATS
 extern __thread long napa_stat_tot[8], napa_stat_act[8];
 #endif
+#ifdef NAPA_PROFILE
+int napa_profile_read(uint64_t *out, int max);
+#endif
 }
 
 namespace fs = std::filesystem;
@@ -72,6 +79,7 @@ struct Opts {
   // --backend napafar: detector/napa/napa_far (what PhotonVision's NAPA backend runs), far search on.
   int base_min = 32, far_min = 16, bands = 4;
   double sweeps = 60, fixed_sweep_ms = 0.5;
+  int early_slack = 2;
 };
 
 struct Worker {
@@ -84,6 +92,7 @@ struct Worker {
     if (o.backend == "napafar") {
     } else if (o.backend == "napa") {
       napa = napa_create();
+      napa_set_early_slack(napa, o.early_slack);
     } else {
       td = apriltag_detector_create();
       tf = tag36h11_create();
@@ -112,6 +121,7 @@ struct Worker {
         c.max_hamming = o.hamming, c.min_contrast = o.contrast, c.min_border_cells = o.border;
         c.far = true, c.base_min_tag_px = o.base_min, c.far_min_tag_px = o.far_min, c.sweep_bands = o.bands;
         c.sweeps_per_s = o.sweeps, c.fixed_sweep_ms = o.fixed_sweep_ms;
+        c.early_slack = o.early_slack;
         d->SetConfig(c);
       }
       for (const auto &t : d->Detect(g.data(), w, h, w, us)) {
@@ -187,7 +197,7 @@ int main(int argc, char **argv) {
   }
   const fs::path session = fs::path(argv[1]).lexically_normal();
   Opts o;
-  std::string out_path, times_path;
+  std::string out_path, times_path, prof_path;
   int parallel = 1, every = 1;
   long max_frames = -1;
   for (int i = 2; i < argc; ++i) {
@@ -211,6 +221,8 @@ int main(int argc, char **argv) {
     else if (a == "--bands") o.bands = std::atoi(v), ++i;
     else if (a == "--sweeps") o.sweeps = std::atof(v), ++i;
     else if (a == "--fixed-sweep-ms") o.fixed_sweep_ms = std::atof(v), ++i;
+    else if (a == "--early-slack") o.early_slack = std::atoi(v), ++i;
+    else if (a == "--profile") prof_path = v, ++i;
     else {
       std::cerr << "unknown option " << a << "\n";
       return 2;
@@ -246,6 +258,24 @@ int main(int argc, char **argv) {
     times.open(times_path);
     times << "camera,frame,ms,ntags" << (o.tile_stats ? ",gpu_active,napa_active0,napa_active1" : "") << "\n";
   }
+  std::ofstream prof;
+  if (!prof_path.empty()) {
+#ifndef NAPA_PROFILE
+    std::cerr << "--profile needs napa_replay_prof (tests/napa-profile/build.sh)\n";
+    return 2;
+#endif
+    prof.open(prof_path);
+    static const char *st[] = {"rake", "threshold", "blobs", "quad", "fit1", "decode1", "refine", "decode2",
+                               "floors", "runs", "union", "resolve", "probe", "repair", "unused"};
+    static const char *cn[] = {"runs", "roots", "cands", "covered", "quad", "probe", "fit1", "failskip", "early",
+                               "rescue", "refine", "final", "tags"};
+    prof << "camera,frame,ms";
+    for (auto s : st) prof << ",ns_" << s;
+    for (int l = 0; l < 8; ++l) prof << ",ns_L" << l;
+    for (int l = 0; l < 8; ++l)
+      for (auto s : cn) prof << ",L" << l << '_' << s;
+    prof << "\n";
+  }
   std::map<std::string, int> cam_index;
   for (size_t i = 0; i < cams.size(); ++i) cam_index[cams[i]] = static_cast<int>(i);
   std::vector<std::unique_ptr<Worker>> workers;
@@ -259,6 +289,7 @@ int main(int argc, char **argv) {
     std::vector<Det> d;
     double ms = 0, gpu = -1, n0 = -1, n1 = -1;
     bool ok = false;
+    std::vector<uint64_t> prof;
   };
   for (size_t c0 = 0; c0 < items.size(); c0 += chunk) {
     const size_t n = std::min(chunk, items.size() - c0);
@@ -291,10 +322,20 @@ int main(int argc, char **argv) {
 #ifdef NAPA_STATS
           for (int l = 0; l < 8; ++l) napa_stat_tot[l] = napa_stat_act[l] = 0;
 #endif
+#ifdef NAPA_PROFILE
+          {
+            uint64_t junk[256];
+            napa_profile_read(junk, 256);
+          }
+#endif
           const auto a = std::chrono::steady_clock::now();
           res[k].d = workers[t]->Detect(gray[k], f.width, f.height, items[c0 + k].cam, f.jetson_us);
           res[k].ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count();
           res[k].ok = true;
+#ifdef NAPA_PROFILE
+          res[k].prof.resize(256);
+          res[k].prof.resize(napa_profile_read(res[k].prof.data(), 256));
+#endif
 #ifdef NAPA_STATS
           if (napa_stat_tot[0]) res[k].n0 = static_cast<double>(napa_stat_act[0]) / napa_stat_tot[0];
           if (napa_stat_tot[1]) res[k].n1 = static_cast<double>(napa_stat_act[1]) / napa_stat_tot[1];
@@ -321,6 +362,11 @@ int main(int argc, char **argv) {
         }
       }
       sightings += kept;
+      if (prof.is_open()) {
+        prof << it.cam << ',' << it.f.index << ',' << res[k].ms;
+        for (auto v : res[k].prof) prof << ',' << v;
+        prof << '\n';
+      }
       if (times.is_open()) {
         times << it.cam << ',' << it.f.index << ',' << res[k].ms << ',' << kept;
         if (o.tile_stats) times << ',' << res[k].gpu << ',' << res[k].n0 << ',' << res[k].n1;

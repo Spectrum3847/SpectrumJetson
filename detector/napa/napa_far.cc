@@ -90,6 +90,7 @@ int Detector::Run(const uint8_t *img, int w, int h, int stride, int min_tag, int
                   std::vector<Tag> &out) {
   napa_params p{min_tag, cfg_.max_hamming, cfg_.min_contrast, cfg_.min_border_cells, cfg_.sharpening_x100};
   napa_detection d[kMaxOut];
+  napa_set_early_slack(det_, cfg_.early_slack);
   const int n = napa_detect(det_, img + static_cast<size_t>(oy) * stride + ox, w, h, stride, &p, d, kMaxOut);
   static const int perm[4] = {1, 0, 3, 2};
   int kept = 0;

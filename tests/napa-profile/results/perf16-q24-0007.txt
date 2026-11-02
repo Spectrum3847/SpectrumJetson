@@ -1,0 +1,66 @@
+   103.71%     0.03%  [.] std::thread::_State_impl<std::thread::_Invoker<std::tuple<main::{lambda()#2}> > >::_M_run()                                           
+   103.67%     0.00%  [.] Worker::Detect(std::vector<unsigned char, std::allocator<unsigned char> >&, int, int, std::__cxx11::basic_string<char, std::char_trait
+   103.63%    26.57%  [.] napa_detect                                                                                                                           
+    63.52%    62.46%  [.] threshold_level                                                                                                                       
+     5.22%     5.12%  [.] contrast_floors                                                                                                                       
+     2.02%     1.98%  [.] threshold_level                                                                                                                       
+     1.76%     1.76%  [.] fit_sides.constprop.0                                                                                                                 
+     0.68%     0.19%  [.] decode_quad.constprop.0                                                                                                               
+     0.60%     0.27%  [.] read_border                                                                                                                           
+     0.57%     0.40%  [.] grow_quad                                                                                                                             
+     0.34%     0.34%  [.] median_even                                                                                                                           
+     0.20%     0.19%  [.] contrast_floors                                                                                                                       
+     0.19%     0.19%  [.] square_to_quad                                                                                                                        
+     0.19%     0.07%  [.] decode_quad                                                                                                                           
+     0.10%     0.10%  [.] nearest_code                                                                                                                          
+     0.10%     0.10%  [.] fit_sides.constprop.0                                                                                                                 
+     0.04%     0.04%  [.] memcpy@plt                                                                                                                            
+     0.04%     0.02%  [.] decode_quad.constprop.0                                                                                                               
+     0.03%     0.01%  [.] read_border                                                                                                                           
+     0.03%     0.03%  [.] memset@plt                                                                                                                            
+     0.02%     0.02%  [.] jpeg_read_scanlines@plt                                                                                                               
+     0.02%     0.02%  [.] median_even                                                                                                                           
+     0.02%     0.01%  [.] decode_quad                                                                                                                           
+     0.01%     0.01%  [.] operator new(unsigned long)@plt                                                                                                       
+     0.01%     0.01%  [.] jpeg_destroy_decompress@plt                                                                                                           
+     0.01%     0.01%  [.] std::basic_filebuf<char, std::char_traits<char> >::open(char const*, std::_Ios_Openmode)@plt                                          
+     0.01%     0.00%  [.] napa_create_family                                                                                                                    
+     0.01%     0.01%  [.] hypot@plt                                                                                                                             
+     0.01%     0.01%  [.] square_to_quad                                                                                                                        
+     0.01%     0.01%  [.] nearest_code                                                                                                                          
+     0.01%     0.01%  [.] std::__basic_file<char>::~__basic_file()@plt                                                                                          
+     0.01%     0.01%  [.] jpeg_finish_decompress@plt                                                                                                            
+     0.01%     0.01%  [.] std::ios_base::~ios_base()@plt                                                                                                        
+     0.01%     0.01%  [.] std::chrono::_V2::steady_clock::now()@plt                                                                                             
+     0.00%     0.00%  [.] init_layout                                                                                                                           
+     0.00%     0.00%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_create(unsigned long&, unsigned long)@plt         
+     0.00%     0.00%  [.] void std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_construct<char const*>(char const*, char cons
+     0.00%     0.00%  [.] __aarch64_ldadd8_acq_rel                                                                                                              
+     0.00%     0.00%  [.] void std::vector<int, std::allocator<int> >::_M_realloc_insert<int const&>(__gnu_cxx::__normal_iterator<int*, std::vector<int, std::al
+     0.00%     0.00%  [.] 0x0000ffffbd8a1adf                                                                                                                    
+
+   11.83 napa_core.c:900
+    5.26 napa_core.c:902
+    5.20 napa_core.c:755
+    5.19 napa_core.c:752
+    4.86 napa_core.c:899
+    4.75 napa_core.c:720
+    4.58 napa_core.c:753
+    3.07 napa_core.c:864
+    2.84 napa_core.c:865
+    2.77 napa_core.c:867
+    2.69 napa_core.c:828
+    2.53 napa_core.c:839
+    1.63 napa_core.c:760
+    1.55 napa_core.c:909
+    1.54 napa_core.c:915
+    1.49 napa_core.c:754
+    1.12 napa_core.c:829
+    1.07 napa_core.c:758
+    1.00 napa_core.c:756
+    0.97 napa_core.c:868
+    0.87 napa_core.c:916
+    0.79 napa_core.c:908
+    0.78 napa_core.c:892
+    0.59 napa_core.c:785
+    0.53 napa_core.c:863

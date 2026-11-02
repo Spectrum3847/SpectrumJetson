@@ -2413,8 +2413,15 @@ Individual flags given as well (`--gpu-refine`, `--graphs`, `--chain`, `--far`) 
 NAPA (github.com/zwatx/NAPA, by **Zachary Wilson**, GPL-3.0-only with a section 7(b) credit term) is a
 sparse-sampling CPU AprilTag detector. `tests/napa-eval` evaluated it on all of TXMAN1, and it is now a
 backend of the fork:
-- **Library:** `third_party/napa` (v0.5.1, `de613ad`, unmodified) + `detector/napa/` → `libspectrum-napa-apriltag.so`
+- **Library:** `third_party/napa` (v0.5.1, `de613ad`, unmodified) + `patches/napa-*.patch` (applied at build by
+  `scripts/jetson/napa-src.sh`) + `detector/napa/` → `libspectrum-napa-apriltag.so`
   (`scripts/jetson/07-build-napa-detector.sh`; plain gcc, no CUDA/OpenCV/WPILib).
+  - `napa-01-early-slack`: the early decode's slack as a setting (`napa_set_early_slack`, `Config::early_slack`,
+    JNI `setEarlySlack`; default 2 = NAPA's). 2 is right on TXMAN1: 0 loses 0.8% of sightings, 3 gains 0.03%.
+    The fork's Java side and UI don't call it yet.
+  - `napa-02-speed`: aarch64 NEON 64-bit dark mask and tile min/max, and the stride-1 level reads the frame
+    in place (no copy). Detections byte-identical on all 13 TXMAN1 sessions; min 16 2.32 → **2.09 ms**
+    (−10%), far search 1.24 → **1.16 ms** (−6%), min 32 −3.5% (`tests/napa-profile`).
   - Builds for the Jetson and SystemCore (aarch64; cross with WPILib's `aarch64-bookworm-linux-gnu`
     toolchain) and for x86_64 (glibc 2.35, cross with `x86_64-linux-gnu-g++`). `napa_test` passes on all three.
   - Install to `/usr/lib`. Without it, the NAPA options log once and keep the normal detector.
@@ -2492,6 +2499,8 @@ backend of the fork:
   - Temps crept up through the run (tj 67 -> 80 °C, < 85), so round 2 reads slightly hotter for every condition.
   - Top threads: "decode" is SpectrumDecoder (NVJPG JPEG decode, ~0.18 cores in all conditions), VisionRunner
     is the two cameras' pipeline threads (where NAPA runs), TensorRT is the YOLO service thread.
+- **Profile** (`tests/napa-profile`): ~85% of NAPA's time on field frames is the run-length front end (tile
+  threshold, dark runs, union-find; 35k runs a frame at min 16), the edge fits and decodes under 10%.
 - **SystemCore / CM5:** the same library is the CPU detector the 2027 robot should use, with min 16, or with far
   search when CPU is short. Confirm on a real CM5 (`tests/napa-eval` section 4 caveats).
 

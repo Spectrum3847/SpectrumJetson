@@ -313,3 +313,14 @@ max 30 on the Jetson. GPU / NAPA min 16 / NAPA far interleaved, 2 rounds of 60 s
   power. With no tags in view it only does its min 32 pass and sweeps; expect more cost with tags.
 - YOLO's batch time no longer depends on the tag backend at full clocks (~6 ms); the GPU has headroom.
 - tj rose through the run (67 -> 80 °C); round 2 reads hotter for all conditions.
+
+## 7. Profile, early-decode slack and speed-ups (2026-11-02)
+
+See `../napa-profile/README.md`. In short:
+- NAPA is now built from `third_party/napa` (unmodified) plus `patches/napa-*.patch` (`scripts/jetson/napa-src.sh`).
+- `--early-slack N` (patch `napa-01`): keep 2. On all 13 sessions, min 16: 0 gives 44,593 sightings (−361), 1 gives
+  44,904 (−50), 3 gives 44,969 (+15). Common corners are unchanged, and time is within noise.
+- ~85% of the time is the front end (tile threshold, runs, union-find); fits and decodes are under 10%.
+- `napa-02-speed`: detections identical. Times: min 16 2.32 → 2.09 ms, far 1.24 → 1.16 ms, min 32 0.486 →
+  0.469 ms. Section 4's and section 6's times are from before it.
+- `run.sh` has the variants napa16_s0..3 and napafar_s0..3. `timing.sh` takes `NAPA_EXTRA` (extra replay options).
