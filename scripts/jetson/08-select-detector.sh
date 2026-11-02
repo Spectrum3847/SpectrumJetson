@@ -211,6 +211,12 @@ if [[ $jpeg == nvjpg && ( $which != gpu || ! -f $nvjpg ) ]]; then
   exit 1
 fi
 
+# The streaming decoder's library (gpu builds from 2026-11-02 link it; also streaming NAPA's).
+stream=$(dirname "$lib")/libspectrum-stream.so
+if [[ $which == gpu ]] && ldd "$lib" | grep -q libspectrum-stream; then
+  [[ -f $stream ]] || { echo "Missing $stream; rebuild with 07-build-gpu-detector.sh." >&2; exit 1; }
+  sudo install -m 755 "$stream" /usr/lib/libspectrum-stream.so
+fi
 sudo install -m 755 "$lib" /usr/lib/libspectrum-gpu-apriltag.so
 # The old name, for PhotonVision jars from before the 2026-10-31 rename (they load lib971apriltag).
 sudo ln -sfn libspectrum-gpu-apriltag.so /usr/lib/lib971apriltag.so

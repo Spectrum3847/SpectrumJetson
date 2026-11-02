@@ -5,6 +5,8 @@
 #   run.sh SECS [CONDITIONS...]      (default: gpu-2 gpu-1 napa-2 napa-1)
 #
 # CONDITION = gpu|napa|gpuyolo|napayolo (yolo: AprilTag + Object, yolo11n, Object FPS max 30) - number of cameras (1: the second camera is deactivated in the settings DB)
+# napastream|napastreamyolo: as napa/napayolo with streaming NAPA on (SPECTRUM_NAPA_STREAM=1, tests/napa-stream)
+# TAG_FPS_MAX=N: Tag FPS max N on every pipeline (default 0, none)
 # [- decoder: nvjpg (the installed default) | turbo | stream (SPECTRUM_JPEG_DECODER)], e.g. gpu-2-stream.
 # Every camera's current pipeline -> AprilTagCuda (GPU detector; napa: "Tags on CPU (NAPA)", min
 # tag px 16, max hamming 1). PhotonVision runs with SPECTRUM_LATENCY_TRACE (fork photonvision-103:
@@ -45,9 +47,10 @@ grep -h SPECTRUM_CAMERA_DELAY_US /etc/systemd/system/photonvision.service.d/*.co
 
 set_pipelines() {  # set_pipelines napa(0/1) cams(1/2) objfps(0: AprilTagCuda; N: AprilTag + Object, yolo11n)
 sudo -n cp "$OUT/photon.sqlite.bak" "$PVDB"
-sudo -n python3 - "$PVDB" "$1" "$2" "${3:-0}" "$CONFIG/models/yolo11n.onnx" <<'PY'
+sudo -n python3 - "$PVDB" "$1" "$2" "${3:-0}" "$CONFIG/models/yolo11n.onnx" "${TAG_FPS_MAX:-0}" <<'PY'
 import json, sqlite3, sys
 db, napa, cams, objfps, model = sys.argv[1], sys.argv[2] == "1", int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+tagfps = int(sys.argv[6])
 c = sqlite3.connect(db)
 for i, (uid, contents) in enumerate(c.execute("select unique_name, contents from cameras order by unique_name").fetchall()):
     d = json.loads(contents)
@@ -55,7 +58,7 @@ for i, (uid, contents) in enumerate(c.execute("select unique_name, contents from
     for p in d["pipelineSettings"]:
         if p.get("pipelineIndex") != d.get("currentPipelineIndex"): continue
         p["type"], p["pipelineType"] = "AprilTagCudaPipelineSettings", "AprilTagCuda"
-        p.update(tagFpsMax=0, tagsOnCpu=napa, napaMinTagPx=16, napaMaxHamming=1, napaFarSearch=False)
+        p.update(tagFpsMax=tagfps, tagsOnCpu=napa, napaMinTagPx=16, napaMaxHamming=1, napaFarSearch=False)
         if objfps > 0:
             p["type"], p["pipelineType"] = "AprilTagObjectPipelineSettings", "AprilTagObject"
             p.update(confidence=0.5, nms=0.45, objectFpsMax=objfps, objectClasses="", objectMaxTargets=20,
@@ -72,6 +75,7 @@ measure() {  # measure NAME [DECODER]
   [[ ${SCHED:-0} == 1 ]] && SCHED_EVENTS='sched/sched_switch sched/sched_wakeup' || SCHED_EVENTS=''
   { printf '[Service]\nEnvironment=SPECTRUM_LATENCY_TRACE=%s\n' "$OUT/$name.csv"
     [[ -n $dec ]] && printf 'Environment=SPECTRUM_JPEG_DECODER=%s\n' "$dec"
+    [[ $name == napastream* ]] && printf 'Environment=SPECTRUM_NAPA_STREAM=1\n'
     for v in $EXTRA_ENV; do printf 'Environment=%s\n' "$v"; done; } | sudo -n tee "$DROPIN" >/dev/null
   sudo -n systemctl daemon-reload; sudo -n systemctl start photonvision
   sleep 40  # start-up, cameras, pipelines
@@ -99,7 +103,8 @@ for c in $CONDITIONS; do
   timeout $((secs + 120)) bash -c "$(declare -f measure); OUT=$OUT DROPIN=$DROPIN T=$T secs=$secs SCHED=${SCHED:-0} EXTRA_ENV=\"${EXTRA_ENV:-}\" measure $c $dec"; rc=$?
   (( rc == 124 )) && { echo "TIMEOUT: $c"; sudo -n systemctl stop photonvision; }
   (( rc != 0 && rc != 124 )) && echo "$c: exit $rc"
-  grep -h -o -E 'stream decode /dev.*' "$OUT/$c.journal" 2>/dev/null | tail -2
+  grep -h -o -E 'stream decode /dev.*' "$OUT/$c.journal" 2>/dev/null | tail -4
+  grep -h -o -E 'NAPA streaming: .*' "$OUT/$c.journal" 2>/dev/null | tail -2
   echo "== $c: $(cat "$OUT/$c.cpu" 2>/dev/null), max temp $(grep -o -E '(cpu|gpu|tj)@[0-9.]+C' "$OUT/$c.tegra" 2>/dev/null | sed 's/.*@//; s/C//' | sort -n | tail -1) C"
 done
 echo "logs: $OUT"

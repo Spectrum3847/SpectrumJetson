@@ -2515,6 +2515,24 @@ backend of the fork:
 - **SystemCore / CM5:** the same library is the CPU detector the 2027 robot should use, with min 16, or with far
   search when CPU is short. Confirm on a real CM5 (`tests/napa-eval` section 4 caveats).
 
+
+#### Streaming NAPA (`photonvision-104`, `libspectrum-stream.so`, 2026-11-02, off by default)
+
+- **What it does:** NAPA runs on each camera's streaming-decoder thread, band by band, as the frame is
+  decoded while it arrives (`patches/napa-03-streaming.patch`, `napa_far` `Begin/Feed/Finish`). Tags are
+  ready about 0.5 ms after the last USB packet instead of about 1.45 ms.
+- **Measured:** mid-exposure → pose about 1 ms lower at p50 and 0.8-2.5 ms lower at p99, with 1-2 cameras,
+  with and without yolo11n. CPU is +1 to +3 points of 6 cores at 2 cameras. There were 0 drops.
+- **Identical results:** checked live (every 64th frame re-detected whole, 0 differ) and by TXMAN1 replay.
+- **Switch:** `SPECTRUM_NAPA_STREAM=1` or HardwareSettings `napaStream`. It needs the streaming decoder
+  (`SPECTRUM_JPEG_DECODER=stream`).
+- **Library:** the decoder is now its own library, `libspectrum-stream.so`.
+  - The GPU library links it; `08-select-detector.sh` installs it.
+  - The NAPA library opens it with `dlopen`.
+  - `07-build-napa-detector.sh` builds it for CPU-only targets (SystemCore).
+- **Thread placement:** `SPECTRUM_STREAM_CPUS=camera` puts each watcher on its camera's VisionRunner core.
+  It measured no better, so it is not the default.
+- **Details:** `tests/napa-stream/README.md`.
 #### The decode in float (`detector-18`, off by default)
 
 - **What:** `SPECTRUM_DETECTOR_GPU_REFINE=4` is `detector-17` with the decode kernel in float

@@ -120,22 +120,91 @@ python3 ../napa-profile/same.py /data/scratch/txman1/replay whole16 stream16   (
 run.sh timing
 ```
 
-## Wiring into PhotonVision (not done)
+## In PhotonVision (2026-11-02, fork `photonvision-104`, off by default)
 
-1. The stream decoder (`detector/stream_decode.cc`) produces Y in 8-row restart bands. Per camera:
-   - at the frame's start, call `Begin(frame_y_buffer, w, h, stride, t)`;
-   - after each decoded band, call `Feed(rows_done)` on the decoder thread, or hand it to a per-camera NAPA
-     thread;
-   - at the end of the frame, call `Finish()`.
+**Switch:** `SPECTRUM_NAPA_STREAM=1` in the PhotonVision drop-in, or `napaStream` in HardwareSettings
+(the variable wins). It needs the streaming decoder (`SPECTRUM_JPEG_DECODER=stream`, the default) and a
+pipeline with "Tags on CPU (NAPA)". The NAPA settings are unchanged: min tag 16, hamming 1, early slack 2,
+far search on or off. Pose, multi-tag and Tag FPS max work as before.
 
-   The Y buffer must stay valid until `Finish()`. `Detect()` stays as the non-streaming path.
-2. **JNI shape:** the cleanest option is to do the whole streaming loop natively, so no Java calls happen per
-   band: the native frame-grab-and-decode loop calls `Feed` itself, and Java sees one
-   `detectStreamed(handle) -> tags` per frame. A smaller step is `beginFrame(handle, ...)`,
-   `feedRows(handle, rows)` and `finishFrame(handle)` natives on `NapaDetectorJNI`, called from wherever the
-   decoder is driven.
-3. Settings stay as today. Streaming changes no results, so it can be a plain on/off option ("stream NAPA with
-   decode").
+### How it is wired
+
+- **`libspectrum-stream.so`:** the streaming decoder (`detector/stream_decode.cc`) is now its own small
+  library, with libjpeg-turbo only and no CUDA. The GPU library links it. The NAPA library opens it with
+  `dlopen` when streaming is on, and gets the same copy. A CPU-only machine builds it with
+  `07-build-napa-detector.sh`. Its plain C API is in `stream_decode.h`:
+  `spectrum_stream_decode_gray`, `_take` and `_detach`, plus a `spectrum_band_sink` with
+  begin, feed, finish and free_result.
+- **Per camera:**
+  1. The first `detectStreamed()` attaches the handle's sink to the watcher that decoded the frame.
+  2. From the next frame on, the watcher thread calls `Begin()` at the frame's SOI, with its own gray
+     buffer.
+  3. It calls `Feed(rows)` after every `jpeg_read_scanlines` (8-row bands), and `Finish()` when the last
+     row is in.
+  4. The tags are kept with the decoded frame.
+  5. `detectStreamed()` takes them, about 0.03 ms of JNI.
+
+  The pipeline's Mat is a copy of the decoded image, so `take` finds the frame by pointer on the decoding
+  thread or, failing that, by content (every 16th row compared).
+- **Each sink has its own `napa_far::Detector`.** Its config is copied from the handle and applied at the
+  next `Begin()`.
+- **Fallbacks:** a frame that wasn't streamed (decoder miss or mismatch, sink not attached yet, a frame
+  skipped as below) gets whole-frame NAPA on the handle's detector, as before.
+  - The log line every 10 s counts both kinds: `NAPA streaming: N streamed, M whole-frame ...`.
+  - The watcher's line adds `band sink fed N frames (skipped K for the frame-rate cap), finish p50 ...`.
+- **Tag FPS max and idle mode:** `VisionRunner` passes when it next takes a frame (`FrameRateCap.nextWantedNanos`).
+  The watcher doesn't feed a frame that will be complete more than a frame period + 1.5 ms before then.
+  - At Tag FPS max 50 with 2 cameras, 16% of frames were skipped and 0.4% fell back to whole-frame. The
+    rule is conservative; a tighter one could skip about half of the frames.
+- **Identity, live:** every 64th streamed frame, the same Y image is re-detected whole on a nice-19 thread
+  and compared field by field, corners as raw doubles. Differences are logged (`differ`). With far search
+  on, the check is skipped and counted: tracks and the sweep schedule are per detector.
+- **Thread placement:** NAPA runs on the camera's watcher thread. `SPECTRUM_STREAM_CPUS=camera` (new) pins
+  each watcher to the cores of the thread that takes its frames, which is its VisionRunner core with
+  `photonvision-102`. The default stays `all`; see the results below.
+- **CPU-only (SystemCore):** `USBFrameProvider`'s CPU-decode path calls `NapaDetectorJNI.streamDecodeGray`
+  first when streaming NAPA is on. That starts the watchers without the CUDA library. It compiles, but has
+  not been run on a SystemCore.
+
+### Live results (bench Jetson, clocks full, 2 Thriftiest Cams at 122 fps, urb_packets=4, stream decoder both sides)
+
+`tests/latency-breakdown/run.sh 20 napa-1 napastream-1 napa-2 napastream-2 napayolo-1 napastreamyolo-1
+napayolo-2 napastreamyolo-2`, 2 rounds of 20 s. "yolo" is AprilTag + Object with yolo11n at Object FPS max
+30. **The bench has no tags**, so NAPA's work is the no-tag work (1.07 ms whole-frame). Times are ms
+p50 / p95 / p99. Each cell shows round 1, then round 2.
+
+| Condition | mid-exposure → pose | tail: last packet → tags | CPU % of 6 cores | drops |
+|---|---|---|---|---|
+| NAPA, 1 cam | 14.30/14.53/15.02 · 14.18/14.49/15.06 | 1.44/1.63/2.21 · 1.45/1.67/2.23 | 14.1 · 14.7 | 0 |
+| **stream, 1 cam** | **13.36/13.58/14.20 · 13.24/13.45/14.45** | **0.52/0.76/1.39 · 0.53/0.79/1.80** | 14.0 · 20.4 | 0 |
+| NAPA, 2 cams | 14.26/14.57/15.75 · 13.94/14.18/15.14 | 1.49/1.76/2.90 · 1.47/1.68/2.57 | 25.5 · 24.6 | 0 |
+| **stream, 2 cams** | **13.31/13.58/15.04 · 13.00/13.26/14.34** | **0.53/0.88/2.32 · 0.53/0.87/1.87** | 28.8 · 27.9 | 0 |
+| NAPA + yolo, 1 cam | 14.33/14.58/15.09 · 14.07/14.29/14.77 | 1.48/1.71/2.26 · 1.47/1.66/2.04 | 15.3 · 16.6 | 0 |
+| **stream + yolo, 1 cam** | **13.14/13.34/14.52 · 13.00/13.19/13.88** | **0.55/0.80/1.89 · 0.53/0.75/1.38** | 16.0 · 17.3 | 0 |
+| NAPA + yolo, 2 cams | 14.26/14.54/17.33 · 14.15/14.49/17.09 | 1.53/1.78/4.67 · 1.51/1.75/4.21 | 26.6 · 29.9 | 0 |
+| **stream + yolo, 2 cams** | **13.29/13.57/15.48 · 13.07/13.43/14.62** | **0.59/0.90/2.80 · 0.57/0.90/2.02** | 31.4 · 31.2 | 0 |
+| stream, 2 cams, `SPECTRUM_STREAM_CPUS=camera` | 13.12/13.33/14.11 | 0.53/0.79/1.53 | 26.9 | 0 |
+| stream + yolo, 2 cams, `camera` | 13.06/14.54/15.38 | 0.57/2.08/2.85 | 28.7 | 0 |
+
+- **Latency:** about 0.95-1.2 ms less at p50 in every condition, and 0.8-2.5 ms less at p99. The largest
+  p99 cut is with yolo on 2 cameras (17.3 → 15.0).
+  - The tail after the last packet drops from about 1.45 to about 0.53 ms.
+  - The tail that is left is mostly the decoder's own: its last rows and the 1 MB copy, 0.30 ms p50, up
+    0.1 ms from feeding the last bands. NAPA's `Finish()` takes 0.006-0.007 ms. Detection in the pipeline
+    is 0.04 ms (JNI and the content match).
+- **CPU:** about +1 to +3 points of 6 cores at 2 cameras (24.6-25.5 → 27.9-28.8; with yolo 26.6-29.9 →
+  31.2-31.4). That is the stream's extra ~30% NAPA work (above), plus the first frames' whole-frame
+  detects. The 1-camera numbers are within run-to-run noise.
+- **Max temperature:** 78.8 C.
+- **Identity:** with no cap, every frame was streamed (1 whole-frame fallback in all runs). Every 64th
+  frame was checked live, 94 checks per camera per run: **0 differ** in every run.
+  - Because the bench has no tags, the same `Begin/Feed/Finish` path was also replayed on TXMAN1 at the
+    decoder's band shapes: 16-row and 8-row bands, min 16 and far. The first session of each of the 6
+    matches (15,101 frames, 13,422 sightings at margin ≥ 15) gave **0 mismatches** and no reruns. The
+    full 13-session identity is above.
+- **Placement:** the `camera` pinning was no better: equal without yolo, and worse at p95 with yolo
+  (2.08 vs 0.90 ms tail), because the watcher shares the core with the VisionRunner. The default stays
+  `all`.
 
 ### SystemCore (Raspberry Pi CM5, 4x A76, CPU path)
 
@@ -143,9 +212,8 @@ run.sh timing
   compile-checks with WPILib's `aarch64-bookworm-linux-gnu-gcc`, both through `build.sh` (cross mode) and as
   the full `libspectrum-napa-apriltag.so` (`07-build-napa-detector.sh`). `napa_test` has to be run on the
   target.
-- **Move the stream decoder:** `stream_decode.cc` is now linked into the CUDA lib (`libspectrum-gpu-apriltag`).
-  Move it, or a copy, into the non-CUDA NAPA lib, so that a CPU-only target gets streaming decode and detect
-  together in one native loop (libjpeg-turbo only).
+- **Stream decoder:** done. `libspectrum-stream.so` is built by `07-build-napa-detector.sh` when the
+  target has `jpeglib.h`, and is opened by the NAPA library at run time.
 - **Coarser USB transfers:** stock `uvcvideo` delivers in larger URBs than our patched one, so bands arrive in
   bigger chunks and the tail grows by about one URB's worth of rows.
 - **More overlap at lower fps:** the camera streams each frame more slowly (longer line time), so more of
@@ -156,7 +224,12 @@ run.sh timing
 
 ## Recommendation
 
-Adopt streaming for the NAPA path once PhotonVision runs the stream decoder: it cuts about 1.9 ms of
-detection latency at min 16 (2.0 → 0.11 ms p50) with identical results, for about +0.6 ms of CPU per frame.
-For the far config, also stream the crops: start them on the previous frame's tracks and check them against
-the base pass in `Finish()`. That would bring its p95 tail down from about 0.5 ms.
+- **Turn streaming NAPA on by default on the NAPA path.** It saves about 1 ms at p50 and up to 2.5 ms at
+  p99. Results are identical (live checks and replay), and there were no drops. It costs about 1-3 points
+  of the 6 cores at 2 cameras.
+- **Before flipping it, run 2 checks:**
+  - a run with real tags in view (pose path, live identity counters);
+  - one SystemCore run of the CPU-only path.
+- **Still open:**
+  - stream the far crops (above);
+  - a tighter Tag FPS max skip rule.
