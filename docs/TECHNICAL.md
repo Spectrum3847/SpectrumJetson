@@ -2846,6 +2846,64 @@ from VisionRunner's Loop timing):
   a whole suite). `PipelineManagerTest` and `VisionSourceManagerTest` fail identically on the
   unmodified branch.
 
+## Camera threads pinned to cores (photonvision-102, 2026-11-02)
+
+`CameraThreads` in the fork. Jetson layout (6 cores): core 0 handles USB IRQs and the system (`spectrum-rt` puts the
+xhci IRQ there when it's on; its default moved from core 5 to 0). Cores 2-5 get one tag camera's VisionRunner each:
+the thread that runs the detector, NAPA included. Cameras are assigned in name order, wrapping past 4 (logged).
+Tag cameras are AprilTagCuda and AprilTag + Object pipelines, plus AprilTag with NAPA. Plain CPU AprilTag stays
+unpinned, because its worker pool would inherit one core. Shared threads (SpectrumDecoder / NVJPG, TensorRT, the
+AprilTag+Object fallback detect) and non-tag cameras are **not pinned by default** (`pinSharedCore -1`). Core 1
+for them was the plan, but the A/B below shows it costs latency.
+
+How it works: there is no native code. A thread reads its own Linux TID from `/proc/thread-self` and registers it.
+One daemon thread (`SpectrumCameraThreads`, every 2 s) compares `Cpus_allowed_list` and runs `taskset` / `chrt`
+when it differs. PhotonVision runs as root, so this works on any thread of the process, and it survives core
+hotplug. Helper threads that a pinned thread creates (the NVJPG decoder's helpers, OpenCV's pool) inherit its
+single core. The sweep moves those to the cores no tag camera uses. Settings: `HardwareSettings.pinCameraThreads`
+(null = auto: on on a Jetson), `pinCameraCores` "2-5", `pinSharedCore` -1, `pinCameraFifo` 0, `pinOtherThreads`
+false. Environment variables override these: `SPECTRUM_PIN_CAMERAS`, `SPECTRUM_PIN_CAMERA_CORES`,
+`SPECTRUM_PIN_SHARED_CORE`, `SPECTRUM_PIN_FIFO` (capped at 49, under the kernel's IRQ threads at 50) and
+`SPECTRUM_PIN_OTHERS`. They're read when PhotonVision starts, and there's no UI yet. SystemCore (4 cores): off
+unless set. Suggested: `SPECTRUM_PIN_CAMERAS=1 SPECTRUM_PIN_CAMERA_CORES=2-3`.
+
+Pinning the whole JVM to core 1 with systemd `CPUAffinity=` and widening the camera threads afterwards was
+considered and **not done**. The JVM sizes its GC and JIT thread counts, and OpenCV its pool, from the affinity
+at start: one core would mean one GC worker and longer stop-the-world pauses, and those stall the camera threads
+anyway. Native threads created by a camera thread would also inherit core 1. `SPECTRUM_PIN_OTHERS=1` is the safer
+form: after start-up, it moves every unregistered thread off the cores the cameras are using.
+
+**Live A/B** (`tests/pin-cameras/run.sh`). Setup: `spectrum-clocks mode full` (CPU 1728 / GPU 1020 / EMC 3199), 2
+Thriftiest cams 1280x800 MJPEG at 122 fps, NVJPG, "Tags on CPU (NAPA)" min 16, no tags in view, 60 s per
+condition, interleaved, PhotonVision restarted per condition. Each latency is the mean of both cameras' 10 s
+windows (p50/p95/p99), and max is the largest. Rounds: unpinned 6 and pinned 7 (in 3 sessions), others 2, cams
+only 2.
+
+| Condition | Tag latency p50 / p95 / p99 / max | fps/cam | PV CPU | VDD_IN | CPU_GPU_CV | tj max |
+| --- | --- | --- | --- | --- | --- | --- |
+| Unpinned | 14.58 / 15.48 / **15.69** / 23.7 ms | 121.3 | 0.57 cores | 8.56 W | 2.52 W | 74 °C |
+| Pinned: cameras 2-5, shared threads on core 1 | 14.73 / 15.65 / 16.78 / 24.1 ms | 121.3 | 0.56 | 8.56 W | 2.52 W | 74 °C |
+| Same + every other thread on cores 0-1 | 14.87 / 16.09 / 18.82 / 31.1 ms | 121.3 | 0.57 | 8.55 W | 2.51 W | 72 °C |
+| Same + every other thread on the cameras' unused cores (0,1,4,5) | 14.69 / 15.62 / 16.60 / 23.7 ms | 121.3 | 0.55 | 8.54 W | 2.52 W | 73 °C |
+| **Cameras only** (shared threads unpinned; the default now) | 14.57 / 15.49 / 15.88 / 21.3 ms | 121.4 | 0.56 | 8.59 W | 2.54 W | 74 °C |
+| + yolo11n at Object FPS max 30: unpinned (2 rounds) | 14.98 / 15.88 / 16.23 / 22.2 ms | 121.2 | 0.85 | 11.52 W | 4.37 W | 82 °C |
+| + yolo11n: pinned, decode and TensorRT on core 1 (2) | 15.23 / 18.25 / 19.47 / 25.8 ms | 121.3 | 0.81 | 11.61 W | 4.34 W | 82 °C |
+| + yolo11n: cameras only (1 valid round) | 14.76 / 15.61 / 16.20 / 21.7 ms | 121.4 | 0.85 | 11.55 W | 4.35 W | 81 °C |
+
+- **With 2 cameras, pinning doesn't help.** The pinned threads stopped migrating (VisionRunner from ~300-800 to 0
+  per minute, decoder from ~3,000-6,000 to 0) and had fewer involuntary switches (~200 to ~60 per minute). Latency,
+  CPU and power were the same, within noise. 4 of 6 cores sit idle, so the scheduler always finds a free one.
+- **Shared threads on one core cost latency.** Both cameras' frames arrive together, so their decoders wake at the
+  same moment and one waits: p99 +1.1 ms. Add TensorRT on that core and the YOLO batches stretch (5.3 to 7.1 ms
+  mean, more batching), costing +2.4 ms p95 and +3.2 ms p99. That's why the shared core is unpinned by default.
+- Squeezing every other thread onto cores 0-1 (IRQs, the JIT, GC, decoder helpers) is worse: p99 +3 ms, max 31 ms.
+  Onto the unused camera cores it's neutral.
+- The second yolo11n cams-only round is left out. Another session added `SPECTRUM_CAMERA_DELAY_US=2500` (a
+  drop-in that moves frame timestamps 2.5 ms earlier) mid-run, and that round read +2.6 ms on everything. tj reached
+  84 °C on that last round, so the yolo runs stopped there.
+- Expect pinning to matter only at 4 cameras with YOLO and a busy system, where threads compete for cores. Re-run
+  `tests/pin-cameras/run.sh 60 3 30` then, and also with `SPECTRUM_PIN_FIFO`.
+
 ## Changes from the handoff
 
 - **JetPack 6.2 → 6.2.3 (L4T 36.4.3 → 36.5.2).** Same Ubuntu 22.04 / CUDA 12 line,
