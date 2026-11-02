@@ -37,7 +37,7 @@ restore() {
 }
 trap restore EXIT
 sudo -n spectrum-clocks mode full >/dev/null
-set_pipelines() {  # every camera's current pipeline (also after each stop: see below)
+set_pipelines() {  # every camera's current pipeline (PhotonVision stopped)
 sudo -n python3 - "$PVDB" "$objfps" "$CONFIG/models/yolo11n.onnx" <<'PY'
 import json, sqlite3, sys
 db, objfps, path = sys.argv[1:4]
@@ -64,9 +64,7 @@ PY
 measure() {  # measure NAME ENV...
   local name=$1 pid hz since; shift
   printf '[Service]\nEnvironment=%s\n' "$*" | sudo -n tee "$DROPIN" >/dev/null
-  # Stop, rewrite, start: PhotonVision saves its settings on the way down, and a saved AprilTag +
-  # Object pipeline came back as AprilTagCuda settings (ClassCastException at the next start).
-  sudo -n systemctl daemon-reload; sudo -n systemctl stop photonvision; set_pipelines
+  sudo -n systemctl daemon-reload; sudo -n systemctl stop photonvision
   sudo -n systemctl start photonvision
   sleep 45  # start-up, cameras, pinning (2 s sweeps)
   pid=$(systemctl show -p MainPID --value photonvision); hz=$(getconf CLK_TCK)
@@ -93,6 +91,7 @@ measure() {  # measure NAME ENV...
   python3 "$ROOT/tests/pin-cameras/summary.py" "$OUT" "$name" "$secs" "$hz"
 }
 
+set_pipelines  # once: PhotonVision keeps them across its own saves and restarts
 for r in $(seq "$rounds"); do
   for c in $CONDITIONS; do
     case $c in
@@ -102,7 +101,7 @@ for r in $(seq "$rounds"); do
       cams-only) env="SPECTRUM_PIN_CAMERAS=1 SPECTRUM_PIN_SHARED_CORE=-1" ;;
       *) echo "unknown condition $c"; continue ;;
     esac
-    timeout $((secs + 150)) bash -c "$(declare -f measure set_pipelines); OUT=$OUT ROOT=$ROOT DROPIN=$DROPIN PERF=$PERF PVDB=$PVDB CONFIG=$CONFIG objfps=$objfps secs=$secs measure r$r-$c $env"; rc=$?; (( rc == 124 )) && echo "TIMEOUT: r$r-$c"; (( rc != 0 && rc != 124 )) && echo "r$r-$c: exit $rc"
+    timeout $((secs + 150)) bash -c "$(declare -f measure); OUT=$OUT ROOT=$ROOT DROPIN=$DROPIN PERF=$PERF PVDB=$PVDB CONFIG=$CONFIG objfps=$objfps secs=$secs measure r$r-$c $env"; rc=$?; (( rc == 124 )) && echo "TIMEOUT: r$r-$c"; (( rc != 0 && rc != 124 )) && echo "r$r-$c: exit $rc"
   done
 done
 echo "logs: $OUT"
