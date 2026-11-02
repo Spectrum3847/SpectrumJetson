@@ -62,6 +62,7 @@ for r in $(seq "$ROUNDS"); do
   for n in base "$@"; do
     wait_turn
     echo "$(date +%T) timing round $r $n tj $(tj)"
+    # shellcheck disable=SC2097,SC2098  # timing.sh gets the per-experiment WORK; the output path uses ours
     WORK=$WORK/exp-$n "$EVAL/timing.sh" "$DATA" "$WORK/timing-ab/$r/$n" napa_t1 napa16_t1 napafar_t1 >/dev/null 2>&1 ||
       echo "timing failure: $n round $r" >&2
   done
