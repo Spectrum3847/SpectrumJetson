@@ -8,7 +8,7 @@ Per isochronous URB: completion time, slot, endpoint, bytes (actual) and the pac
 Per frame (matched by slot = camera, in order): the URBs since the previous frame's EOF,
 first data URB, first-packet time estimate, EOF URB and the vb2 done / dequeue events.
 """
-import re, sys, statistics as st, json
+import re, sys
 
 URB = re.compile(r'\s(\d+\.\d+): xhci_urb_giveback: ep(\d+)in-isoc: urb \S+ pipe \d+ slot (\d+) length (\d+)/(\d+)')
 DONE = re.compile(r'\[(\d+)\].*\s(\d+\.\d+): vb2_buf_done: owner = \S+, queued = \d+, owned_by_drv = \d+, index = (\d+), type = \d+, bytesused = (\d+), timestamp = (\d+)')
