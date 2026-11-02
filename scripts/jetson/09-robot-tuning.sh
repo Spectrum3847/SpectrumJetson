@@ -62,7 +62,7 @@
 #                               service drop-in; not installed: spectrum-clocks-guard after 30 s).
 #                               Deep idle (photonvision-99): no robot, web UI or stream viewer
 #                               for 5 min (or PhotonVision stopped 5 min): 5 fps, lowest clocks,
-#                               EMC dynamic, CPU idle states on, cores 2-4 offline.
+#                               EMC dynamic, CPU idle states on (all cores stay online).
 #                               `sudo spectrum-clocks mode full` keeps them full, `mode shallow`
 #                               never goes deep; `status`.
 #
