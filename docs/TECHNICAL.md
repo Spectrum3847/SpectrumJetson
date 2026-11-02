@@ -2393,6 +2393,11 @@ Individual flags given as well (`--gpu-refine`, `--graphs`, `--chain`, `--far`) 
   from 63% to 42%, and tags only from 33% to 4%. Tag latency was the same or better, and about 0.2 cores more
   CPU. Use it when Tag FPS max and the ladder aren't enough, or when objects matter more than the GPU detector's
   extra range: GPU far search, masks and edge refinement don't apply.
+- **Not on the ladder: early non-tag reject** (`detector-20`, off by default): `SPECTRUM_DETECTOR_EARLY_REJECT=4`
+  + `SPECTRUM_DETECTOR_EARLY_MODE=border` checks each quad's border on its unrefined corners and skips
+  `RefineEdges` + decode for non-tags. At level 3 (CPU refine, calibrated) it saves ~520 µs of worker CPU a
+  frame (77%, ~6% of a core per camera at 122 fps) but loses 0.45% of sightings on TXMAN1, some of them
+  large tags. Opt-in only, not in `08-select-detector.sh` yet; no effect at levels 4/5. `tests/early-reject`.
 - **Not on the ladder: JPEG decode.** `--jpeg nvjpg` decodes on the two NVJPG engines, which are not
   the GPU, so it doesn't compete with TensorRT. `--jpeg turbo` (or `echo turbo >
   /tmp/spectrum-jpeg-decoder`, live) moves it to the CPU: measured 0.52 → 0.85 cores for 2 cameras

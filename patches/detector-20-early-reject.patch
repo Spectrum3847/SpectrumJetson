@@ -1,0 +1,247 @@
+diff --git a/third_party/971apriltag/apriltag.c b/third_party/971apriltag/apriltag.c
+--- a/third_party/971apriltag/apriltag.c
++++ b/third_party/971apriltag/apriltag.c
+@@ -1461,3 +1461,117 @@ image_u8_t *apriltag_to_image(apriltag_family_t *fam, int idx)
+     }
+     return im;
+ }
++
++// SpectrumJetson (detector-20): a cheap check of a quad on its UNREFINED corners, before RefineEdges and
++// the full decode (QuadDecodeTask, SPECTRUM_DETECTOR_EARLY_REJECT). ~95% of the quads reaching decode
++// aren't tags (tests/nontag-quads); this rejects most of them for a few microseconds each. The cells are
++// sampled through a square-to-quad homography of the raw corners (no matd), the white and black gray models
++// fitted to the border rings as quad_decode does, and every border cell and payload bit compared with the
++// threshold, without sharpening. Errors = border cells on the wrong side + the payload's distance to the
++// nearest codeword in any rotation (mode 1: border only). The quad passes when errors <= slack in any
++// family, at scale 1 or, mode 2, at the tag shrunk or grown by 8% about its centre (corner error). Survivors
++// are refined and decoded as before, so what's reported and the hamming policy are unchanged.
++static int spectrum_early_family(const apriltag_family_t *f, const double m[8], image_u8_t *im, int slack,
++                                 int mode, double scale)
++{
++    const int wb = f->width_at_border;
++    if (wb < 3 || f->total_width < wb + 2) return 1;  // not a layout this knows: let it through
++    // tag coordinates (cells, 0..wb at the black corners) to pixels
++#define SPECTRUM_EARLY_PROJECT(cx, cy, px, py) do { \
++        double u_ = 0.5 + ((cx) / wb - 0.5) * scale, v_ = 0.5 + ((cy) / wb - 0.5) * scale; \
++        double w_ = m[6] * u_ + m[7] * v_ + 1; \
++        px = (m[0] * u_ + m[1] * v_ + m[2]) / w_; py = (m[3] * u_ + m[4] * v_ + m[5]) / w_; } while (0)
++    double bv[4 * 64], wv[4 * 64];  // border samples: black ring (cells 0 and wb-1), white ring (-1 and wb)
++    double bx[4 * 64], by[4 * 64], wx[4 * 64], wy[4 * 64];
++    int nb = 0, nw = 0;
++    if (wb > 64) return 1;
++    struct graymodel white, black;
++    graymodel_init(&white);
++    graymodel_init(&black);
++    for (int y = -1; y <= wb; y++) {
++        for (int x = -1; x <= wb; x++) {
++            int ring_white = x == -1 || y == -1 || x == wb || y == wb;
++            int ring_black = !ring_white && (x == 0 || y == 0 || x == wb - 1 || y == wb - 1);
++            if (!ring_white && !ring_black) continue;
++            double px, py;
++            SPECTRUM_EARLY_PROJECT(x + 0.5, y + 0.5, px, py);
++            double v = value_for_pixel(im, px, py);
++            if (v < 0) continue;
++            double tx = 2 * ((x + 0.5) / wb - 0.5), ty = 2 * ((y + 0.5) / wb - 0.5);
++            if (ring_white) {
++                graymodel_add(&white, tx, ty, v);
++                wv[nw] = v, wx[nw] = tx, wy[nw] = ty, nw++;
++            } else {
++                graymodel_add(&black, tx, ty, v);
++                bv[nb] = v, bx[nb] = tx, by[nb] = ty, nb++;
++            }
++        }
++    }
++    if (nb < 8 || nw < 8) return 0;  // mostly off the image: the decode would fail too
++    graymodel_solve(&white);
++    graymodel_solve(&black);
++    if ((graymodel_interpolate(&white, 0, 0) - graymodel_interpolate(&black, 0, 0) < 0) != f->reversed_border)
++        return 0;
++    int errors = 0;
++    for (int i = 0; i < nb && errors <= slack; i++) {
++        double t = (graymodel_interpolate(&black, bx[i], by[i]) + graymodel_interpolate(&white, bx[i], by[i])) / 2;
++        errors += (bv[i] > t) != f->reversed_border;
++    }
++    for (int i = 0; i < nw && errors <= slack; i++) {
++        double t = (graymodel_interpolate(&black, wx[i], wy[i]) + graymodel_interpolate(&white, wx[i], wy[i])) / 2;
++        errors += (wv[i] < t) != f->reversed_border;
++    }
++    if (errors > slack) return 0;
++    if (mode == 1) return 1;
++    uint64_t rcode = 0;
++    for (uint32_t i = 0; i < f->nbits; i++) {
++        double px, py;
++        SPECTRUM_EARLY_PROJECT(f->bit_x[i] + 0.5, f->bit_y[i] + 0.5, px, py);
++        double v = value_for_pixel(im, px, py);
++        double tx = 2 * ((f->bit_x[i] + 0.5) / wb - 0.5), ty = 2 * ((f->bit_y[i] + 0.5) / wb - 0.5);
++        double t = (graymodel_interpolate(&black, tx, ty) + graymodel_interpolate(&white, tx, ty)) / 2;
++        rcode = (rcode << 1) | (v >= 0 && v > t);
++    }
++#undef SPECTRUM_EARLY_PROJECT
++    const int budget = slack - errors;
++    uint64_t r[4];
++    r[0] = rcode;
++    for (int k = 1; k < 4; k++) r[k] = rotate90(r[k - 1], f->nbits);
++    for (uint32_t c = 0; c < f->ncodes; c++) {
++        const uint64_t code = f->codes[c];
++        for (int k = 0; k < 4; k++)
++            if (__builtin_popcountll(code ^ r[k]) <= budget) return 1;
++    }
++    return 0;
++}
++
++int spectrum_early_check(apriltag_detector_t *td, const float p[4][2], int reversed_border, image_u8_t *im,
++                         int slack, int mode)
++{
++    // square-to-quad (Heckbert): (u, v) in [0,1]^2 -> pixels, corners 0..3 at (0,0) (1,0) (1,1) (0,1),
++    // quad_update_homographies' correspondences.
++    const double x0 = p[0][0], y0 = p[0][1], x1 = p[1][0], y1 = p[1][1];
++    const double x2 = p[2][0], y2 = p[2][1], x3 = p[3][0], y3 = p[3][1];
++    const double sx = x0 - x1 + x2 - x3, sy = y0 - y1 + y2 - y3;
++    double m[8];
++    if (fabs(sx) < 1e-9 && fabs(sy) < 1e-9) {
++        m[0] = x1 - x0, m[1] = x3 - x0, m[2] = x0, m[3] = y1 - y0, m[4] = y3 - y0, m[5] = y0, m[6] = 0, m[7] = 0;
++    } else {
++        const double dx1 = x1 - x2, dx2 = x3 - x2, dy1 = y1 - y2, dy2 = y3 - y2;
++        const double den = dx1 * dy2 - dx2 * dy1;
++        if (fabs(den) < 1e-12) return 0;
++        const double g = (sx * dy2 - dx2 * sy) / den, h = (dx1 * sy - sx * dy1) / den;
++        m[0] = x1 - x0 + g * x1, m[1] = x3 - x0 + h * x3, m[2] = x0;
++        m[3] = y1 - y0 + g * y1, m[4] = y3 - y0 + h * y3, m[5] = y0, m[6] = g, m[7] = h;
++    }
++    static const double scales[] = {1.0, 0.92, 1.08};
++    const int nscales = mode == 2 ? 3 : 1;
++    for (int famidx = 0; famidx < zarray_size(td->tag_families); famidx++) {
++        apriltag_family_t *family;
++        zarray_get(td->tag_families, famidx, &family);
++        if (family->reversed_border != reversed_border) continue;
++        for (int s = 0; s < nscales; s++)
++            if (spectrum_early_family(family, m, im, slack, mode, scales[s])) return 1;
++    }
++    return 0;
++}
+diff --git a/third_party/971apriltag/apriltag_detect.cc b/third_party/971apriltag/apriltag_detect.cc
+--- a/third_party/971apriltag/apriltag_detect.cc
++++ b/third_party/971apriltag/apriltag_detect.cc
+@@ -12,6 +12,12 @@
+ #include <cub/iterator/discard_output_iterator.cuh>
+ #include <cub/iterator/transform_input_iterator.cuh>
+ #include <vector>
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <ctime>
++#include <string>
+ 
+ #include "absl/flags/flag.h"
+ #include "absl/log/check.h"
+@@ -36,8 +42,49 @@ void quad_decode_index(apriltag_detector_t* td, struct quad* quad_original,
+ 
+ void reconcile_detections(zarray_t* detections, zarray_t* poly0,
+                           zarray_t* poly1);
++
++int spectrum_early_check(apriltag_detector_t* td, const float p[4][2], int reversed_border, image_u8_t* im,
++                         int slack, int mode);  // detector-20
+ };
+ 
++// SpectrumJetson (detector-20): SPECTRUM_DETECTOR_EARLY_REJECT=N checks each quad on its unrefined corners
++// (border + payload, N errors of slack; apriltag.c's spectrum_early_check) and drops it before RefineEdges
++// when it can't be a tag. Unset or negative = off (the default). SPECTRUM_DETECTOR_EARLY_MODE: border (the
++// border rings only) or scales (also at 0.92x and 1.08x). SPECTRUM_DETECTOR_EARLY_STATS=FILE: one line per
++// DecodeTags (detector-replay measurements): detector,quads,passed,detections,early_cpu_us,refine_cpu_us,
++// decode_cpu_us,wall_us (thread CPU time summed over the decode workers).
++namespace spectrum_early {
++inline int Slack() {
++  static const int v = [] {
++    const char* e = std::getenv("SPECTRUM_DETECTOR_EARLY_REJECT");
++    return e && *e ? std::atoi(e) : -1;
++  }();
++  return v;
++}
++inline int Mode() {
++  static const int v = [] {
++    const char* e = std::getenv("SPECTRUM_DETECTOR_EARLY_MODE");
++    if (!e) return 0;
++    const std::string m = e;
++    return m == "border" ? 1 : m == "scales" ? 2 : 0;
++  }();
++  return v;
++}
++inline FILE* Stats() {
++  static FILE* f = [] {
++    const char* e = std::getenv("SPECTRUM_DETECTOR_EARLY_STATS");
++    return e && *e ? std::fopen(e, "w") : nullptr;
++  }();
++  return f;
++}
++std::atomic<long> quads{0}, passed{0}, early_ns{0}, refine_ns{0}, decode_ns{0};
++inline long ThreadNs() {
++  timespec t;
++  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
++  return t.tv_sec * 1000000000L + t.tv_nsec;
++}
++}  // namespace spectrum_early
++
+ namespace frc::apriltag {
+ namespace {
+ 
+@@ -611,6 +658,22 @@ void GpuDetector::QuadDecodeTask(void* _u) {
+       if (!sane) continue;
+     }
+ 
++    // detector-20: the early check, on the unrefined corners.
++    const bool early_stats = spectrum_early::Stats() != nullptr;
++    long t_ns = early_stats ? spectrum_early::ThreadNs() : 0;
++    if (early_stats) ++spectrum_early::quads;
++    if (spectrum_early::Slack() >= 0) {
++      const bool pass = spectrum_early_check(td, quad_original.p, quad_original.reversed_border, im,
++                                             spectrum_early::Slack(), spectrum_early::Mode());
++      if (early_stats) {
++        const long t = spectrum_early::ThreadNs();
++        spectrum_early::early_ns += t - t_ns;
++        t_ns = t;
++      }
++      if (!pass) continue;
++    }
++    if (early_stats) ++spectrum_early::passed;
++
+     if (td->refine_edges && task->refined) {
+       std::memcpy(quad_original.p, task->refined[quadidx], sizeof(quad_original.p));
+     } else if (td->refine_edges) {
+@@ -646,8 +709,14 @@ void GpuDetector::QuadDecodeTask(void* _u) {
+           std::string("/tmp/quad" + std::to_string(quadidx) + ".pnm").c_str());
+     }
+ 
++    if (early_stats) {
++      const long t = spectrum_early::ThreadNs();
++      spectrum_early::refine_ns += t - t_ns;
++      t_ns = t;
++    }
+     quad_decode_index(td, &quad_original, im, task->im_samples,
+                       task->detections);
++    if (early_stats) spectrum_early::decode_ns += spectrum_early::ThreadNs() - t_ns;
+ 
+     if (quad_original.H)
+       matd_destroy(quad_original.H);
+@@ -709,7 +778,21 @@ void GpuDetector::DecodeTags() {
+     ntasks++;
+   }
+ 
++  const auto early_wall0 = std::chrono::steady_clock::now();
++  if (FILE* f = spectrum_early::Stats()) {
++    for (auto* a : {&spectrum_early::quads, &spectrum_early::passed, &spectrum_early::early_ns,
++                    &spectrum_early::refine_ns, &spectrum_early::decode_ns})
++      *a = 0;
++    (void)f;
++  }
+   workerpool_run(tag_detector_->wp);
++  if (FILE* f = spectrum_early::Stats()) {
++    const double wall =
++        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - early_wall0).count();
++    std::fprintf(f, "%p,%ld,%ld,%d,%.1f,%.1f,%.1f,%.1f\n", static_cast<void*>(this), spectrum_early::quads.load(),
++                 spectrum_early::passed.load(), zarray_size(detections_), spectrum_early::early_ns / 1e3,
++                 spectrum_early::refine_ns / 1e3, spectrum_early::decode_ns / 1e3, wall);
++  }
+ 
+   FinishDetections();
+ }

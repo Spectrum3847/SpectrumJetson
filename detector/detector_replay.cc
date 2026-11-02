@@ -44,6 +44,9 @@
 // strongest gradient across each tag edge (subpixel peak, every ~1.5 px along the edge);
 // --edgefit-undist: the same, with the lines fitted in undistorted coordinates (needs --calib).
 // --no-refine-edges: the detector's own RefineEdges off. --cos X: qtp.cos_critical_rad.
+// --early-reject N: detector-20's early check (SPECTRUM_DETECTOR_EARLY_REJECT=N: N errors of slack on the
+// unrefined quad, before RefineEdges); --early-mode border|scales: SPECTRUM_DETECTOR_EARLY_MODE.
+// --early-stats FILE: SPECTRUM_DETECTOR_EARLY_STATS (per-DecodeTags quads, survivors and thread CPU).
 // --nmaxima N: qtp.max_nmaxima (bos compiles it in as 10: any other value CHECK-fails). Refinement time goes on its own "Refine:" line.
 #include <algorithm>
 #include <atomic>
@@ -315,6 +318,9 @@ int main(int argc, char **argv) {
     else if (a == "--no-refine-edges") no_refine_edges = true;
     else if (a == "--cos") cos_crit = std::atof(v), ++i;
     else if (a == "--nmaxima") nmaxima = std::atoi(v), ++i;
+    else if (a == "--early-reject") setenv("SPECTRUM_DETECTOR_EARLY_REJECT", v, 1), ++i;
+    else if (a == "--early-mode") setenv("SPECTRUM_DETECTOR_EARLY_MODE", v, 1), ++i;
+    else if (a == "--early-stats") setenv("SPECTRUM_DETECTOR_EARLY_STATS", v, 1), ++i;
     else if (a == "--exclude") {
       std::stringstream ss(v);
       std::string t;
