@@ -22,6 +22,11 @@
 // the normal decoder. Every 64th matched frame is re-decoded whole on a low-priority thread and
 // compared byte for byte; one difference turns streaming off until PhotonVision restarts.
 // Watchers close when their camera stops (no new frame for 300 ms), so cscore can free its buffers.
+//
+// Band sinks (stream_decode.h; streaming NAPA): a watcher with a sink attached hands each decoded band
+// to it as it is decoded and keeps the sink's frame result with the frame. Sinks are fed only while
+// their consumer keeps taking results (1 s), and frames the consumer's frame-rate cap will skip aren't
+// fed. Built as libspectrum-stream.so (CMakeLists.txt, scripts/jetson/07-build-napa-detector.sh).
 #include "stream_decode.h"
 
 #include <algorithm>
@@ -96,6 +101,14 @@ struct Result {
   uint8_t tail[kSample], mid[kSample];
   std::vector<uint8_t> gray;
   long seq = 0;
+  // the band sink's result for this frame (owned here until taken)
+  void *sink_ctx = nullptr, *sink_out = nullptr;
+  void (*sink_free)(void *) = nullptr;
+  void ClearSink() {
+    if (sink_out && sink_free) sink_free(sink_out);
+    sink_ctx = sink_out = nullptr;
+    sink_free = nullptr;
+  }
 };
 
 // One camera: its V4L2 buffers, mapped read-write through our own descriptor.
@@ -119,6 +132,18 @@ struct Watcher {
   std::vector<double> tails;
   long frames = 0, aborted = 0;
   long cpu_ns = 0;
+
+  // band sink (sink_mu is held across every call into it, so detach() can wait for it)
+  std::mutex sink_mu;
+  spectrum_band_sink sink{};
+  Clock::time_point sink_taken{};          // last spectrum_stream_take for this sink
+  std::atomic<int64_t> want_after_ns{0};   // the consumer's next frame due (CLOCK_MONOTONIC)
+  double frame_ms = 8;                     // SOI -> EOI of the last frame (for the skip rule)
+  std::vector<double> sink_tails;          // finish() ms
+  long sink_fed = 0, sink_skipped = 0;
+  // the cores of the thread that takes this watcher's frames (SPECTRUM_STREAM_CPUS=camera)
+  std::mutex cpu_mu;
+  std::string consumer_cpus;
 };
 
 std::mutex g_mu;
@@ -128,6 +153,23 @@ std::vector<std::unique_ptr<Watcher>> &g_watchers = *new std::vector<std::unique
 Clock::time_point g_next_scan{};
 std::atomic<bool> g_off{false};
 std::atomic<long> g_hit{0}, g_miss{0}, g_waited{0}, g_check_ok{0}, g_check_differ{0};
+
+// The frames DecodeGray handed out (by output pointer; the pipeline may see a copy, so take() also
+// matches by content): which watcher and which of its frames.
+struct Served {
+  const uint8_t *out = nullptr;
+  std::string dev;
+  long seq = 0;
+};
+thread_local Served t_served;
+
+// Is `img` (stride bytes a row) the frame r decoded? Every 16th row compared whole.
+bool SameImage(const Result &r, const uint8_t *img, int width, int height, size_t stride) {
+  if (r.gray.size() != static_cast<size_t>(width) * height) return false;
+  for (int y = 3; y < height; y += 16)
+    if (std::memcmp(r.gray.data() + static_cast<size_t>(y) * width, img + y * stride, width) != 0) return false;
+  return true;
+}
 
 // The fill point: start of the first run of kFfRun 0xFF bytes at or after from (or limit).
 size_t FindFill(const uint8_t *p, size_t from, size_t limit) {
@@ -169,13 +211,23 @@ std::vector<int> ParseCpus(const std::string &s) {
   return v;
 }
 
-void PlaceWatcher(std::string &applied) {
+// "camera": the watcher (and its band sink's work) runs on the cores of the thread that takes its frames,
+// i.e. its camera's VisionRunner core when photonvision-102 pins it.
+void PlaceWatcher(Watcher *w, std::string &applied) {
   const char *env = std::getenv("SPECTRUM_STREAM_CPUS");
   const std::string mode = env && *env ? env : "all";
   if (mode == "all") return;
   cpu_set_t want;
   CPU_ZERO(&want);
-  if (mode == "auto") {
+  if (mode == "camera") {
+    std::string c;
+    {
+      std::lock_guard<std::mutex> l(w->cpu_mu);
+      c = w->consumer_cpus;
+    }
+    for (int k : ParseCpus(c)) CPU_SET(k, &want);
+    if (CPU_COUNT(&want) == 0) return;
+  } else if (mode == "auto") {
     cpu_set_t proc;
     if (sched_getaffinity(getpid(), sizeof(proc), &proc)) return;  // the main thread: the process's cores
     std::vector<int> avoid;
@@ -210,7 +262,7 @@ void PlaceWatcher(std::string &applied) {
     if (CPU_ISSET(c, &want)) list += (list.empty() ? "" : ",") + std::to_string(c);
   if (list == applied) return;
   if (sched_setaffinity(0, sizeof(want), &want) == 0) {
-    std::cout << "stream decode: watcher on cores " << list << std::endl;
+    std::cout << "stream decode " << w->dev << ": watcher on cores " << list << std::endl;
     applied = list;
   }
 }
@@ -239,8 +291,60 @@ void WatchLoop(Watcher *w) {
   Clock::time_point eoi_seen{};
   int ri = 0;  // result slot being filled
   std::vector<uint8_t> out;
+  void *fed_ctx = nullptr;  // the sink fed this frame (nullptr: none)
+  Clock::time_point t_soi{};
+
+  // Start feeding the attached sink with this frame, if it's still taking results and wants it.
+  auto sink_begin = [&]() {
+    fed_ctx = nullptr;
+    std::lock_guard<std::mutex> l(w->sink_mu);
+    if (!w->sink.ctx || Clock::now() - w->sink_taken > std::chrono::seconds(1)) return;
+    // The consumer's frame-rate cap: it next takes the newest frame complete at its due time, so a
+    // frame completing more than a frame period (plus 1 ms) before that will be skipped.
+    const int64_t due = w->want_after_ns.load();
+    const int64_t done_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                (t_soi + std::chrono::microseconds(static_cast<long>(w->frame_ms * 1000)))
+                                    .time_since_epoch())
+                                .count();
+    if (due > 0 && done_ns < due - static_cast<int64_t>((w->frame_ms + 1.5) * 1e6)) {
+      w->sink_skipped++;
+      return;
+    }
+    if (w->sink.begin(w->sink.ctx, out.data(), w->width, w->height, w->width)) fed_ctx = w->sink.ctx;
+  };
+  auto sink_feed = [&](int rows) {
+    if (!fed_ctx) return;
+    std::lock_guard<std::mutex> l(w->sink_mu);
+    if (w->sink.ctx != fed_ctx) {
+      fed_ctx = nullptr;  // detached or moved: its stream is abandoned (the next Begin resets it)
+      return;
+    }
+    w->sink.feed(fed_ctx, rows);
+  };
+  // finish(); keep=false: an aborted frame, just reset the sink.
+  auto sink_finish = [&](Result *r) {
+    if (!fed_ctx) return;
+    std::lock_guard<std::mutex> l(w->sink_mu);
+    if (w->sink.ctx == fed_ctx) {
+      const auto t0 = Clock::now();
+      void *res = w->sink.finish(fed_ctx);
+      if (r) {
+        w->sink_tails.push_back(Ms(Clock::now() - t0));
+        w->sink_fed++;
+        std::lock_guard<std::mutex> lr(w->mu);
+        r->ClearSink();
+        r->sink_ctx = fed_ctx;
+        r->sink_out = res;
+        r->sink_free = w->sink.free_result;
+      } else if (res) {
+        w->sink.free_result(res);
+      }
+    }
+    fed_ctx = nullptr;
+  };
 
   auto abort_decode = [&]() {
+    sink_finish(nullptr);
     if (decoding) jpeg_destroy_decompress(&d);
     decoding = false;
     std::lock_guard<std::mutex> l(w->mu);
@@ -270,6 +374,7 @@ void WatchLoop(Watcher *w) {
         case kWiped:
           if (p[0] == 0xFF && p[1] == 0xD8 && w->active < 0) {
             last_frame = now;
+            t_soi = now;
             // a new frame started in this buffer: decode it as it fills
             d.err = jpeg_std_error(&err.mgr);
             err.mgr.error_exit = ErrExit;
@@ -294,6 +399,7 @@ void WatchLoop(Watcher *w) {
               ri = static_cast<int>((w->seq + 1) % kResults);
             }
             out.resize(static_cast<size_t>(w->width) * w->height);
+            sink_begin();
             st[i] = kFilling;
           }
           break;
@@ -342,6 +448,7 @@ void WatchLoop(Watcher *w) {
               rows[r] = out.data() + static_cast<size_t>(std::min<unsigned>(d.output_scanline + r, d.output_height - 1)) * w->width;
             if (!jpeg_read_scanlines(&d, rows, 16)) break;
             busy = true;
+            sink_feed(static_cast<int>(d.output_scanline));
           }
           if (hdr == 2 && d.output_scanline >= d.output_height) {
             // all rows decoded: the frame ends at its EOI, at or just after the bytes consumed
@@ -353,11 +460,17 @@ void WatchLoop(Watcher *w) {
                 break;
               }
             if (!len) break;  // EOI not here yet
-            const auto t_done = Clock::now();
             jpeg_destroy_decompress(&d);
             decoding = false;
+            {
+              std::lock_guard<std::mutex> l(w->mu);
+              w->results[ri].ClearSink();  // the slot's previous frame's
+            }
+            sink_finish(&w->results[ri]);  // the frame's band-sink result goes with it
+            const auto t_done = Clock::now();
             if (eoi_seen == Clock::time_point{}) eoi_seen = t_done;
             w->tails.push_back(Ms(t_done - eoi_seen));
+            w->frame_ms = Ms(eoi_seen - t_soi);
             w->frames++;
             wipe_len = std::max(wipe_len, len + len / 2 + 16384);
             {
@@ -389,7 +502,7 @@ void WatchLoop(Watcher *w) {
     if (now - last_frame > std::chrono::milliseconds(300)) break;  // camera stopped
     if (now >= next_place && !decoding) {
       next_place = now + std::chrono::seconds(2);
-      PlaceWatcher(placed);
+      PlaceWatcher(w, placed);
     }
     if (now >= next_log) {
       next_log = now + std::chrono::seconds(10);
@@ -404,6 +517,16 @@ void WatchLoop(Watcher *w) {
           w->dev.c_str(), w->frames, pc(.5), pc(.95), pc(.99),
           w->frames ? w->cpu_ns / 1e6 / w->frames : 0.0, w->cpu_ns / 1e8, w->aborted,
           g_hit.load(), g_miss.load(), g_waited.load(), g_check_ok.load(), g_check_differ.load());
+      if (w->sink_fed || w->sink_skipped) {
+        std::vector<double> s;
+        s.swap(w->sink_tails);
+        std::sort(s.begin(), s.end());
+        auto ps = [&](double q) { return s.empty() ? -1.0 : s[std::min(s.size() - 1, static_cast<size_t>(s.size() * q))]; };
+        std::printf("stream decode %s: band sink fed %ld frames (skipped %ld for the frame-rate cap), "
+                    "finish p50 %.3f p95 %.3f p99 %.3f ms\n",
+                    w->dev.c_str(), w->sink_fed, w->sink_skipped, ps(.5), ps(.95), ps(.99));
+        w->sink_fed = w->sink_skipped = 0;
+      }
       std::fflush(stdout);
       w->frames = 0;
       w->cpu_ns = 0;
@@ -415,6 +538,7 @@ void WatchLoop(Watcher *w) {
     }
   }
   if (decoding) jpeg_destroy_decompress(&d);
+  sink_finish(nullptr);
   w->dead = true;
   w->cv.notify_all();
 }
@@ -468,6 +592,7 @@ void Scan(int width, int height) {
     if ((*it)->dead) {
       (*it)->thread.join();
       for (int i = 0; i < (*it)->n; i++) munmap((*it)->buf[i], (*it)->length);
+      for (Result &r : (*it)->results) r.ClearSink();
       close((*it)->fd);
       std::cout << "stream decode: stopped watching " << (*it)->dev << std::endl;
       it = g_watchers.erase(it);
@@ -535,9 +660,15 @@ bool Match(const Result &r, const uint8_t *jpeg, size_t size) {
 }
 
 }  // namespace
+}  // namespace spectrum_stream
 
-int DecodeGray(const uint8_t *jpeg, size_t size, uint8_t *out, int width, int height,
-               size_t stride) {
+using namespace spectrum_stream;
+
+#define SPECTRUM_STREAM_API extern "C" __attribute__((visibility("default")))
+
+SPECTRUM_STREAM_API int spectrum_stream_decode_gray(const uint8_t *jpeg, size_t size, uint8_t *out,
+                                                    int width, int height, size_t stride) {
+  t_served = Served();
   if (g_off || size < 1024) return 1;
   std::vector<Watcher *> ws;
   {
@@ -568,6 +699,24 @@ int DecodeGray(const uint8_t *jpeg, size_t size, uint8_t *out, int width, int he
       }
     }
     if (!r) continue;
+    t_served.out = out;
+    t_served.dev = w->dev;
+    t_served.seq = r->seq;
+    {
+      static thread_local Clock::time_point next_cpus{};
+      const auto now = Clock::now();
+      if (now >= next_cpus) {  // the consumer's cores, for SPECTRUM_STREAM_CPUS=camera
+        next_cpus = now + std::chrono::seconds(2);
+        cpu_set_t set;
+        if (sched_getaffinity(0, sizeof(set), &set) == 0) {
+          std::string list;
+          for (int c = 0; c < CPU_SETSIZE; c++)
+            if (CPU_ISSET(c, &set)) list += (list.empty() ? "" : ",") + std::to_string(c);
+          std::lock_guard<std::mutex> lc(w->cpu_mu);
+          w->consumer_cpus = list;
+        }
+      }
+    }
     for (int y = 0; y < height; y++)
       std::memcpy(out + static_cast<size_t>(y) * stride, r->gray.data() + static_cast<size_t>(y) * width, width);
     const long hit = ++g_hit;
@@ -579,4 +728,69 @@ int DecodeGray(const uint8_t *jpeg, size_t size, uint8_t *out, int width, int he
   return 1;
 }
 
-}  // namespace spectrum_stream
+SPECTRUM_STREAM_API int spectrum_stream_take(const uint8_t *out, int width, int height, size_t stride,
+                                             const spectrum_band_sink *sink, int64_t want_after_ns,
+                                             void **result) {
+  if (result) *result = nullptr;
+  if (!out || !sink || !sink->ctx || width <= 0 || height <= 0) return -1;
+  std::lock_guard<std::mutex> g(g_mu);
+  Watcher *w = nullptr;
+  long seq = 0;
+  if (t_served.out == out) {
+    for (auto &x : g_watchers)
+      if (x->dev == t_served.dev && !x->dead) w = x.get();
+    seq = t_served.seq;
+  }
+  if (!w) {  // a copy of the decoded frame: find it by content
+    for (auto &x : g_watchers) {
+      if (x->dead || x->width != width || x->height != height) continue;
+      std::lock_guard<std::mutex> l(x->mu);
+      for (const Result &r : x->results)
+        if (r.seq && SameImage(r, out, width, height, stride)) {
+          w = x.get();
+          seq = r.seq;
+        }
+      if (w) break;
+    }
+  }
+  if (!w) return -1;
+  // attach here (and only here)
+  for (auto &x : g_watchers) {
+    if (x.get() == w) continue;
+    std::lock_guard<std::mutex> l(x->sink_mu);
+    if (x->sink.ctx == sink->ctx) x->sink = spectrum_band_sink{};
+  }
+  {
+    std::lock_guard<std::mutex> l(w->sink_mu);
+    if (w->sink.ctx != sink->ctx) {
+      w->sink = *sink;
+      std::cout << "stream decode " << w->dev << ": band sink attached" << std::endl;
+    }
+    w->sink_taken = Clock::now();
+    w->want_after_ns = want_after_ns;
+  }
+  std::lock_guard<std::mutex> l(w->mu);
+  for (Result &r : w->results)
+    if (r.seq == seq) {
+      if (r.sink_ctx != sink->ctx || !r.sink_out) return 0;
+      *result = r.sink_out;
+      r.sink_out = nullptr;
+      r.sink_ctx = nullptr;
+      return 1;
+    }
+  return 0;
+}
+
+SPECTRUM_STREAM_API void spectrum_stream_detach(void *ctx) {
+  if (!ctx) return;
+  std::lock_guard<std::mutex> g(g_mu);
+  for (auto &w : g_watchers) {
+    {
+      std::lock_guard<std::mutex> l(w->sink_mu);
+      if (w->sink.ctx == ctx) w->sink = spectrum_band_sink{};
+    }
+    std::lock_guard<std::mutex> l(w->mu);
+    for (Result &r : w->results)
+      if (r.sink_ctx == ctx) r.ClearSink();
+  }
+}

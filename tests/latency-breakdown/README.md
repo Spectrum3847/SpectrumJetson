@@ -21,7 +21,7 @@ Measured 2026-11-02 on the bench Jetson (Orin Nano Super, clocks `full`, stock c
 
 | File | What |
 |---|---|
-| `run.sh SECS [COND...]` | Runs on the Jetson. COND is `gpu`/`napa` (or `gpuyolo`/`napayolo`: AprilTag + Object with yolo11n at Object FPS max 30), then the number of cameras, then an optional decoder: `gpu-2`, `napa-1-stream` (`nvjpg`, `turbo` or `stream`). Starts PhotonVision with `SPECTRUM_LATENCY_TRACE` (fork `photonvision-103`) for a per-frame CSV, while ftrace records `xhci_urb_giveback`, `vb2_buf_done` and `v4l2_dqbuf` (mono clock). Records CPU and xhci IRQ/s. Restores the settings DB, clocks mode and drop-in, and stops tracing. The second camera is deactivated in the DB for 1-camera runs. `SCHED=1` also traces `sched_switch`/`sched_wakeup`; `EXTRA_ENV="VAR=value ..."` adds environment variables to the drop-in. |
+| `run.sh SECS [COND...]` | Runs on the Jetson. COND is `gpu`/`napa`/`napastream` (or `gpuyolo`/`napayolo`/`napastreamyolo`: AprilTag + Object with yolo11n at Object FPS max 30), then the number of cameras, then an optional decoder: `gpu-2`, `napa-1-stream` (`nvjpg`, `turbo` or `stream`). Starts PhotonVision with `SPECTRUM_LATENCY_TRACE` (fork `photonvision-103`) for a per-frame CSV, while ftrace records `xhci_urb_giveback`, `vb2_buf_done` and `v4l2_dqbuf` (mono clock). Records CPU and xhci IRQ/s. Restores the settings DB, clocks mode and drop-in, and stops tracing. The second camera is deactivated in the DB for 1-camera runs. `SCHED=1` also traces `sched_switch`/`sched_wakeup`; `EXTRA_ENV="VAR=value ..."` adds environment variables to the drop-in. |
 | `analyze.py DIR NAME` | Joins the CSV and the trace per frame on `CLOCK_MONOTONIC`. Prints the stage table and drops (V4L2 sequence gaps). |
 | `ktrace.py TRACE --frames` | Kernel stages only: first and last USB packet, done, DQBUF. The camera slot is fixed per video device by majority. |
 | `usb-sweep.sh OUT PACKETS...` | Streams with `v4l2-ctl` (PhotonVision stopped) at each `urb_packets` value. Optional `EXPOSURE` and `CAMS`. Measures IRQ/s and CPU. Restores the settings. |
@@ -70,6 +70,14 @@ only known to within one URB.
   detectors and with 1 or 2 cameras.
 - The 2-camera spike in the cscore handoff (p99 2.9 ms with the GPU detector, 1.3 with NAPA)
   is fixed; see [The 2-camera handoff spike](#the-2-camera-handoff-spike-fixed).
+
+### Streaming NAPA (`napastream`, 2026-11-02)
+
+NAPA runs band by band while the frame is decoded, so tags are ready ~0.5 ms after the last packet, not
+~1.45 ms. Mid-exposure → pose p50 is 13.0-13.4 ms instead of 14.0-14.3 ms (1 or 2 cameras, with or without
+yolo11n), and p99 drops by 0.8-2.5 ms. Full tables and the identity checks are in
+[`../napa-stream`](../napa-stream/README.md#live-results-bench-jetson-clocks-full-2-thriftiest-cams-at-122-fps-urb_packets4-stream-decoder-both-sides).
+`analyze.py` now also prints `TAIL last packet -> tags detected`. Set `TAG_FPS_MAX=N` to run with Tag FPS max.
 
 ### Earlier baseline at urb_packets=16 (2 ms URBs), NVJPG
 
