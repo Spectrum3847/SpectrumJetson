@@ -1,0 +1,153 @@
+d15s_far: 39844 sightings -> 23743 frame observations (11766 multi-tag); pass gates 16058 (67.6%), enabled 15656
+napa: 34625 sightings -> 22163 frame observations (9580 multi-tag); pass gates 14349 (64.7%), enabled 14066
+napa16: 44954 sightings -> 24978 frame observations (13862 multi-tag); pass gates 16555 (66.3%), enabled 16152
+napafar: 43057 sightings -> 24468 frame observations (13055 multi-tag); pass gates 16084 (65.7%), enabled 15683
+
+In-frame bad threshold 19.91 px. Hamming isn't in the replay CSV (max_hamming is 1 for all but napa_h3); margin stands in.
+
+=== napa16 not in napa (extras) vs in both
+  extras: 10458
+    side px p10/p50/p90 19.6/32.3/54.5; range m p50/p90/max 3.61/7.25/9.40; edge px p10/p50 35/192; margin p10/p50 44/67
+    in-frame checked 6017: p50 1.42 p90 10.77 px, >19.91 px 5.8%; bad (analyze.py labels) 10.4% of 9499 known
+    speed p50 1.64 m/s; enabled 82%; alone in frame 14%; single-tag ambiguity p50 0.28
+  common: 34496
+    side px p10/p50/p90 24.5/40.5/76.2; range m p50/p90/max 3.14/5.68/8.60; edge px p10/p50 36/151; margin p10/p50 52/79
+    in-frame checked 18247: p50 1.35 p90 12.12 px, >19.91 px 6.8%; bad (analyze.py labels) 14.4% of 29043 known
+    speed p50 1.28 m/s; enabled 83%; alone in frame 28%; single-tag ambiguity p50 0.16
+  pass gates: extras 7436 / 10458 (71.1%), enabled 6931; common 23967 / 34496 (69.5%)
+    extras passed: 7436; in-frame p50 1.27 p90 5.73 px (n=4852), >19.91 2.2%; bad 8.2% of 6957; range p50 3.47 m
+    common passed: 23967; in-frame p50 1.18 p90 7.07 px (n=13627), >19.91 3.4%; bad 12.2% of 20860; range p50 3.05 m
+    extras rejected: 3022; in-frame p50 4.15 p90 80.37 px (n=1165), >19.91 20.9%; bad 16.3% of 2542; range p50 4.16 m
+    extras alone (single-tag obs): 1492; PASS 610, maxHeight 414, maxAmbiguity 344, maxDistance 75, headingAgreesWithGyro 24, insideField 24, maxTilt 1
+    extras with other tags (multi-tag obs): 8966; PASS 6826, headingAgreesWithGyro 841, maxDistance 578, maxHeight 398, maxReprojection 293, maxYawRate 13, maxTilt 9, insideField 8
+
+=== napa16 not in d15s_far (extras) vs in both
+  extras: 5694
+    side px p10/p50/p90 19.6/32.4/58.0; range m p50/p90/max 3.47/7.27/9.40; edge px p10/p50 7/155; margin p10/p50 36/57
+    in-frame checked 3184: p50 2.23 p90 21.51 px, >19.91 px 11.1%; bad (analyze.py labels) 16.3% of 5083 known
+    speed p50 1.73 m/s; enabled 83%; alone in frame 23%; single-tag ambiguity p50 0.43
+  common: 39260
+    side px p10/p50/p90 22.9/39.6/73.2; range m p50/p90/max 3.19/5.96/9.22; edge px p10/p50 40/160; margin p10/p50 54/78
+    in-frame checked 21080: p50 1.29 p90 10.09 px, >19.91 px 5.8%; bad (analyze.py labels) 13.0% of 33459 known
+    speed p50 1.31 m/s; enabled 82%; alone in frame 25%; single-tag ambiguity p50 0.17
+  pass gates: extras 3370 / 5694 (59.2%), enabled 3168; common 28033 / 39260 (71.4%)
+    extras passed: 3370; in-frame p50 1.52 p90 8.05 px (n=2238), >19.91 3.4%; bad 9.3% of 3142; range p50 3.55 m
+    common passed: 28033; in-frame p50 1.17 p90 6.70 px (n=16241), >19.91 3.0%; bad 11.5% of 24675; range p50 3.09 m
+    extras rejected: 2324; in-frame p50 12.01 p90 49.02 px (n=946), >19.91 29.4%; bad 27.7% of 1941; range p50 3.34 m
+    extras alone (single-tag obs): 1296; maxHeight 527, PASS 347, maxAmbiguity 319, insideField 33, maxDistance 27, headingAgreesWithGyro 23, maxTilt 17, maxYawRate 3
+    extras with other tags (multi-tag obs): 4398; PASS 3023, headingAgreesWithGyro 425, maxReprojection 343, maxHeight 335, maxDistance 219, insideField 21, maxTilt 21, maxYawRate 11
+
+=== napafar not in napa (extras) vs in both
+  extras: 8432
+    side px p10/p50/p90 19.6/29.7/47.1; range m p50/p90/max 3.85/7.26/9.26; edge px p10/p50 34/192; margin p10/p50 46/68
+    in-frame checked 4568: p50 1.28 p90 9.36 px, >19.91 px 5.3%; bad (analyze.py labels) 8.3% of 7630 known
+    speed p50 1.56 m/s; enabled 80%; alone in frame 13%; single-tag ambiguity p50 0.30
+  common: 34625
+    side px p10/p50/p90 24.5/40.6/76.6; range m p50/p90/max 3.14/5.67/8.60; edge px p10/p50 35/151; margin p10/p50 52/79
+    in-frame checked 17549: p50 1.37 p90 12.35 px, >19.91 px 6.9%; bad (analyze.py labels) 14.6% of 28786 known
+    speed p50 1.29 m/s; enabled 83%; alone in frame 30%; single-tag ambiguity p50 0.16
+  pass gates: extras 5975 / 8432 (70.9%), enabled 5507; common 23942 / 34625 (69.1%)
+    extras passed: 5975; in-frame p50 1.11 p90 5.32 px (n=3779), >19.91 1.9%; bad 5.7% of 5591; range p50 3.67 m
+    common passed: 23942; in-frame p50 1.20 p90 7.37 px (n=13115), >19.91 3.6%; bad 12.5% of 20632; range p50 3.05 m
+    extras rejected: 2457; in-frame p50 4.83 p90 83.16 px (n=789), >19.91 21.7%; bad 15.3% of 2039; range p50 4.76 m
+    extras alone (single-tag obs): 1111; PASS 372, maxHeight 334, maxAmbiguity 289, maxDistance 70, headingAgreesWithGyro 26, insideField 20
+    extras with other tags (multi-tag obs): 7321; PASS 5603, headingAgreesWithGyro 602, maxDistance 566, maxHeight 328, maxReprojection 206, maxYawRate 6, insideField 5, maxTilt 5
+
+=== napafar not in d15s_far (extras) vs in both
+  extras: 4950
+    side px p10/p50/p90 19.7/31.6/55.0; range m p50/p90/max 3.57/7.27/9.26; edge px p10/p50 6/150; margin p10/p50 37/57
+    in-frame checked 2638: p50 2.41 p90 22.62 px, >19.91 px 11.6%; bad (analyze.py labels) 15.7% of 4400 known
+    speed p50 1.69 m/s; enabled 82%; alone in frame 24%; single-tag ambiguity p50 0.46
+  common: 38107
+    side px p10/p50/p90 23.0/39.3/72.7; range m p50/p90/max 3.20/5.93/8.72; edge px p10/p50 39/158; margin p10/p50 54/79
+    in-frame checked 19479: p50 1.29 p90 10.18 px, >19.91 px 5.9%; bad (analyze.py labels) 12.9% of 32016 known
+    speed p50 1.29 m/s; enabled 82%; alone in frame 27%; single-tag ambiguity p50 0.17
+  pass gates: extras 2862 / 4950 (57.8%), enabled 2673; common 27055 / 38107 (71.0%)
+    extras passed: 2862; in-frame p50 1.43 p90 8.31 px (n=1869), >19.91 3.4%; bad 7.7% of 2674; range p50 3.64 m
+    common passed: 27055; in-frame p50 1.15 p90 6.73 px (n=15025), >19.91 3.2%; bad 11.5% of 23549; range p50 3.12 m
+    extras rejected: 2088; in-frame p50 13.89 p90 53.15 px (n=769), >19.91 31.7%; bad 28.0% of 1726; range p50 3.44 m
+    extras alone (single-tag obs): 1165; maxHeight 501, maxAmbiguity 297, PASS 262, insideField 31, maxDistance 29, headingAgreesWithGyro 21, maxTilt 20, maxYawRate 4
+    extras with other tags (multi-tag obs): 3785; PASS 2600, headingAgreesWithGyro 330, maxHeight 297, maxReprojection 285, maxDistance 228, maxTilt 20, insideField 18, maxYawRate 7
+
+=== 3a. Coverage: share of enabled 100 ms bins with at least one accepted observation
+  TXMAN1_Q17 orin-left            (152 s): d15s_far 57.8%, napa 54.3%, napa16 58.5%, napafar 57.8%
+  TXMAN1_Q17 orin-right           (152 s): d15s_far 35.8%, napa 30.9%, napa16 36.9%, napafar 35.5%
+  TXMAN1_Q17 robot (any camera)   (152 s): d15s_far 75.3%, napa 70.6%, napa16 77.2%, napafar 75.9%
+  TXMAN1_Q19 orin-left            (35 s): d15s_far 32.1%, napa 30.3%, napa16 31.8%, napafar 30.9%
+  TXMAN1_Q19 orin-right           (35 s): d15s_far 38.2%, napa 34.7%, napa16 38.2%, napafar 36.7%
+  TXMAN1_Q19 robot (any camera)   (35 s): d15s_far 45.4%, napa 41.0%, napa16 46.8%, napafar 44.8%
+  TXMAN1_Q24 orin-left            (158 s): d15s_far 54.7%, napa 52.7%, napa16 55.1%, napafar 53.9%
+  TXMAN1_Q24 orin-right           (158 s): d15s_far 47.7%, napa 41.8%, napa16 48.0%, napafar 46.7%
+  TXMAN1_Q24 robot (any camera)   (158 s): d15s_far 73.2%, napa 68.9%, napa16 73.1%, napafar 71.8%
+  TXMAN1_Q27 orin-left            (154 s): d15s_far 41.1%, napa 35.9%, napa16 43.1%, napafar 41.9%
+  TXMAN1_Q27 orin-right           (154 s): d15s_far 8.3%, napa 7.0%, napa16 8.4%, napafar 8.2%
+  TXMAN1_Q27 robot (any camera)   (154 s): d15s_far 46.3%, napa 41.1%, napa16 48.1%, napafar 46.9%
+  TXMAN1_Q32 orin-left            (160 s): d15s_far 39.0%, napa 35.9%, napa16 39.4%, napafar 38.5%
+  TXMAN1_Q32 orin-right           (160 s): d15s_far 35.7%, napa 30.6%, napa16 36.5%, napafar 35.0%
+  TXMAN1_Q32 robot (any camera)   (160 s): d15s_far 57.4%, napa 51.2%, napa16 57.9%, napafar 56.2%
+  TXMAN1_Test_r19 orin-left            (160 s): d15s_far 34.3%, napa 33.4%, napa16 34.7%, napafar 34.1%
+  TXMAN1_Test_r19 orin-right           (160 s): d15s_far 30.5%, napa 25.4%, napa16 33.0%, napafar 32.3%
+  TXMAN1_Test_r19 robot (any camera)   (160 s): d15s_far 48.6%, napa 46.5%, napa16 47.9%, napafar 47.7%
+  TOTAL: d15s_far/orin-left 44.7%; d15s_far/orin-right 32.0%; d15s_far/robot 59.5%; napa/orin-left 41.8%; napa/orin-right 27.5%; napa/robot 55.0%; napa16/orin-left 45.4%; napa16/orin-right 32.9%; napa16/robot 60.2%; napafar/orin-left 44.5%; napafar/orin-right 31.9%; napafar/robot 59.0%
+  napa16 vs napa: robot bins gained 462 (5.65% of enabled time, 46.2 s), lost 37; accepted observations made only of extras 1590 (1559 enabled) of 16555 accepted
+  napa16 vs d15s_far: robot bins gained 184 (2.25% of enabled time, 18.4 s), lost 126; accepted observations made only of extras 519 (510 enabled) of 16555 accepted
+  napafar vs napa: robot bins gained 342 (4.18% of enabled time, 34.2 s), lost 15; accepted observations made only of extras 1185 (1162 enabled) of 16084 accepted
+  napafar vs d15s_far: robot bins gained 134 (1.64% of enabled time, 13.4 s), lost 174; accepted observations made only of extras 425 (416 enabled) of 16084 accepted
+
+=== 3b. Multi-tag: frames where extras join other tags
+  napa16 vs napa: 6068 multi-tag frames with an extra; without the extras 1409 had no tag, 2902 one tag (single-tag), 1757 already multi-tag
+    accepted: without 2964, with 4597 (newly accepted 1745, newly rejected 112)
+    accepted both ways (2852): reprojection p50 0.14 -> 0.35 px; trust xy sd p50 0.292 -> 0.159 m; pose moved p50 0.028 p90 0.085 m
+    left/right agreement (without extras, napa): 1777 simultaneous accepted pairs, distance p50 0.059 p90 0.122 m
+    left/right agreement (with extras, napa16): 2161 simultaneous accepted pairs, distance p50 0.061 p90 0.133 m
+  napa16 vs d15s_far: 3673 multi-tag frames with an extra; without the extras 256 had no tag, 2003 one tag (single-tag), 1414 already multi-tag
+    accepted: without 2034, with 2529 (newly accepted 775, newly rejected 280)
+    accepted both ways (1754): reprojection p50 0.20 -> 0.42 px; trust xy sd p50 0.249 -> 0.176 m; pose moved p50 0.026 p90 0.091 m
+    left/right agreement (without extras, d15s_far): 2069 simultaneous accepted pairs, distance p50 0.060 p90 0.124 m
+    left/right agreement (with extras, napa16): 2161 simultaneous accepted pairs, distance p50 0.061 p90 0.133 m
+  napafar vs napa: 4912 multi-tag frames with an extra; without the extras 1194 had no tag, 2281 one tag (single-tag), 1437 already multi-tag
+    accepted: without 2361, with 3724 (newly accepted 1449, newly rejected 86)
+    accepted both ways (2275): reprojection p50 0.13 -> 0.33 px; trust xy sd p50 0.301 -> 0.161 m; pose moved p50 0.029 p90 0.085 m
+    left/right agreement (without extras, napa): 1777 simultaneous accepted pairs, distance p50 0.059 p90 0.122 m
+    left/right agreement (with extras, napafar): 2104 simultaneous accepted pairs, distance p50 0.061 p90 0.133 m
+  napafar vs d15s_far: 3158 multi-tag frames with an extra; without the extras 234 had no tag, 1686 one tag (single-tag), 1238 already multi-tag
+    accepted: without 1753, with 2164 (newly accepted 662, newly rejected 251)
+    accepted both ways (1502): reprojection p50 0.20 -> 0.42 px; trust xy sd p50 0.249 -> 0.174 m; pose moved p50 0.027 p90 0.089 m
+    left/right agreement (without extras, d15s_far): 2069 simultaneous accepted pairs, distance p50 0.060 p90 0.124 m
+    left/right agreement (with extras, napafar): 2104 simultaneous accepted pairs, distance p50 0.061 p90 0.133 m
+
+=== 3c. Pose filter (odometry + accepted vision, innovation gate on its own estimate), enabled time
+    d15s_far TXMAN1_Q17: updates 3457, rejects 40, jumps 18, still-robot distance to the logged pose p50 0.084 p90 0.240 m, time since last correction p90 0.45 s
+    d15s_far TXMAN1_Q19: updates 644, rejects 6, jumps 3, still-robot distance to the logged pose p50 0.303 p90 6.405 m, time since last correction p90 14.52 s
+    d15s_far TXMAN1_Q24: updates 4064, rejects 54, jumps 26, still-robot distance to the logged pose p50 0.214 p90 0.337 m, time since last correction p90 0.57 s
+    d15s_far TXMAN1_Q27: updates 1743, rejects 75, jumps 24, still-robot distance to the logged pose p50 0.117 p90 0.486 m, time since last correction p90 2.79 s
+    d15s_far TXMAN1_Q32: updates 2864, rejects 61, jumps 20, still-robot distance to the logged pose p50 0.210 p90 0.904 m, time since last correction p90 2.58 s
+    d15s_far TXMAN1_Test_r19: updates 2466, rejects 72, jumps 35, still-robot distance to the logged pose p50 2.819 p90 37.213 m, time since last correction p90 33.62 s
+  d15s_far : updates 15238 (1118/min), innovation-gate rejects 308, jumps (>0.25 m or reset) 126 (9.25/min); NIS mean 5.85 (2 if the std devs were right), >9.21 13.0%; innovation p50 0.204 p95 0.724 m; time since last correction p50 0.04 p90 3.44 p99 41.64 max 170.8 s, >1 s 20.2%; still-robot distance to the logged pose p50 0.187 p90 9.226 m (weak reference, Q19 out)
+    napa TXMAN1_Q17: updates 3089, rejects 42, jumps 21, still-robot distance to the logged pose p50 0.087 p90 0.273 m, time since last correction p90 0.59 s
+    napa TXMAN1_Q19: updates 568, rejects 9, jumps 3, still-robot distance to the logged pose p50 0.298 p90 6.367 m, time since last correction p90 14.85 s
+    napa TXMAN1_Q24: updates 3754, rejects 58, jumps 26, still-robot distance to the logged pose p50 0.210 p90 0.330 m, time since last correction p90 0.71 s
+    napa TXMAN1_Q27: updates 1475, rejects 65, jumps 26, still-robot distance to the logged pose p50 0.134 p90 1.319 m, time since last correction p90 3.15 s
+    napa TXMAN1_Q32: updates 2496, rejects 61, jumps 20, still-robot distance to the logged pose p50 0.227 p90 0.775 m, time since last correction p90 2.94 s
+    napa TXMAN1_Test_r19: updates 2267, rejects 72, jumps 30, still-robot distance to the logged pose p50 2.766 p90 37.142 m, time since last correction p90 33.63 s
+  napa     : updates 13649 (1002/min), innovation-gate rejects 307, jumps (>0.25 m or reset) 126 (9.25/min); NIS mean 5.33 (2 if the std devs were right), >9.21 11.5%; innovation p50 0.195 p95 0.723 m; time since last correction p50 0.06 p90 3.69 p99 41.99 max 171.1 s, >1 s 22.1%; still-robot distance to the logged pose p50 0.202 p90 9.226 m (weak reference, Q19 out)
+    napa16 TXMAN1_Q17: updates 3571, rejects 41, jumps 18, still-robot distance to the logged pose p50 0.084 p90 0.316 m, time since last correction p90 0.40 s
+    napa16 TXMAN1_Q19: updates 622, rejects 8, jumps 3, still-robot distance to the logged pose p50 0.295 p90 6.480 m, time since last correction p90 14.82 s
+    napa16 TXMAN1_Q24: updates 4151, rejects 59, jumps 24, still-robot distance to the logged pose p50 0.216 p90 0.345 m, time since last correction p90 0.61 s
+    napa16 TXMAN1_Q27: updates 1858, rejects 57, jumps 26, still-robot distance to the logged pose p50 0.114 p90 1.235 m, time since last correction p90 2.75 s
+    napa16 TXMAN1_Q32: updates 2933, rejects 57, jumps 19, still-robot distance to the logged pose p50 0.211 p90 1.064 m, time since last correction p90 2.25 s
+    napa16 TXMAN1_Test_r19: updates 2607, rejects 77, jumps 33, still-robot distance to the logged pose p50 2.766 p90 37.279 m, time since last correction p90 33.62 s
+  napa16   : updates 15742 (1155/min), innovation-gate rejects 299, jumps (>0.25 m or reset) 123 (9.03/min); NIS mean 5.80 (2 if the std devs were right), >9.21 12.8%; innovation p50 0.212 p95 0.735 m; time since last correction p50 0.03 p90 3.25 p99 41.94 max 171.1 s, >1 s 19.8%; still-robot distance to the logged pose p50 0.188 p90 9.210 m (weak reference, Q19 out)
+    napafar TXMAN1_Q17: updates 3463, rejects 43, jumps 20, still-robot distance to the logged pose p50 0.084 p90 0.323 m, time since last correction p90 0.41 s
+    napafar TXMAN1_Q19: updates 601, rejects 8, jumps 3, still-robot distance to the logged pose p50 0.294 p90 6.429 m, time since last correction p90 14.82 s
+    napafar TXMAN1_Q24: updates 4035, rejects 58, jumps 24, still-robot distance to the logged pose p50 0.215 p90 0.352 m, time since last correction p90 0.63 s
+    napafar TXMAN1_Q27: updates 1801, rejects 58, jumps 26, still-robot distance to the logged pose p50 0.113 p90 1.328 m, time since last correction p90 2.81 s
+    napafar TXMAN1_Q32: updates 2833, rejects 60, jumps 20, still-robot distance to the logged pose p50 0.207 p90 0.851 m, time since last correction p90 2.61 s
+    napafar TXMAN1_Test_r19: updates 2526, rejects 82, jumps 35, still-robot distance to the logged pose p50 2.766 p90 37.274 m, time since last correction p90 33.63 s
+  napafar  : updates 15259 (1120/min), innovation-gate rejects 309, jumps (>0.25 m or reset) 128 (9.39/min); NIS mean 5.52 (2 if the std devs were right), >9.21 12.3%; innovation p50 0.209 p95 0.736 m; time since last correction p50 0.04 p90 3.44 p99 41.95 max 171.1 s, >1 s 20.2%; still-robot distance to the logged pose p50 0.190 p90 9.210 m (weak reference, Q19 out)
+  napa16 vs napa filter estimates, enabled: differ p50 0.037 p90 0.213 p99 7.597 m, >0.1 m 28.2% of the time
+  napa16 vs d15s_far filter estimates, enabled: differ p50 0.018 p90 0.090 p99 1.589 m, >0.1 m 9.1% of the time
+  napafar vs napa filter estimates, enabled: differ p50 0.030 p90 0.160 p99 2.522 m, >0.1 m 22.5% of the time
+  napafar vs d15s_far filter estimates, enabled: differ p50 0.019 p90 0.104 p99 1.099 m, >0.1 m 10.6% of the time
+
+SUMMARY {"napa:napa16": {"extra": {"n": 10458, "side50": 32.2866, "range50": 3.612738537117286, "range90": 7.246294759065156, "loo50": 1.421936620339351, "loobad": 5.833471829815522, "bad": 10.401094852089694, "en": 82.09982788296041, "alone": 14.26659017020463}, "common": {"n": 34496, "side50": 40.536249999999995, "range50": 3.1424626633113055, "range90": 5.680406927639713, "loo50": 1.3513579592122467, "loobad": 6.751794815586123, "bad": 14.402782081740867, "en": 82.61827458256029, "alone": 27.89888682745826}, "pass_extra": 7436, "pass_extra_en": 6931, "pass_common": 23967, "pe_loo50": 1.269386652092614, "pe_loobad": 2.205276174773289, "pe_bad": 8.236308753773178, "pc_loo50": 1.182170960143536, "pc_loobad": 3.382989652894988, "pc_bad": 12.224352828379674, "single_alone": 1492, "single_alone_pass": 610, "cov_gain": 5.649993885288003, "cov_gain_s": 46.2, "cov_loss": 0.45248868778280543, "only_extra_obs": 1590, "only_extra_obs_en": 1559, "accepted": 16555, "mt_frames": 6068, "mt_newacc": 1745, "mt_newrej": 112, "mt_sd": [0.2919313186614676, 0.15860702986711117], "mt_move": 0.0280826366280782, "lr_without": [1777, 0.05911331155285013, 0.12163357106940885], "lr_with": [2161, 0.060641211936574436, 0.13295631597863994], "fdiff50": 0.03659699143858243, "fdiff90": 0.21296325727125853, "fdiff99": 7.596751373684508}, "d15s_far:napa16": {"extra": {"n": 5694, "side50": 32.443349999999995, "range50": 3.4673291640737003, "range90": 7.271229120335663, "loo50": 2.228651868571199, "loobad": 11.086683417085426, "bad": 16.309266181388942, "en": 83.49139445029856, "alone": 22.760800842992623}, "common": {"n": 39260, "side50": 39.60435, "range50": 3.191511698182955, "range90": 5.963011066055845, "loo50": 1.2919238349891262, "loobad": 5.834914611005693, "bad": 12.977076421889477, "en": 82.35354049923586, "alone": 25.0127356087621}, "pass_extra": 3370, "pass_extra_en": 3168, "pass_common": 28033, "pe_loo50": 1.5198469347318024, "pe_loobad": 3.351206434316354, "pe_bad": 9.261616804583069, "pc_loo50": 1.1664083472616313, "pc_loobad": 3.0355273690043716, "pc_bad": 11.477203647416413, "single_alone": 1296, "single_alone_pass": 347, "cov_gain": 2.2502140149198975, "cov_gain_s": 18.4, "cov_loss": 1.5409074232603643, "only_extra_obs": 519, "only_extra_obs_en": 510, "accepted": 16555, "mt_frames": 3673, "mt_newacc": 775, "mt_newrej": 280, "mt_sd": [0.24897010067527933, 0.17565833898309963], "mt_move": 0.026109044559921607, "lr_without": [2069, 0.05966973503205542, 0.12388725212353753], "lr_with": [2161, 0.060641211936574436, 0.13295631597863994], "fdiff50": 0.018105869295652607, "fdiff90": 0.0904466711178927, "fdiff99": 1.5889966842320036}, "napa:napafar": {"extra": {"n": 8432, "side50": 29.74255, "range50": 3.845876777864726, "range90": 7.2614092917893585, "loo50": 1.275550058719699, "loobad": 5.3196147110332745, "bad": 8.256880733944953, "en": 80.49098671726756, "alone": 13.175996204933588}, "common": {"n": 34625, "side50": 40.5774, "range50": 3.140050194121244, "range90": 5.672400378011752, "loo50": 1.3748308955099025, "loobad": 6.883583110148726, "bad": 14.597373723337734, "en": 82.62527075812275, "alone": 29.753068592057762}, "pass_extra": 5975, "pass_extra_en": 5507, "pass_common": 23942, "pe_loo50": 1.1123082289284942, "pe_loobad": 1.905265943371262, "pe_bad": 5.687712394920408, "pc_loo50": 1.1988305569790185, "pc_loobad": 3.6218070911170415, "pc_bad": 12.533927879022878, "single_alone": 1111, "single_alone_pass": 372, "cov_gain": 4.1824630059924175, "cov_gain_s": 34.2, "cov_loss": 0.18344135991194815, "only_extra_obs": 1185, "only_extra_obs_en": 1162, "accepted": 16084, "mt_frames": 4912, "mt_newacc": 1449, "mt_newrej": 86, "mt_sd": [0.300814296415499, 0.1613331627939478], "mt_move": 0.029405392597689886, "lr_without": [1777, 0.05911331155285013, 0.12163357106940885], "lr_with": [2104, 0.06083943479114756, 0.13257174460861285], "fdiff50": 0.02976811598488889, "fdiff90": 0.16009958710235506, "fdiff99": 2.521901397375163}, "d15s_far:napafar": {"extra": {"n": 4950, "side50": 31.60135, "range50": 3.566869685348192, "range90": 7.269608308938872, "loo50": 2.4056933899449664, "loobad": 11.637604245640636, "bad": 15.681818181818182, "en": 82.44444444444444, "alone": 23.535353535353533}, "common": {"n": 38107, "side50": 39.3207, "range50": 3.2042118470969077, "range90": 5.9314394716658985, "loo50": 1.2882114411509353, "loobad": 5.872991426664613, "bad": 12.93728135932034, "en": 82.1765030046973, "alone": 26.89269687983835}, "pass_extra": 2862, "pass_extra_en": 2673, "pass_common": 27055, "pe_loo50": 1.4345118703561095, "pe_loobad": 3.3707865168539324, "pe_bad": 7.741211667913238, "pc_loo50": 1.148954656235416, "pc_loobad": 3.2212978369384357, "pc_bad": 11.452715614251137, "single_alone": 1165, "single_alone_pass": 262, "cov_gain": 1.6387428152134034, "cov_gain_s": 13.4, "cov_loss": 2.1279197749785985, "only_extra_obs": 425, "only_extra_obs_en": 416, "accepted": 16084, "mt_frames": 3158, "mt_newacc": 662, "mt_newrej": 251, "mt_sd": [0.249278795772707, 0.1735767126046684], "mt_move": 0.026614605214239924, "lr_without": [2069, 0.05966973503205542, 0.12388725212353753], "lr_with": [2104, 0.06083943479114756, 0.13257174460861285], "fdiff50": 0.019359757472231134, "fdiff90": 0.10368400290302035, "fdiff99": 1.09852166594886}, "filter d15s_far": {"upd": 15238, "rej": 308, "jumps_min": 9.246801536241103, "nis": 5.852382798512283, "nis_out": 12.98726867042919, "inn50": 0.20405701081113176, "inn95": 0.7236237635523112, "last50": 0.0376715, "last90": 3.442386500000011, "last99": 41.644421720000025, "lastmax": 170.769762, "last1": 20.18827682577039, "dev50": 0.18668788213454993, "dev90": 9.225973323456556}, "filter napa": {"upd": 13649, "rej": 307, "jumps_min": 9.246801536241103, "nis": 5.331029540163726, "nis_out": 11.531980364861894, "inn50": 0.19461483039151084, "inn95": 0.722819782628242, "last50": 0.063187, "last90": 3.6856943999999943, "last99": 41.99272186000004, "lastmax": 171.099771, "last1": 22.145235199449626, "dev50": 0.20243195260350483, "dev90": 9.22573439893327}, "filter napa16": {"upd": 15742, "rej": 299, "jumps_min": 9.02663959490203, "nis": 5.800806843202561, "nis_out": 12.819209757337061, "inn50": 0.21212024398133184, "inn95": 0.7353139309544442, "last50": 0.032717, "last90": 3.2520086000000075, "last99": 41.943115759999976, "lastmax": 171.069758, "last1": 19.808811814449413, "dev50": 0.18846643465582308, "dev90": 9.210084230427796}, "filter napafar": {"upd": 15259, "rej": 309, "jumps_min": 9.393576163800486, "nis": 5.521667153807602, "nis_out": 12.314044170653386, "inn50": 0.2092072348283509, "inn95": 0.7357815166251958, "last50": 0.039138, "last90": 3.444282400000001, "last99": 41.947314079999956, "lastmax": 171.069758, "last1": 20.181967554841638, "dev50": 0.18957070090955608, "dev90": 9.209965706746033}}

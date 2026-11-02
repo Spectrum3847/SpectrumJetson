@@ -34,6 +34,7 @@ ap.add_argument("--base", default="base")
 ap.add_argument("--json", default="")
 ap.add_argument("--variants", default="", help="only these variants (comma list; the base always)")
 ap.add_argument("--compare", default="", help="variants to compare with the base by size and range (far sightings included)")
+ap.add_argument("--dump", default="", help="save every variant's per-sighting rows, labels and match info (npz) and stop")
 ap.add_argument("--pose", default="odom", help="odom (default) or fused: see fieldgt.Robot")
 args = ap.parse_args()
 P = print
@@ -384,7 +385,7 @@ for match, mm in M.items():
         en = robot.is_enabled(d["robot_us"])
         rows = dict(match=np.array([match] * n), key=key(d), camera=d["camera"], id=d["id"], margin=d["margin"],
                     side=d["side"], far=d["far"], edge=edge, tot=tot, cen=cen, shape=shp, loo=loo, range=rng, speed=sp,
-                    w=w, enabled=en, pnp=pnp, amb=amb, corners=d["corners"])
+                    w=w, enabled=en, pnp=pnp, amb=amb, corners=d["corners"], robot_us=d["robot_us"])
         allrows.setdefault(variant, []).append(rows)
 
 R = {v: {k: np.concatenate([r[k] for r in rs]) for k in rs[0]} for v, rs in allrows.items()}
@@ -424,6 +425,10 @@ def label(r):
 for v in R:
     R[v]["good"], R[v]["bad"], R[v]["known"] = label(R[v])
 B = R[args.base]
+if args.dump:
+    np.savez_compressed(args.dump, **{f"{v}/{k}": a for v, r in R.items() for k, a in r.items()},
+                        perm=np.array(CORNER_PERM[2]), meta=json.dumps({"info": info, "T_LOO": T_LOO, "T_SHAPE": T_SHAPE, "T_TOT": T_TOT, "pose_ok": {f"{k[0]}|{k[1]}" if isinstance(k, tuple) else k: bool(v) for k, v in pose_ok.items()}}))
+    sys.exit(0)
 P(f"All {args.base} sightings: {len(B['id'])}, good {B['good'].sum()}, bad {B['bad'].sum()}, unknown {(~B['known']).sum()}; "
   f"while enabled: good {(B['good'] & B['enabled']).sum()}, bad {(B['bad'] & B['enabled']).sum()}")
 for nm, k in (("shape", "shape"), ("in-frame", "loo"), ("total", "tot")):
