@@ -3,7 +3,7 @@
 # and its runtime options.
 # Run ON THE JETSON. Both builds have the same Java API.
 #
-# Usage: 08-select-detector.sh gpu|gpu-4143 [--mwbd N] [--jpeg nvjpg|turbo] [--mse N]
+# Usage: 08-select-detector.sh gpu|gpu-4143 [--mwbd N] [--jpeg stream|nvjpg|turbo] [--mse N]
 #                              [--edge N] [--gpu-connections N] [--gpu-level N] [--gpu-refine N]
 #                              [--graphs 0|1] [--chain 0|1] [--far on|off] [--defaults] [--no-restart]
 #        08-select-detector.sh --gpu-level list     (what each level does; changes nothing)
@@ -17,9 +17,14 @@
 #                    PhotonVision #2138) rejects tags cut off at the image edge; test range first.
 #   --edge N         drop tags within N full-resolution pixels of the image edge, early in the GPU
 #                    blob filter (gpu build only; default 0 = off; AOS uses 50 on corners).
-#   --jpeg nvjpg     decode camera JPEGs on the NVJPG hardware engine (gpu build only; default
-#                    turbo = libjpeg-turbo on the CPU). Check it first with tests/jpeg-hw/run.sh.
+#   --jpeg stream    (default, gpu build only) decode each frame with libjpeg-turbo while it
+#                    arrives over USB: ~2.5 ms lower latency than nvjpg, ~0.38 of a core per camera
+#                    (tests/latency-breakdown). Frames it can't match fall back to turbo.
+#   --jpeg nvjpg     decode camera JPEGs on the NVJPG hardware engine after the frame (gpu build
+#                    only; least CPU). Check it first with tests/jpeg-hw/run.sh.
+#   --jpeg turbo     libjpeg-turbo on the CPU after the frame (the gpu-4143 build's only choice).
 #                    For a quick A/B without a restart: echo turbo > /tmp/spectrum-jpeg-decoder
+#                    (or nvjpg / stream)
 #   --gpu-connections N  CUDA_DEVICE_MAX_CONNECTIONS, the GPU's hardware work queues (default
 #                    32; CUDA's own default is 8). With 4 cameras, runs with 32 had ~0.5 ms
 #                    lower worst-frame detect times on average: likely but unproven, since the
@@ -42,7 +47,7 @@
 #                    PhotonVision is up; not touched unless --far or --gpu-level is given.
 # Options not given KEEP their current value from detector.conf (the old SPECTRUM_971_* names are
 # read too), so `gpu --mwbd 20` changes only min_white_black_diff. --defaults starts from the
-# defaults instead (mwbd 20, mse/edge/refine off, turbo JPEG, graphs+chain on, 32 connections),
+# defaults instead (mwbd 20, mse/edge/refine off, stream JPEG, graphs+chain on, 32 connections),
 # then applies the other flags. --gpu-level overrides the kept values it covers; explicit flags
 # override the level. What changed is printed.
 # (Fault injection for testing: echo N > /tmp/spectrum-detector-fault-every; rm it to stop.)
@@ -88,8 +93,9 @@ Levels 5/4 need a restart (read at start, recorded into the graphs); 0 in
 /tmp/spectrum-detector-graphs or -chain turns them off live (re-read every 2 s). Far search: live.
 Without detector-18 built, level 5 falls back to refine 3 (detector-17, double-precision decode:
 2133 us wall, ~+340 us GPU); --gpu-level 5 --gpu-refine 3 forces that (bit-exact decode margins).
-Not on the ladder: JPEG decode runs on the NVJPG engines, not the GPU (--jpeg nvjpg); --jpeg turbo
-decodes on the CPU instead (~+0.16 cores per camera, measured 0.52 -> 0.85 cores for 2 cameras).
+Not on the ladder: JPEG decode is on the CPU, not the GPU. --jpeg stream (default) decodes while the
+frame arrives, ~2.5 ms sooner, ~0.38 of a core per camera; --jpeg nvjpg uses the NVJPG engines after
+the frame (least CPU); --jpeg turbo decodes on the CPU after the frame (~+0.16 cores per camera).
 The biggest lever of all, before any level: "Tag FPS max" (per pipeline, AprilTag tab; photonvision-100).
 Processing a camera at 60 instead of 122 fps halves its detector GPU, CPU and JPEG decode (skipped
 frames are never decoded) with no change to the camera mode or per-frame latency; e.g. 122 front, 60
@@ -100,11 +106,11 @@ for a in "$@"; do [[ $a == list ]] && { level_list; exit 0; }; done
 # Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
 [[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
 
-which=${1:?usage: $0 gpu|gpu-4143 [--mwbd N] [--jpeg nvjpg|turbo] [--mse N] [--edge N] [--gpu-connections N] [--gpu-refine N] [--no-restart]}
+which=${1:?usage: $0 gpu|gpu-4143 [--mwbd N] [--jpeg stream|nvjpg|turbo] [--mse N] [--edge N] [--gpu-connections N] [--gpu-refine N] [--no-restart]}
 shift
 # Defaults (--defaults, or a fresh install). mwbd 20 is the robot config (JetPack 7 setup ran at
 # 5 by leaving it out: detect 2.4 vs 1.6 ms).
-D_mwbd=20; D_mse=""; D_edge=0; D_jpeg=turbo; D_connections=32; D_refine=0; D_graphs=1; D_chain=1
+D_mwbd=20; D_mse=""; D_edge=0; D_jpeg=stream; D_connections=32; D_refine=0; D_graphs=1; D_chain=1
 dropin=/etc/systemd/system/photonvision.service.d/detector.conf
 old_dropin=/etc/systemd/system/photonvision.service.d/971.conf
 # Current settings: detector.conf, else 971.conf (old names). Missing keys = defaults.
@@ -122,7 +128,10 @@ C_edge=$(cur_get EDGE_BORDER_PX); C_edge=${C_edge:-$D_edge}
 C_refine=$(cur_get GPU_REFINE); C_refine=${C_refine:-$D_refine}
 C_graphs=$(cur_get GRAPHS); C_graphs=${C_graphs:-$D_graphs}
 C_chain=$(cur_get CHAIN); C_chain=${C_chain:-$D_chain}
-C_jpeg=$(cur_get SPECTRUM_JPEG_DECODER); C_jpeg=${C_jpeg:-$D_jpeg}
+# No SPECTRUM_JPEG_DECODER line in an existing drop-in meant turbo (written before stream became
+# the default, 2026-11-02); with no drop-in at all it's a fresh install: the default.
+C_jpeg=$(cur_get SPECTRUM_JPEG_DECODER)
+if [[ -z $C_jpeg ]]; then [[ -f $dropin || -f $old_dropin ]] && C_jpeg=turbo || C_jpeg=$D_jpeg; fi
 C_connections=$(cur_get CUDA_DEVICE_MAX_CONNECTIONS); C_connections=${C_connections:-$D_connections}
 mwbd=""; jpeg=""; mse=""; edge=""; connections=""; refine=""; level=""; graphs=""; chain=""; far=""
 defaults=0
@@ -135,7 +144,7 @@ while [[ $# -gt 0 ]]; do
     --edge) edge=$2; shift 2
             [[ $edge =~ ^[0-9]+$ ]] || { echo "--edge must be a whole number of pixels" >&2; exit 1; } ;;
     --jpeg) jpeg=$2; shift 2
-            [[ $jpeg == nvjpg || $jpeg == turbo ]] || { echo "--jpeg must be nvjpg or turbo" >&2; exit 1; } ;;
+            [[ $jpeg == stream || $jpeg == nvjpg || $jpeg == turbo ]] || { echo "--jpeg must be stream, nvjpg or turbo" >&2; exit 1; } ;;
     --gpu-connections) connections=$2; shift 2
             [[ $connections =~ ^[0-9]+$ && $connections -ge 1 && $connections -le 32 ]] ||
               { echo "--gpu-connections must be 1 to 32" >&2; exit 1; } ;;
@@ -192,6 +201,10 @@ case $which in
 esac
 [[ -f $lib ]] || { echo "Missing $lib; build it first." >&2; exit 1; }
 
+if [[ $which == gpu-4143 && $jpeg != turbo ]]; then
+  echo "The gpu-4143 build decodes with libjpeg-turbo only: using --jpeg turbo" >&2
+  jpeg=turbo
+fi
 nvjpg=$(dirname "$lib")/libspectrumnvjpg.so
 if [[ $jpeg == nvjpg && ( $which != gpu || ! -f $nvjpg ) ]]; then
   echo "--jpeg nvjpg needs the gpu build's libspectrumnvjpg.so (07-build-gpu-detector.sh)" >&2
@@ -225,7 +238,7 @@ env_lines="Environment=CUDA_DEVICE_MAX_CONNECTIONS=$connections"$'\n'
 [[ -n $refine && $refine != 0 ]] && env_lines+="Environment=SPECTRUM_DETECTOR_GPU_REFINE=$refine"$'\n'
 [[ $graphs == 0 ]] && env_lines+="Environment=SPECTRUM_DETECTOR_GRAPHS=0"$'\n'
 [[ $chain == 0 ]] && env_lines+="Environment=SPECTRUM_DETECTOR_CHAIN=0"$'\n'
-[[ $jpeg == nvjpg ]] && env_lines+="Environment=SPECTRUM_JPEG_DECODER=nvjpg"$'\n'
+env_lines+="Environment=SPECTRUM_JPEG_DECODER=$jpeg"$'\n'  # always written: unset means turbo to the library
 changed=""
 for k in mwbd mse edge jpeg connections refine graphs chain; do
   c=C_$k

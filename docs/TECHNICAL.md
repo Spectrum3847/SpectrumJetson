@@ -545,9 +545,9 @@ The camera JPEGs can be decoded on the Orin Nano's two NVJPG engines instead of 
   - Safety net: `touch /tmp/spectrum-jpeg-fault` changes one pixel of every hardware frame. The next check caught it, the hardware turned off, and both cameras stayed at 122 fps.
   - Sticky CUDA fault (`echo sticky > /tmp/spectrum-detector-fault-every`): the decoder fell back to libjpeg-turbo, the watchdog restarted PhotonVision after 1 s, and it came back on the hardware.
 - **Switches.**
-  - `SPECTRUM_JPEG_DECODER=nvjpg`, set by `08-select-detector.sh --jpeg nvjpg`. Without it, libjpeg-turbo.
+  - `SPECTRUM_JPEG_DECODER=nvjpg`, set by `08-select-detector.sh --jpeg nvjpg`. Without the variable, libjpeg-turbo. Since 2026-11-02 the script's default is `stream` (it now always writes the variable; an older drop-in without it is read as `turbo`).
   - A/B without a restart: `echo turbo > /tmp/spectrum-jpeg-decoder` (or `nvjpg`). It's read every 2 s; `rm` it to go back to the setting.
-- **Rollback.** `08-select-detector.sh gpu --mwbd 20` without `--jpeg` goes back to libjpeg-turbo, and colour frames go back to cscore. The libraries from before are `/usr/lib/libspectrum-gpu-apriltag.so.pre-nvjpg` (before any hardware decode) and `*.pre-colour` (before the colour path and the leak fix).
+- **Rollback.** `08-select-detector.sh gpu --mwbd 20 --jpeg turbo` goes back to libjpeg-turbo, and colour frames go back to cscore. The libraries from before are `/usr/lib/libspectrum-gpu-apriltag.so.pre-nvjpg` (before any hardware decode) and `*.pre-colour` (before the colour path and the leak fix).
 - **Measured and dropped: the detector reading the decoder's buffer directly.** bos's `Detect(host, device)` takes a GPU pointer, and detections were identical on 2,856 frames. Against this path it skips the copy into PhotonVision's Mat (0.27 ms) and the detector's upload (0.16 ms). But the detector's first kernel reads the decoder's buffer 3x slower (0.21 against 0.07 ms), and its CPU step reads that uncached buffer too (+0.13 ms). Net: ~0.15 ms and ~0.1 ms of CPU a frame, plus ~0.15 ms more from PhotonVision skipping its full-size copies. Not worth a PhotonVision patch. (End-to-end totals in the harness were noisy: our test decodes queued behind PhotonVision's live decodes on the same engines. The per-step times above are consistent between runs.)
 - **Not done yet:** 4 real cameras, and a real colour camera.
 
@@ -2868,7 +2868,8 @@ single core. The sweep moves those to the cores no tag camera uses. Settings: `H
 (null = auto: on on a Jetson), `pinCameraCores` "2-5", `pinSharedCore` -1, `pinCameraFifo` 0, `pinOtherThreads`
 false. Environment variables override these: `SPECTRUM_PIN_CAMERAS`, `SPECTRUM_PIN_CAMERA_CORES`,
 `SPECTRUM_PIN_SHARED_CORE`, `SPECTRUM_PIN_FIFO` (capped at 49, under the kernel's IRQ threads at 50) and
-`SPECTRUM_PIN_OTHERS`. They're read when PhotonVision starts, and there's no UI yet. SystemCore (4 cores): off
+`SPECTRUM_PIN_OTHERS`. The first build saved `pinSharedCore` 1 into settings DBs as its default; on the first
+start with `pinSettingsVersion` missing (0), a saved 1 is reset to -1 once (logged). They're read when PhotonVision starts, and there's no UI yet. SystemCore (4 cores): off
 unless set. Suggested: `SPECTRUM_PIN_CAMERAS=1 SPECTRUM_PIN_CAMERA_CORES=2-3`.
 
 Pinning the whole JVM to core 1 with systemd `CPUAffinity=` and widening the camera threads afterwards was
@@ -2932,7 +2933,7 @@ p50 from mid-exposure, 1 camera, GPU detector:
 
 - **The stream:** YUV 4:2:2 MJPEG (not Y-only), DRI 80, so one restart interval per 8-row band.
   About 54 KB per frame.
-- **Stream decoder** (`SPECTRUM_JPEG_DECODER=stream`, off by default; `detector/stream_decode.cc`):
+- **Stream decoder** (`SPECTRUM_JPEG_DECODER=stream`, **the default since 2026-11-02**, `08-select-detector.sh --jpeg stream|nvjpg|turbo`; `detector/stream_decode.cc`):
   - How it works:
     - A watcher thread per camera mmaps cscore's V4L2 buffers through its own fd. It takes no
       queue ownership and has no USB effect.
@@ -2948,7 +2949,24 @@ p50 from mid-exposure, 1 camera, GPU detector:
   - Tail after the last byte: 0.11/0.19/0.20 ms.
   - CPU: 38% of a core per camera (about 25% of the CPU for 4 cameras).
   - 0 drops. Checks: 189 ok, 0 differ.
-  - Open issue: with 2 cameras, the cscore handoff p99 spikes to 1.3 to 2.9 ms.
+  - **2-camera handoff spike, fixed.** The cause was not the watchers: the bench settings DB still held
+    `pinSharedCore` 1, saved by the first `photonvision-102` build (whose default was 1, later -1). Both
+    cameras' SpectrumDecoder threads (the ones that take the frame from cscore) were pinned to core 1.
+    They queued behind each other and behind the JIT (sched trace: one decoder woken on core 1 waited 5.6
+    ms behind a C2 compiler thread while other cores were idle). The fork now resets a saved 1 to -1 once
+    (`pinSettingsVersion` 1). 2-camera handoff p99 0.43 to 0.61 (2.87 once) -> 0.11 to 0.27 ms, 0 drops.
+    Watcher placement made no difference (`SPECTRUM_STREAM_CPUS`: `all`, the default, or `auto` = off the
+    pinned camera cores, or a core list): handoff p99 0.13/0.22 vs 0.23/0.26 ms.
+  - After the fix, 20 s per run, p50/p95/p99 mid-exposure to pose (stream vs NVJPG):
+    - GPU, 1 camera: 14.09/14.47/15.52 vs 16.29/16.80/17.62.
+    - GPU, 2 cameras: 14.02 to 14.22/14.58 to 14.73/16.30 to 16.89 vs 16.37/16.96/18.00.
+    - NAPA, 2 cameras: 14.09/14.38/15.20 vs 16.68/16.96/17.28.
+    - GPU + yolo11n at 30 fps, 2 cameras: 14.05 to 14.15/14.78 to 16.54/17.28 to 17.96 vs 16.60/17.71/18.82.
+    - NAPA + yolo11n at 30 fps, 2 cameras: 14.03/14.45/15.62 vs 16.92/17.28/18.43.
+    - The 2-camera p99 that's left above 1 camera is GPU detection (p99 2.2 to 4.0 ms with 2 cameras),
+      not the handoff or the decode.
+  - Live switch tested: `echo turbo > /tmp/spectrum-jpeg-decoder` and back to `stream`, 0 drops, checks 0
+    differ.
 - **`urb_packets` 16 -> 4** (now the default):
   - Hardware timestamp to DQBUF: 8.51/9.48 -> 7.49/7.73 ms with 1 camera, and 8.31/9.33 ->
     7.80/8.10 with 2.

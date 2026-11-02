@@ -26,10 +26,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <dirent.h>
+#include <fstream>
+#include <sched.h>
 #include <chrono>
 #include <condition_variable>
 #include <csetjmp>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -140,6 +144,77 @@ size_t FindFill(const uint8_t *p, size_t from, size_t limit) {
   return limit;
 }
 
+// Watcher placement (SPECTRUM_STREAM_CPUS): "all" (default) leaves watchers to the scheduler;
+// "auto" keeps them off the cores another thread of this process is pinned to alone
+// (photonvision-102's tag camera threads); or an explicit list such as "0-1" or "1,4". Re-checked
+// every 2 s (pinning is applied after start). With 2 cameras, auto and all measured the same
+// (handoff p99 0.23-0.26 vs 0.13-0.22 ms, tests/latency-breakdown), and with 4 cameras auto would
+// crowd 4 watchers onto 2 cores, so it's not the default.
+std::vector<int> ParseCpus(const std::string &s) {
+  std::vector<int> v;
+  size_t i = 0;
+  while (i < s.size()) {
+    size_t j = s.find(',', i);
+    if (j == std::string::npos) j = s.size();
+    const std::string part = s.substr(i, j - i);
+    const size_t dash = part.find('-');
+    try {
+      const int a = std::stoi(part.substr(0, dash));
+      const int b = dash == std::string::npos ? a : std::stoi(part.substr(dash + 1));
+      for (int c = a; c <= b && c < CPU_SETSIZE; c++) v.push_back(c);
+    } catch (...) {
+    }
+    i = j + 1;
+  }
+  return v;
+}
+
+void PlaceWatcher(std::string &applied) {
+  const char *env = std::getenv("SPECTRUM_STREAM_CPUS");
+  const std::string mode = env && *env ? env : "all";
+  if (mode == "all") return;
+  cpu_set_t want;
+  CPU_ZERO(&want);
+  if (mode == "auto") {
+    cpu_set_t proc;
+    if (sched_getaffinity(getpid(), sizeof(proc), &proc)) return;  // the main thread: the process's cores
+    std::vector<int> avoid;
+    if (DIR *dir = opendir("/proc/self/task")) {
+      const long me = syscall(SYS_gettid);
+      while (dirent *e = readdir(dir)) {
+        if (e->d_name[0] == '.' || std::atol(e->d_name) == me) continue;
+        const std::string base = std::string("/proc/self/task/") + e->d_name;
+        std::ifstream comm(base + "/comm");
+        std::string name;
+        std::getline(comm, name);
+        if (name == "SpectrumStream") continue;
+        std::ifstream st(base + "/status");
+        for (std::string line; std::getline(st, line);)
+          if (line.rfind("Cpus_allowed_list:", 0) == 0) {
+            auto c = ParseCpus(line.substr(line.find_first_not_of(" \t", 18)));
+            if (c.size() == 1) avoid.push_back(c[0]);
+            break;
+          }
+      }
+      closedir(dir);
+    }
+    want = proc;
+    for (int c : avoid) CPU_CLR(c, &want);
+    if (CPU_COUNT(&want) == 0) want = proc;  // every core has a camera: share them all
+  } else {
+    for (int c : ParseCpus(mode)) CPU_SET(c, &want);
+    if (CPU_COUNT(&want) == 0) return;
+  }
+  std::string list;
+  for (int c = 0; c < CPU_SETSIZE; c++)
+    if (CPU_ISSET(c, &want)) list += (list.empty() ? "" : ",") + std::to_string(c);
+  if (list == applied) return;
+  if (sched_setaffinity(0, sizeof(want), &want) == 0) {
+    std::cout << "stream decode: watcher on cores " << list << std::endl;
+    applied = list;
+  }
+}
+
 void WatchLoop(Watcher *w) {
   pthread_setname_np(pthread_self(), "SpectrumStream");
   enum State { kBoot, kBootChanging, kWiped, kFilling, kDone };
@@ -153,6 +228,8 @@ void WatchLoop(Watcher *w) {
   }
   auto last_frame = Clock::now();
   auto next_log = Clock::now() + std::chrono::seconds(10);
+  auto next_place = Clock::now();
+  std::string placed;
 
   jpeg_decompress_struct d;
   JErr err;
@@ -310,6 +387,10 @@ void WatchLoop(Watcher *w) {
     w->cpu_ns += ThreadCpuNs() - c0;
     now = Clock::now();
     if (now - last_frame > std::chrono::milliseconds(300)) break;  // camera stopped
+    if (now >= next_place && !decoding) {
+      next_place = now + std::chrono::seconds(2);
+      PlaceWatcher(placed);
+    }
     if (now >= next_log) {
       next_log = now + std::chrono::seconds(10);
       std::vector<double> t;
