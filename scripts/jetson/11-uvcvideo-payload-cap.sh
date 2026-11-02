@@ -13,7 +13,7 @@
 # The patch (kernel/uvcvideo-payload-cap.patch) adds one module parameter,
 #   payload_cap=vid:pid:bytes[,vid:pid:bytes...]
 # and changes nothing for cameras not listed. kernel/uvcvideo-urb-packets.patch adds urb_packets
-# (packets per isochronous URB; 0 = the stock 32; set to 16, URB_PACKETS overrides). The install
+# (packets per isochronous URB; 0 = the stock 32; set to 4, URB_PACKETS overrides). The install
 # also sets the stock hwtimestamps option (frames stamped by the camera clock). Built from the exact stock source of the running
 # kernel, verified by matching the installed driver's srcversion before patching.
 #
@@ -127,10 +127,13 @@ printf '# SpectrumJetson: cap USB bandwidth reservations (scripts/jetson/11-uvcv
 # stock driver has this option too; its own file so the Camera Matching page never rewrites it.
 printf '# SpectrumJetson: timestamp frames with the camera clock (scripts/jetson/11-uvcvideo-payload-cap.sh)\noptions uvcvideo hwtimestamps=1\n' \
   | sudo tee /etc/modprobe.d/91-spectrum-uvcvideo-timestamps.conf >/dev/null
-# 16 packets per isochronous URB instead of 32 (kernel/uvcvideo-urb-packets.patch): the driver sees
-# a frame's last packet up to 2 ms sooner. Latency 12.98 -> 11.76 ms at the result, 5 cameras;
-# ~0.1 core more (kernel), +2,400 interrupts/s. 8 gained only 0.15 ms more for more CPU.
-printf '# SpectrumJetson: 16 packets per URB, 1.2 ms lower latency (scripts/jetson/11-uvcvideo-payload-cap.sh)\noptions uvcvideo urb_packets=%s\n' "${URB_PACKETS:-16}" \
+# 4 packets per isochronous URB instead of 32 (kernel/uvcvideo-urb-packets.patch): the driver sees
+# a frame's last packet sooner. 16 (2 ms): latency 12.98 -> 11.76 ms at the result, 5 cameras.
+# 4 (0.5 ms, 2026-11-02, tests/latency-breakdown/usb-sweep.sh): hw timestamp -> DQBUF p50/p99
+# 8.51/9.48 -> 7.49/7.73 ms with 1 camera, 8.31/9.33 -> 7.80/8.10 with 2, 0 drops, ~2k
+# interrupts/s per camera, CPU unchanged. 1 won't stream (ENOMEM); 2 is no better and dropped
+# frames with 2 cameras.
+printf '# SpectrumJetson: 4 packets per URB (0.5 ms), lower latency (scripts/jetson/11-uvcvideo-payload-cap.sh)\noptions uvcvideo urb_packets=%s\n' "${URB_PACKETS:-4}" \
   | sudo tee /etc/modprobe.d/92-spectrum-uvcvideo-urb-packets.conf >/dev/null
 sudo depmod -a
 reload

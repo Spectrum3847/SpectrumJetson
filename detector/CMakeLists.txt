@@ -88,7 +88,7 @@ find_package(JNI REQUIRED COMPONENTS JVM)
 find_package(OpenCV REQUIRED core imgproc)
 find_package(JPEG REQUIRED)  # libjpeg-turbo (libjpeg-turbo8-dev), for decodeMjpegGray
 
-add_library(971apriltag_jni SHARED GpuDetectorJNI.cc far_search.cc fault_kernel.cu)
+add_library(971apriltag_jni SHARED GpuDetectorJNI.cc far_search.cc stream_decode.cc fault_kernel.cu)
 set_target_properties(971apriltag_jni PROPERTIES OUTPUT_NAME spectrum-gpu-apriltag)
 target_include_directories(971apriltag_jni PRIVATE ${BOS_DIR} ${JNI_INCLUDE_DIRS}
                                                    ${OpenCV_INCLUDE_DIRS})
