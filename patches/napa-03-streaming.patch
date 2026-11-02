@@ -1,0 +1,919 @@
+--- a/third_party/napa/napa_core.c
++++ b/third_party/napa/napa_core.c
+@@ -2150,3 +2150,886 @@
+ /* setuptools links every extension with a module-init export on Windows. The library is loaded
+  * with ctypes, never imported, so this placeholder only satisfies the linker. */
+ NAPA_API void *PyInit__napa_core(void) { return 0; }
++
++/* ---------------------------------------------------------------- streaming (SpectrumJetson) */
++
++/* SpectrumJetson (patches/napa-03-streaming.patch): napa_detect run band by band while a frame arrives.
++ * Every level keeps its own buffers; each level row is raked once its source rows are in, a tile row's
++ * min/max once its four rows are, and a band of four rows is thresholded, labeled and joined once the tile
++ * row below it (the 3x3 neighbourhood) and its noise-floor region row are ready. A blob whose last row is
++ * done (no run of it in the next row) is final: its candidate filter, extreme points, rough quad, fits
++ * and decodes run at once and are kept. finish() replays the kept results in napa_detect's order with its
++ * order-dependent gates (covered, failed_before, remember_failure, already_found), so the output is the
++ * same detections, in the same order, with the same corners.
++ *
++ * The one input napa_detect knows only at the end of a frame is a level's frame-wide noise floor (the
++ * median of the whole level's neighbour differences), which caps every region's floor and decides the
++ * noisy-frame box re-rake. The stream assumes the previous frame's values and checks them at finish();
++ * when the frame's own values would change any tile's floor or decision, it reprocesses the whole frame
++ * with them (napa_stream_stats counts those). The candidate code below copies napa_detect's per-blob body
++ * (keep the two in step on upgrades; tests/napa-stream checks identity). */
++
++typedef struct {
++    int root;          /* the blob's first run: napa_detect's candidate order within a level */
++    int stage;         /* 0 rejected before or at the first fit, 1 early decode failed, 2 refine/final
++                          decode failed, 3 decoded */
++    int minx, maxx, miny, maxy;
++    vec2 fine[4];      /* the first fit (stage >= 1), for failed_before / remember_failure */
++    napa_detection d;  /* stage 3 */
++} stream_cand;
++
++typedef struct {
++    int s, lw, lh, tw, th, last;
++    int kind;  /* 0: the frame itself (stride 1), 1: raked from the frame (s == base), 2: every second
++                  sample of the frame (previous level was the frame), 3: every second sample of the previous level */
++    int event; /* measures noise floors (assumed: napa_detect decides from the levels before) */
++    int noisy; /* assumed: box re-raked, floors re-measured */
++    int floor_level; /* the level whose floors this one uses */
++    int factor;      /* s / floor level's s */
++    uint8_t *buf;    /* level samples, lw x lh plus 64 spare (kind != 0) */
++    uint8_t *tmp;    /* one gathered row for the first noise measurement of a noisy level */
++    uint8_t *tail;   /* the frame's last row, padded (kind 0) */
++    int rows;        /* level rows made */
++    int tiles;       /* tile rows with min/max */
++    int bands;       /* bands thresholded */
++    int fin_row;     /* rows whose ending blobs are finalized: [0, fin_row) */
++    uint8_t *tmin, *tmax;
++    /* noise floors (event levels) */
++    int cols, frows, frows_done;
++    uint32_t *hist1, *hist2; /* cols x 64, the current region row: as raked / box re-raked */
++    uint32_t all1[64], all2[64], n1, n2;
++    uint8_t *raw;  /* region floors, 0 if too small to measure */
++    uint8_t *eff;  /* with the assumed frame floor applied */
++    int fpred;     /* assumed frame floor of the measurement that sets the floors */
++    /* runs */
++    napa_run *R;
++    int32_t *P;
++    blob_box *B;
++    uint8_t *done;
++    int32_t *row_start; /* lh + 1 */
++    int nruns, run_cap, prev_y, prev_start, prev_end;
++    stream_cand *cands;
++    int ncand, cand_cap;
++} stream_level;
++
++typedef struct {
++    int valid, event, f1, noisy, f2;
++} stream_guess;
++
++struct napa_stream {
++    napa_detector *det;
++    const uint8_t *img;
++    int w, h, stride, base, fed, nlev, ok;
++    napa_params params;
++    stream_level lev[16];
++    stream_guess guess[16];
++    int gw, gh, gparams[5]; /* what the guesses are for */
++    uint16_t *box_rows;
++    size_t box_cap;
++    napa_stream_stats st;
++    int lag_rows[16]; /* level rows not yet thresholded when the last frame row arrived */
++};
++
++napa_stream *napa_stream_create(napa_detector *det) {
++    if (det == NULL) return NULL;
++    napa_stream *s = (napa_stream *)calloc(1, sizeof(napa_stream));
++    if (s) s->det = det;
++    return s;
++}
++
++static void stream_free_level(stream_level *L) {
++    free(L->buf), free(L->tmp), free(L->tail), free(L->tmin), free(L->tmax), free(L->hist1), free(L->hist2);
++    free(L->raw), free(L->eff), free(L->R), free(L->P), free(L->B), free(L->done), free(L->row_start);
++    free(L->cands);
++}
++
++void napa_stream_destroy(napa_stream *s) {
++    if (s == NULL) return;
++    for (int i = 0; i < 16; i++) stream_free_level(&s->lev[i]);
++    free(s->box_rows);
++    free(s);
++}
++
++void napa_stream_get_stats(const napa_stream *s, napa_stream_stats *out) {
++    if (s && out) *out = s->st;
++}
++
++static int grow(void **p, size_t n, size_t *cap_bytes_unused) {
++    (void)cap_bytes_unused;
++    void *q = realloc(*p, n ? n : 1);
++    if (q == NULL) return -1;
++    *p = q;
++    return 0;
++}
++
++/* Allocations sized for the level (they only grow between frames of the same size). */
++static int stream_level_alloc(stream_level *L) {
++    size_t pixels = (size_t)L->lw * L->lh, tiles = (size_t)L->tw * L->th;
++    size_t runs = pixels / 2 + (size_t)L->lh + 1;
++    if (L->run_cap < (int)runs) {
++        if (grow((void **)&L->R, runs * sizeof(napa_run), NULL) || grow((void **)&L->P, runs * sizeof(int32_t), NULL) ||
++            grow((void **)&L->B, runs * sizeof(blob_box), NULL) || grow((void **)&L->done, runs, NULL))
++            return -1;
++        L->run_cap = (int)runs;
++    }
++    if (grow((void **)&L->row_start, ((size_t)L->lh + 1) * sizeof(int32_t), NULL)) return -1;
++    if (L->kind != 0 && grow((void **)&L->buf, pixels + 64, NULL)) return -1;
++    if (L->kind == 0) {
++        if (grow((void **)&L->tail, (size_t)L->lw + 64, NULL)) return -1;
++        memset(L->tail, 0, (size_t)L->lw + 64);
++    }
++    if (grow((void **)&L->tmp, (size_t)L->lw + 64, NULL)) return -1;
++    if (grow((void **)&L->tmin, tiles, NULL) || grow((void **)&L->tmax, tiles, NULL)) return -1;
++    if (L->event) {
++        L->cols = (L->lw + NAPA_REGION - 1) / NAPA_REGION, L->frows = (L->lh + NAPA_REGION - 1) / NAPA_REGION;
++        size_t h = (size_t)L->cols * 64 * sizeof(uint32_t);
++        if (grow((void **)&L->hist1, h, NULL) || grow((void **)&L->hist2, h, NULL)) return -1;
++        memset(L->hist1, 0, h), memset(L->hist2, 0, h);
++        size_t r = (size_t)L->cols * L->frows;
++        if (grow((void **)&L->raw, r, NULL) || grow((void **)&L->eff, r, NULL)) return -1;
++        memset(L->all1, 0, sizeof L->all1), memset(L->all2, 0, sizeof L->all2);
++        L->n1 = L->n2 = 0;
++    }
++    return 0;
++}
++
++static int stream_setup(napa_stream *S) {
++    napa_detector *det = S->det;
++    const int W = det->fam.width;
++    int base = S->params.min_tag_px * 3 / (4 * W);
++    if (base < 1) base = 1;
++    S->base = base;
++    int key[5] = {S->params.min_tag_px, S->params.max_hamming, S->params.min_contrast, S->params.min_border_cells,
++                  S->params.sharpening_x100};
++    if (S->gw != S->w || S->gh != S->h || memcmp(key, S->gparams, sizeof key)) {
++        memset(S->guess, 0, sizeof S->guess);
++        S->gw = S->w, S->gh = S->h;
++        memcpy(S->gparams, key, sizeof key);
++    }
++    int n = 0, contrast_noisy = 0, floor_level = 0;
++    for (int s = base;; s *= 2) {
++        if (n >= 16) return -1;
++        stream_level *L = &S->lev[n];
++        L->s = s;
++        L->lw = (S->w + s - 1) / s, L->lh = (S->h + s - 1) / s;
++        L->tw = (L->lw + TILE - 1) / TILE, L->th = (L->lh + TILE - 1) / TILE;
++        L->last = (L->lw < NAPA_LAST * W / 8) || (L->lh < NAPA_LAST * W / 8);
++        int invert = det->fam.f->reversed;
++        if (s == base) L->kind = (s == 1 && !invert) ? 0 : 1;
++        else L->kind = S->lev[n - 1].kind == 0 ? 2 : 3;
++        stream_guess *g = &S->guess[n];
++        L->event = s == base || (base == 1 && s == 2 && contrast_noisy);
++        if (L->event && !g->valid) { /* nothing known yet: guess the configured contrast */
++            g->valid = 1, g->event = 1, g->f1 = g->f2 = S->params.min_contrast, g->noisy = 0;
++        }
++        L->noisy = L->event && g->noisy && s > 1 && s <= 16;
++        if (L->event) {
++            L->fpred = L->noisy ? g->f2 : g->f1;
++            contrast_noisy = L->fpred > NAPA_NOISY_FLOOR;
++            floor_level = n;
++        }
++        L->floor_level = floor_level;
++        L->factor = s / S->lev[floor_level].s;
++        L->rows = L->tiles = L->bands = L->fin_row = 0;
++        L->frows_done = 0;
++        L->nruns = 0, L->prev_y = -2, L->prev_start = L->prev_end = 0;
++        L->ncand = 0;
++        if (stream_level_alloc(L)) return -2;
++        L->row_start[0] = 0;
++        n++;
++        if (L->last) break;
++    }
++    S->nlev = n;
++    if ((size_t)S->w > S->box_cap) {
++        if (grow((void **)&S->box_rows, sizeof(uint16_t) * 2 * (size_t)S->w, NULL)) return -2;
++        S->box_cap = (size_t)S->w;
++    }
++    return 0;
++}
++
++int napa_stream_begin(napa_stream *S, const uint8_t *img, int width, int height, int stride, const napa_params *params) {
++    if (S == NULL || img == NULL || params == NULL) return -1;
++    if (stride < width || width > 30000 || height > 30000) return -1;
++    if (params->min_tag_px < 8 || params->min_tag_px > 30000 || params->max_hamming < 0 || params->max_hamming > 3 ||
++        params->min_contrast < 1 || params->min_contrast > 255 || params->min_border_cells < 0 ||
++        params->min_border_cells > 28 || params->sharpening_x100 < 0 || params->sharpening_x100 > 100)
++        return -1;
++    S->img = img, S->w = width, S->h = height, S->stride = stride, S->params = *params, S->fed = 0;
++    S->ok = 0;
++    if (width < 16 || height < 16) {
++        S->nlev = 0;
++        S->ok = 1;
++        return 0;
++    }
++    int r = stream_setup(S);
++    if (r) return r;
++    S->ok = 1;
++    return 0;
++}
++
++/* One row of box_rake. */
++static void box_rake_row(uint8_t *dst, int y, int lw, const uint8_t *img, int w, int h, int stride, int s, int kernel,
++                         uint16_t *acc, uint16_t *hs) {
++    int half = (kernel - 1) / 2;
++    uint32_t m = (65536u + (uint32_t)(kernel * kernel) / 2) / (uint32_t)(kernel * kernel);
++    int r0 = y * s - half, r1 = r0 + kernel;
++    if (r0 < 0) r0 = 0;
++    if (r1 > h) r1 = h;
++    const uint8_t *row = img + (size_t)r0 * stride;
++    for (int x = 0; x < w; x++) acc[x] = row[x];
++    for (int r = r0 + 1; r < r1; r++) {
++        row = img + (size_t)r * stride;
++        for (int x = 0; x < w; x++) acc[x] = (uint16_t)(acc[x] + row[x]);
++    }
++    for (int c = 0; c + kernel <= w; c++) hs[c] = acc[c];
++    for (int k = 1; k < kernel; k++)
++        for (int c = 0; c + kernel <= w; c++) hs[c] = (uint16_t)(hs[c] + acc[c + k]);
++    int x_lo = (half + s - 1) / s, x_hi = (w - kernel + half) / s + 1;
++    if (x_hi > lw) x_hi = lw;
++    if (r1 - r0 < kernel) x_lo = x_hi = 0;
++    for (int x = x_lo; x < x_hi; x++) dst[x] = (uint8_t)((hs[x * s - half] * m + 32768u) >> 16);
++    for (int x = 0; x < lw; x++) {
++        if (x == x_lo && x_lo < x_hi) x = x_hi;
++        if (x >= lw) break;
++        int c0 = x * s - half, c1 = c0 + kernel, sum = 0;
++        if (c0 < 0) c0 = 0;
++        if (c1 > w) c1 = w;
++        for (int c = c0; c < c1; c++) sum += acc[c];
++        int cnt = (c1 - c0) * (r1 - r0);
++        dst[x] = (uint8_t)((sum + cnt / 2) / cnt);
++    }
++}
++
++static inline const uint8_t *level_row(const napa_stream *S, const stream_level *L, int y) {
++    return L->kind == 0 ? S->img + (size_t)y * S->stride : L->buf + (size_t)y * L->lw;
++}
++
++static int box_kernel(const napa_stream *S, const stream_level *L) { return S->base == 1 && L->s == 2 ? 3 : L->s; }
++
++/* Whether level row y can be made from what has arrived. */
++static int row_ready(const napa_stream *S, int li, int y) {
++    const stream_level *L = &S->lev[li];
++    int need = 0; /* frame rows needed: [0, need) */
++    if (L->noisy) {
++        int k = box_kernel(S, L), r1 = y * L->s - (k - 1) / 2 + k;
++        need = r1 > S->h ? S->h : r1;
++        if (need < y * L->s + 1) need = y * L->s + 1;
++    }
++    switch (L->kind) {
++    case 0: if (need < y + 1) need = y + 1; break;
++    case 1: if (need < y * L->s + 1) need = y * L->s + 1; break;
++    case 2: if (need < 2 * y + 1) need = 2 * y + 1; break;
++    default: if (S->lev[li - 1].rows < 2 * y + 1) return 0;
++    }
++    return S->fed >= need;
++}
++
++/* Region row ry of a floor-measuring level is complete: its floors, and the frame histogram. */
++static void floors_region_row(napa_stream *S, stream_level *L, int ry) {
++    const int mc = S->params.min_contrast;
++    double sig1 = L->s == 1 && !L->last ? 7.0 : NAPA_FLOOR_SIGMAS;
++    int cap1 = L->s == 1 && !L->last ? 255 : NAPA_FLOOR_CAP;
++    double sig2 = S->base == 1 && L->s == 2 ? NAPA_BOX_SIGMAS * sqrt(1.5) : NAPA_BOX_SIGMAS;
++    for (int rx = 0; rx < L->cols; rx++) {
++        uint32_t *h1 = L->hist1 + (size_t)rx * 64, *h2 = L->hist2 + (size_t)rx * 64, n = 0;
++        uint32_t *hf = L->noisy ? h2 : h1;
++        for (int k = 0; k < 64; k++) {
++            n += hf[k];
++            L->all1[k] += h1[k], L->n1 += h1[k];
++            if (L->noisy) L->all2[k] += h2[k], L->n2 += h2[k];
++        }
++        L->raw[ry * L->cols + rx] =
++            (uint8_t)(n >= 16 ? floor_from(hf, n, mc, L->noisy ? sig2 : sig1, L->noisy ? NAPA_FLOOR_CAP : cap1) : 0);
++        uint8_t r = L->raw[ry * L->cols + rx];
++        L->eff[ry * L->cols + rx] = (uint8_t)(r == 0 || r > L->fpred ? L->fpred : r);
++        memset(h1, 0, 64 * sizeof(uint32_t));
++        memset(h2, 0, 64 * sizeof(uint32_t));
++    }
++    L->frows_done = ry + 1;
++}
++
++static void hist_row(uint32_t *hist, const uint8_t *row, int lw) {
++    for (int rx = 0, x0 = 0; x0 < lw; rx++, x0 += NAPA_REGION) {
++        int x1 = x0 + NAPA_REGION < lw ? x0 + NAPA_REGION : lw;
++        int pairs = (x1 - x0) / 2;
++        uint8_t d[NAPA_REGION / 2];
++        pair_diffs(row + x0, pairs, d);
++        uint32_t *h = hist + (size_t)rx * 64;
++        for (int k = 0; k < pairs; k++) h[d[k]]++;
++    }
++}
++
++static void make_row(napa_stream *S, int li, int y) {
++    stream_level *L = &S->lev[li];
++    const int invert = S->det->fam.f->reversed;
++    uint8_t *dst = L->kind == 0 ? NULL : L->buf + (size_t)y * L->lw;
++    uint8_t *gathered = L->noisy ? L->tmp : dst;
++    int need_gather = !L->noisy || (L->event && y % 8 == 0);
++    if (need_gather) {
++        switch (L->kind) {
++        case 0: break;
++        case 1:
++            gather_row(gathered, S->img + (size_t)y * L->s * S->stride, L->lw, L->s, S->det->ssse3);
++            if (invert) invert_bytes(gathered, (size_t)L->lw);
++            break;
++        case 2: gather2(gathered, S->img + (size_t)(2 * y) * S->stride, L->lw); break;
++        default: gather2(gathered, S->lev[li - 1].buf + (size_t)(2 * y) * S->lev[li - 1].lw, L->lw);
++        }
++    }
++    if (L->noisy) {
++        box_rake_row(dst, y, L->lw, S->img, S->w, S->h, S->stride, L->s, box_kernel(S, L), S->box_rows,
++                     S->box_rows + S->w);
++        if (invert) invert_bytes(dst, (size_t)L->lw);
++    }
++    if (L->event && y % 8 == 0) {
++        const uint8_t *g = L->kind == 0 ? S->img + (size_t)y * S->stride : gathered;
++        hist_row(L->hist1, g, L->lw);
++        if (L->noisy) hist_row(L->hist2, dst, L->lw);
++    }
++    if (L->kind == 0 && y == L->lh - 1) memcpy(L->tail, S->img + (size_t)y * S->stride, (size_t)L->lw);
++    L->rows = y + 1;
++    if (L->event) {
++        int ry = y / NAPA_REGION;
++        int y_end = (ry + 1) * NAPA_REGION < L->lh ? (ry + 1) * NAPA_REGION : L->lh;
++        int last_sampled = ry * NAPA_REGION + ((y_end - 1 - ry * NAPA_REGION) / 8) * 8;
++        if (y == last_sampled || y == L->lh - 1) {
++            if (L->frows_done == ry) floors_region_row(S, L, ry);
++        }
++    }
++}
++
++static void tile_row(napa_stream *S, stream_level *L, int ty) {
++    const int lw = L->lw, lh = L->lh, tw = L->tw;
++    napa_detector *det = S->det;
++    uint8_t *vmin = det->row_min, *vmax = det->row_max;
++    int y0 = ty * TILE;
++    int y1 = y0 + TILE < lh ? y0 + TILE : lh;
++    memcpy(vmin, level_row(S, L, y0), (size_t)lw);
++    memcpy(vmax, level_row(S, L, y0), (size_t)lw);
++    for (int y = y0 + 1; y < y1; y++) {
++        const uint8_t *row = level_row(S, L, y);
++        for (int x = 0; x < lw; x++) {
++            uint8_t v = row[x];
++            vmin[x] = v < vmin[x] ? v : vmin[x];
++            vmax[x] = v > vmax[x] ? v : vmax[x];
++        }
++    }
++    uint8_t *tmin = L->tmin + (size_t)ty * tw;
++    uint8_t *tmax = L->tmax + (size_t)ty * tw;
++    for (int x = lw; x < 4 * tw; x++) vmin[x] = vmin[lw - 1], vmax[x] = vmax[lw - 1];
++    int tx0 = 0;
++#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(NAPA_NO_SIMD)
++    for (; tx0 + 16 <= tw; tx0 += 16) {
++        const uint8_t *a = vmin + 4 * tx0, *b = vmax + 4 * tx0;
++        uint8x16_t l0 = vpminq_u8(vld1q_u8(a), vld1q_u8(a + 16)), l1 = vpminq_u8(vld1q_u8(a + 32), vld1q_u8(a + 48));
++        uint8x16_t h0 = vpmaxq_u8(vld1q_u8(b), vld1q_u8(b + 16)), h1 = vpmaxq_u8(vld1q_u8(b + 32), vld1q_u8(b + 48));
++        vst1q_u8(tmin + tx0, vpminq_u8(l0, l1));
++        vst1q_u8(tmax + tx0, vpmaxq_u8(h0, h1));
++    }
++#endif
++    for (int tx = tx0; tx < tw; tx++) {
++        const uint8_t *a = vmin + 4 * tx, *b = vmax + 4 * tx;
++        uint8_t l01 = a[0] < a[1] ? a[0] : a[1], l23 = a[2] < a[3] ? a[2] : a[3];
++        uint8_t h01 = b[0] > b[1] ? b[0] : b[1], h23 = b[2] > b[3] ? b[2] : b[3];
++        tmin[tx] = l01 < l23 ? l01 : l23;
++        tmax[tx] = h01 > h23 ? h01 : h23;
++    }
++    L->tiles = ty + 1;
++}
++
++static int band_ready(const napa_stream *S, const stream_level *L, int ty) {
++    int need_tiles = ty + 1 < L->th ? ty + 2 : ty + 1;
++    if (L->tiles < need_tiles) return 0;
++    const stream_level *F = &S->lev[L->floor_level];
++    int ry = ty * TILE * L->factor / NAPA_REGION;
++    if (ry > F->frows - 1) ry = F->frows - 1;
++    return F->frows_done > ry;
++}
++
++/* The candidate body of napa_detect (from the rough quad to the final decode), without its
++ * order-dependent gates: the caller replays those. */
++static void stream_candidate(napa_stream *S, const stream_level *L, component comp, stream_cand *rec) {
++    napa_detector *det = S->det;
++    const napa_params *params = &S->params;
++    const image_view view = {S->img, S->w, S->h, S->stride, det->fam.f->reversed};
++    const int W = det->fam.width;
++    const double cells = det->fam.cells;
++    const int s = L->s, last = L->last;
++    rec->stage = 0;
++    int t_minx = comp.minx, t_maxx = comp.maxx, t_miny = comp.miny, t_maxy = comp.maxy;
++    int bw = t_maxx - t_minx + 1, bh = t_maxy - t_miny + 1;
++    int(*E)[2] = comp.ext;
++    int idx[4] = {0, 4, 8, 12};
++    int64_t best2 = -1;
++    for (int i = 0; i < 10; i += 2) {
++        for (int j = i + 2; j < 12; j += 2) {
++            for (int k = j + 2; k < 14; k += 2) {
++                for (int l = k + 2; l < 16; l += 2) {
++                    int64_t a2 = (int64_t)(E[k][0] - E[i][0]) * (E[l][1] - E[j][1]) -
++                                 (int64_t)(E[k][1] - E[i][1]) * (E[l][0] - E[j][0]);
++                    if (a2 > best2) best2 = a2, idx[0] = i, idx[1] = j, idx[2] = k, idx[3] = l;
++                }
++            }
++        }
++    }
++    for (int moved = 1, sweep = 0; moved && sweep < 4; sweep++) {
++        moved = 0;
++        for (int v = 0; v < 4; v++) {
++            int pv = idx[(v + 3) & 3], nv = idx[(v + 1) & 3];
++            int ex = E[nv][0] - E[pv][0], ey = E[nv][1] - E[pv][1];
++            int64_t cur = (int64_t)E[idx[v]][0] * ey - (int64_t)E[idx[v]][1] * ex;
++            for (int m = (pv + 1) & 15; m != nv; m = (m + 1) & 15) {
++                int64_t gain = (int64_t)E[m][0] * ey - (int64_t)E[m][1] * ex;
++                if (gain > cur) cur = gain, idx[v] = m, moved = 1;
++            }
++        }
++    }
++    int pick[4][2];
++    for (int t = 0; t < 4; t++) pick[t][0] = E[idx[t]][0], pick[t][1] = E[idx[t]][1];
++    double best_area = quad_area_pts(pick);
++    double perim_q = 0;
++    for (int k = 0; k < 4; k++) {
++        int ex = pick[(k + 1) & 3][0] - pick[k][0], ey = pick[(k + 1) & 3][1] - pick[k][1];
++        perim_q += sqrt((double)(ex * ex + ey * ey));
++    }
++    if (comp.count > det->fam.fill_limit * (best_area + 0.5 * perim_q + 1.0)) return;
++    if (best_area < 0.3 * bw * bh) return;
++    vec2 rough[4], fine[4], finer[4];
++    for (int k = 0; k < 4; k++) {
++        rough[k].x = pick[k][0] * (double)s;
++        rough[k].y = pick[k][1] * (double)s;
++    }
++    if (s <= 2 && !last && params->min_border_cells >= 22) {
++        vec2 q[4];
++        double H[9];
++        grow_quad(rough, 0.5 * s, q);
++        square_to_quad(q, H);
++        int good_sides = 0;
++        double half_cell = 0.5 / cells;
++        for (int side = 0; side < 4; side++) {
++            double contrast_sum = 0;
++            for (int j = 0; j < 2; j++) {
++                double along = 0.25 + 0.5 * j;
++                double u = side == 1 ? 1.0 : side == 3 ? 0.0 : along;
++                double v = side == 0 ? 0.0 : side == 2 ? 1.0 : along;
++                double du = side == 1 ? half_cell : side == 3 ? -half_cell : 0;
++                double dv = side == 2 ? half_cell : side == 0 ? -half_cell : 0;
++                vec2 white = project(H, u + du, v + dv), black = project(H, u - du, v - dv);
++                contrast_sum += sample_bilinear(&view, white.x, white.y) - sample_bilinear(&view, black.x, black.y);
++            }
++            good_sides += contrast_sum >= params->min_contrast * 0.25;
++        }
++        if (good_sides < 3) return;
++    }
++    double reach = 0.5 * ((1.5 * s + 1.0) + (0.5 * s + 1.0));
++    double edge_w = 0;
++    if (!fit_sides(&view, rough, fine, 1.5 * s + 1.0, 0.5 * s + 1.0, params->min_contrast, 1, 6, &edge_w, NULL, cells))
++        return;
++    memcpy(rec->fine, fine, sizeof rec->fine);
++    rec->stage = 1;
++    vec2 probe[4];
++    napa_detection early;
++    edge_levels lv = {255, 0};
++    memcpy(probe, fine, sizeof probe);
++    if (!decode_quad(det, &view, probe, params, det->early_slack, &early, NULL, &lv)) {
++        int rescued = 0;
++        double Hq[9], perim = 0;
++        square_to_quad(fine, Hq);
++        double m0 = 1.0 / (W + 2), m1 = (W + 1.0) / (W + 2);
++        vec2 inner[4] = {project(Hq, m0, m0), project(Hq, m1, m0), project(Hq, m1, m1), project(Hq, m0, m1)};
++        for (int k = 0; k < 4; k++) perim += hypot(fine[(k + 1) & 3].x - fine[k].x, fine[(k + 1) & 3].y - fine[k].y);
++        double r = 0.45 * perim / (4.0 * (W + 2));
++        if (r >= 1.5 &&
++            border_plausible(&det->fam, &view, inner, params->min_contrast / 2,
++                             min_border(&det->fam, params->min_border_cells) - 6) &&
++            fit_sides(&view, inner, finer, r, r, params->min_contrast, 0, 8, &edge_w, NULL, cells)) {
++            memcpy(probe, finer, sizeof probe);
++            if (decode_quad(det, &view, probe, params, det->early_slack, &early, NULL, &lv)) {
++                memcpy(fine, finer, sizeof fine);
++                reach = r;
++                rescued = 1;
++            }
++        }
++        if (!rescued) return;
++    }
++    rec->stage = 2;
++    double cell = 0;
++    for (int k = 0; k < 4; k++) {
++        double ex = fine[(k + 1) & 3].x - fine[k].x, ey = fine[(k + 1) & 3].y - fine[k].y;
++        cell += sqrt(ex * ex + ey * ey) / (4.0 * W);
++    }
++    int ok = 1;
++    for (int pass = 0; pass < 5; pass++) {
++        double step = 2.0 * reach / 14.0;
++        double next = 1.5 * step;
++        if (next < 1.5) next = 1.5;
++        if (next < 1.25 * edge_w) next = 1.25 * edge_w;
++        if (next > 0.45 * cell && 0.45 * cell >= 1.0) next = 0.45 * cell;
++        if (pass > 0 && (next >= 0.9 * reach || step <= 0.35)) break;
++        reach = next;
++        ok = fit_sides(&view, fine, finer, reach, reach, params->min_contrast, 0, 8, &edge_w, &lv, cells);
++        if (!ok) break;
++        memcpy(fine, finer, sizeof fine);
++    }
++    if (ok) ok = fit_sides(&view, fine, finer, reach, reach, params->min_contrast, 0, NAPA_FINAL_POINTS, &edge_w, &lv, cells);
++    if (!ok) return;
++    napa_detection d;
++    double side_level[4];
++    edge_levels final_lv = {255, 0};
++    if (!decode_quad(det, &view, finer, params, 0, &d, side_level, &final_lv)) return;
++    int bad = 0;
++    double level_before = 0;
++    for (int k = 0; k < 4; k++) {
++        bad |= (side_level[k] > 0.3) << k;
++        level_before += side_level[k];
++    }
++    if (bad && bad != 15) {
++        double Hs[9], perim = 0;
++        square_to_quad(finer, Hs);
++        double one = 1.0 / W, rest = (W - 1.0) / W;
++        double u0 = (bad & 8) ? one : 0, v0 = (bad & 1) ? one : 0;
++        double u1 = (bad & 2) ? rest : 1, v1 = (bad & 4) ? rest : 1;
++        vec2 moved[4] = {project(Hs, u0, v0), project(Hs, u1, v0), project(Hs, u1, v1), project(Hs, u0, v1)};
++        for (int k = 0; k < 4; k++) perim += hypot(moved[(k + 1) & 3].x - moved[k].x, moved[(k + 1) & 3].y - moved[k].y);
++        double r = 0.45 * perim / (4.0 * W);
++        vec2 fixed[4];
++        napa_detection d2;
++        double side2[4], level_after = 0;
++        double r2 = 1.25 * edge_w > 1.5 ? 1.25 * edge_w : 1.5;
++        vec2 first[4];
++        int refit = r >= 1.0 && fit_sides(&view, moved, first, r, r, params->min_contrast, 0, NAPA_FINAL_POINTS, &edge_w, &lv, cells);
++        if (refit && r2 < r) refit = fit_sides(&view, first, fixed, r2, r2, params->min_contrast, 0, NAPA_FINAL_POINTS, &edge_w, &lv, cells);
++        else if (refit) memcpy(fixed, first, sizeof fixed);
++        if (refit && decode_quad(det, &view, fixed, params, 0, &d2, side2, NULL) && d2.id == d.id) {
++            for (int k = 0; k < 4; k++) level_after += side2[k];
++            if (level_after < level_before - 0.2) {
++                d = d2;
++                memcpy(finer, fixed, sizeof finer);
++            }
++        }
++    }
++    if (final_lv.white >= 250 || final_lv.black <= 4) {
++        double delta = 0;
++        if (border_bias(&det->fam, &view, finer, final_lv.black, final_lv.white, &delta) >= 4 &&
++            fabs(delta) > 0.02 && fabs(delta) < 1.5) {
++            vec2 grown[4];
++            napa_detection d3;
++            grow_quad(finer, delta, grown);
++            if (decode_quad(det, &view, grown, params, 0, &d3, NULL, NULL) && d3.id == d.id) d = d3;
++        }
++    }
++    rec->d = d;
++    rec->stage = 3;
++}
++
++/* A finished blob: napa_detect's candidate filter, then its extreme points from its runs in raster
++ * order, then the candidate body. */
++static int finalize_blob(napa_stream *S, stream_level *L, int r) {
++    const int W = S->det->fam.width;
++    const int lo = (7 * W + 4) / 8, hi = NAPA_HI * W / 8;
++    const blob_box *b = &L->B[r];
++    int bw = b->maxx - b->minx + 1, bh = b->maxy - b->miny + 1;
++    int big = bw > bh ? bw : bh, small = bw < bh ? bw : bh;
++    int max_size = L->last ? 1 << 30 : hi;
++    if (!L->last && S->base == 1 && L->s <= 2 && small > 72) return 0;
++    if (small < lo || big > max_size || big > 8 * small) return 0;
++    if ((double)b->count / ((double)bw * bh) < 0.2) return 0;
++    component c;
++    c.count = 0;
++    for (int k = 0; k < 16; k++) c.extv[k] = INT32_MIN;
++    c.row_y = -1;
++    c.minx = b->minx, c.maxx = b->maxx, c.miny = b->miny, c.maxy = b->maxy;
++    for (int y = b->miny; y <= b->maxy; y++) {
++        int i = L->row_start[y], e = L->row_start[y + 1];
++        /* runs of a row are sorted by x: skip to the first that can reach minx */
++        int lo_i = i, hi_i = e;
++        while (lo_i < hi_i) {
++            int mid = (lo_i + hi_i) >> 1;
++            if (L->R[mid].x1 < b->minx) lo_i = mid + 1;
++            else hi_i = mid;
++        }
++        for (i = lo_i; i < e && L->R[i].x0 <= b->maxx; i++)
++            if (find_root(L->P, i) == r) comp_add_run(&c, &L->R[i]);
++    }
++    comp_flush_row(&c);
++    if (L->ncand == L->cand_cap) {
++        int cap = L->cand_cap ? 2 * L->cand_cap : 256;
++        stream_cand *p = (stream_cand *)realloc(L->cands, (size_t)cap * sizeof(stream_cand));
++        if (p == NULL) return -2;
++        L->cands = p, L->cand_cap = cap;
++    }
++    stream_cand *rec = &L->cands[L->ncand++];
++    rec->root = r;
++    rec->minx = b->minx, rec->maxx = b->maxx, rec->miny = b->miny, rec->maxy = b->maxy;
++    stream_candidate(S, L, c, rec);
++    return 0;
++}
++
++/* Blobs whose last run is in a row before `upto` - 1 ... finished once row `upto` - 1 is labeled:
++ * a blob ending at row y is final when row y + 1 is done. */
++static int finalize_rows(napa_stream *S, stream_level *L, int upto_done) {
++    /* rows [fin_row, upto_done - 1) can be finalized (their next row is done); at the level's end, all */
++    int end = upto_done >= L->lh ? L->lh : upto_done - 1;
++    for (int y = L->fin_row; y < end; y++) {
++        for (int i = L->row_start[y]; i < L->row_start[y + 1]; i++) {
++            int r = find_root(L->P, i);
++            if (L->done[r] || L->B[r].maxy != y) continue;
++            L->done[r] = 1;
++            if (finalize_blob(S, L, r)) return -2;
++        }
++    }
++    if (end > L->fin_row) L->fin_row = end;
++    return 0;
++}
++
++static int process_band(napa_stream *S, stream_level *L, int ty) {
++    napa_detector *det = S->det;
++    const int lw = L->lw, lh = L->lh, tw = L->tw, th = L->th;
++    uint8_t *nlo = det->nb_lo, *nhi = det->nb_hi, *tt = det->nb_t, *fl = det->nb_f, *trow = det->row_thr;
++    const stream_level *F = &S->lev[L->floor_level];
++    int rows = F->frows, cols = F->cols;
++    int ry = ty * TILE * L->factor / NAPA_REGION;
++    const uint8_t *frow = F->eff + (size_t)(ry < rows ? ry : rows - 1) * cols;
++    for (int tx = 0; tx < tw; tx++) {
++        int rx = tx * TILE * L->factor / NAPA_REGION;
++        fl[tx] = frow[rx < cols ? rx : cols - 1];
++    }
++    const uint8_t *lo_up = L->tmin + (size_t)(ty > 0 ? ty - 1 : ty) * tw;
++    const uint8_t *lo_mid = L->tmin + (size_t)ty * tw;
++    const uint8_t *lo_dn = L->tmin + (size_t)(ty + 1 < th ? ty + 1 : ty) * tw;
++    const uint8_t *hi_up = L->tmax + (size_t)(ty > 0 ? ty - 1 : ty) * tw;
++    const uint8_t *hi_mid = L->tmax + (size_t)ty * tw;
++    const uint8_t *hi_dn = L->tmax + (size_t)(ty + 1 < th ? ty + 1 : ty) * tw;
++    for (int tx = 0; tx < tw; tx++) {
++        uint8_t l = lo_mid[tx], h = hi_mid[tx];
++        l = lo_up[tx] < l ? lo_up[tx] : l;
++        l = lo_dn[tx] < l ? lo_dn[tx] : l;
++        h = hi_up[tx] > h ? hi_up[tx] : h;
++        h = hi_dn[tx] > h ? hi_dn[tx] : h;
++        nlo[tx + 1] = l;
++        nhi[tx + 1] = h;
++    }
++    nlo[0] = nlo[1], nhi[0] = nhi[1], nlo[tw + 1] = nlo[tw], nhi[tw + 1] = nhi[tw];
++    uint8_t any = 0;
++    for (int tx = 0; tx < tw; tx++) {
++        uint8_t l = nlo[tx + 1], h = nhi[tx + 1];
++        l = nlo[tx] < l ? nlo[tx] : l;
++        l = nlo[tx + 2] < l ? nlo[tx + 2] : l;
++        h = nhi[tx] > h ? nhi[tx] : h;
++        h = nhi[tx + 2] > h ? nhi[tx + 2] : h;
++        uint8_t t = (uint8_t)(h - l) >= fl[tx] ? (uint8_t)((l + h + 1) >> 1) : 0;
++        tt[tx] = t;
++        any |= t;
++    }
++    int y0 = ty * TILE;
++    int y1 = y0 + TILE < lh ? y0 + TILE : lh;
++    napa_run *R = L->R;
++    int32_t *P = L->P;
++    blob_box *B = L->B;
++    int n = L->nruns;
++    if (any) {
++        expand4(trow, tt, tw);
++        memset(trow + lw, 0, (size_t)(4 * tw + 64 - lw));
++    }
++    uint64_t *bits = det->row_bits;
++    for (int y = y0; y < y1; y++) {
++        if (!any) {
++            L->row_start[y + 1] = n;
++            continue;
++        }
++        const uint8_t *lrow = level_row(S, L, y);
++        if (y == lh - 1 && L->kind == 0) lrow = L->tail;
++        dark_bits(lrow, trow, lw, bits);
++        int start = n;
++        n = extract_runs(bits, lw, y, R, n);
++        for (int i = start; i < n; i++) P[i] = i;
++        if (L->prev_y == y - 1) {
++            int a = L->prev_start, b = start, prev_end = L->prev_end;
++            while (a < prev_end && b < n) {
++                if (R[a].x1 + 1 < R[b].x0) {
++                    a++;
++                } else if (R[b].x1 + 1 < R[a].x0) {
++                    b++;
++                } else {
++                    if (P[b] == b) {
++                        P[b] = P[a];
++                    } else if (P[b] != P[a]) {
++                        int32_t ra = find_root(P, a), rb = find_root(P, b);
++                        /* both roots are earlier rows' blobs: merge their boxes */
++                        if (ra != rb) {
++                            int32_t lo_r = ra < rb ? ra : rb, hi_r = ra < rb ? rb : ra;
++                            P[hi_r] = lo_r;
++                            blob_box *x = &B[lo_r], *z = &B[hi_r];
++                            x->count += z->count;
++                            x->minx = z->minx < x->minx ? z->minx : x->minx;
++                            x->maxx = z->maxx > x->maxx ? z->maxx : x->maxx;
++                            x->miny = z->miny < x->miny ? z->miny : x->miny;
++                            x->maxy = z->maxy > x->maxy ? z->maxy : x->maxy;
++                        }
++                    }
++                    if (R[a].x1 < R[b].x1) a++;
++                    else b++;
++                }
++            }
++        }
++        for (int i = start; i < n; i++) {
++            int32_t r = find_root(P, i);
++            L->done[i] = 0;
++            if (r == i) {
++                B[i].count = R[i].x1 - R[i].x0 + 1;
++                B[i].minx = R[i].x0, B[i].maxx = R[i].x1;
++                B[i].miny = B[i].maxy = R[i].y;
++            } else {
++                B[r].count += R[i].x1 - R[i].x0 + 1;
++                B[r].minx = R[i].x0 < B[r].minx ? R[i].x0 : B[r].minx;
++                B[r].maxx = R[i].x1 > B[r].maxx ? R[i].x1 : B[r].maxx;
++                B[r].maxy = R[i].y;
++            }
++        }
++        L->prev_y = y, L->prev_start = start, L->prev_end = n;
++        L->row_start[y + 1] = n;
++    }
++    L->nruns = n;
++    L->bands = ty + 1;
++    return finalize_rows(S, L, y1);
++}
++
++static int stream_progress(napa_stream *S) {
++    for (int li = 0; li < S->nlev; li++) {
++        stream_level *L = &S->lev[li];
++        while (L->rows < L->lh && row_ready(S, li, L->rows)) make_row(S, li, L->rows);
++        while (L->tiles < L->th) {
++            int y1 = (L->tiles + 1) * TILE < L->lh ? (L->tiles + 1) * TILE : L->lh;
++            if (L->rows < y1) break;
++            tile_row(S, L, L->tiles);
++        }
++        while (L->bands < L->th && band_ready(S, L, L->bands))
++            if (process_band(S, L, L->bands)) return -2;
++    }
++    return 0;
++}
++
++int napa_stream_feed(napa_stream *S, int rows) {
++    if (S == NULL || !S->ok) return -1;
++    if (rows > S->h) rows = S->h;
++    if (rows <= S->fed) return 0;
++    S->fed = rows;
++    if (S->nlev == 0) return 0;
++    if (rows == S->h) /* the frame's last rows just arrived: what each level still has to threshold */
++        for (int li = 0; li < S->nlev; li++) S->lag_rows[li] = S->lev[li].lh - 4 * S->lev[li].bands;
++    /* the shared row scratch must fit the widest level */
++    if (ensure_buffers(S->det, 0, 0, (size_t)S->lev[0].lw, 0)) return -2;
++    int r = stream_progress(S);
++    if (r) S->ok = 0;
++    return r;
++}
++
++static int cand_cmp(const void *a, const void *b) {
++    int x = ((const stream_cand *)a)->root, y = ((const stream_cand *)b)->root;
++    return (x > y) - (x < y);
++}
++
++/* Whether the assumed frame floors gave the same floors and decisions as the frame's own; updates the
++ * guesses to the frame's values. */
++static int stream_check(napa_stream *S) {
++    int same = 1, contrast = 0, have_contrast = 0;
++    const int mc = S->params.min_contrast;
++    for (int li = 0; li < S->nlev; li++) {
++        stream_level *L = &S->lev[li];
++        stream_guess *g = &S->guess[li];
++        int event_act = L->s == S->base || (S->base == 1 && L->s == 2 && have_contrast && contrast > NAPA_NOISY_FLOOR);
++        if (event_act != L->event) {
++            same = 0;
++            g->valid = 1, g->event = event_act, g->f1 = g->f2 = contrast, g->noisy = 0;
++            break; /* the rest depends on a level this run didn't measure */
++        }
++        if (!L->event) continue;
++        double sig1 = L->s == 1 && !L->last ? 7.0 : NAPA_FLOOR_SIGMAS;
++        int cap1 = L->s == 1 && !L->last ? 255 : NAPA_FLOOR_CAP;
++        int f1 = L->n1 ? floor_from(L->all1, L->n1, mc, sig1, cap1) : mc;
++        int noisy = f1 > NAPA_NOISY_FLOOR && L->s > 1 && L->s <= 16;
++        g->valid = 1, g->event = 1, g->f1 = f1;
++        if (noisy != L->noisy) {
++            same = 0;
++            g->noisy = noisy;
++            break;
++        }
++        g->noisy = noisy;
++        int f = f1;
++        if (noisy) {
++            double sig2 = S->base == 1 && L->s == 2 ? NAPA_BOX_SIGMAS * sqrt(1.5) : NAPA_BOX_SIGMAS;
++            f = L->n2 ? floor_from(L->all2, L->n2, mc, sig2, NAPA_FLOOR_CAP) : mc;
++            g->f2 = f;
++        }
++        if (f != L->fpred) {
++            for (int i = 0; i < L->cols * L->frows; i++) {
++                uint8_t r = L->raw[i];
++                if ((r == 0 || r > f ? f : r) != L->eff[i]) {
++                    same = 0;
++                    break;
++                }
++            }
++            /* the next level's decision uses this contrast: checked there */
++        }
++        contrast = f, have_contrast = 1;
++        if (!same) break;
++    }
++    return same;
++}
++
++int napa_stream_finish(napa_stream *S, napa_detection *out, int max_out) {
++    if (S == NULL || !S->ok || max_out < 0) return -1;
++    if (S->nlev == 0) return 0;
++    if (S->fed < S->h) {
++        int r = napa_stream_feed(S, S->h);
++        if (r) return r;
++    }
++    S->st.frames++;
++    for (int attempt = 0;; attempt++) {
++        if (stream_check(S)) break;
++        S->st.reruns++;
++        if (attempt >= 3) { /* not expected: napa_detect itself */
++            S->st.fallbacks++;
++            return napa_detect(S->det, S->img, S->w, S->h, S->stride, &S->params, out, max_out);
++        }
++        int r = stream_setup(S);
++        if (r) return r;
++        S->fed = S->h;
++        if (ensure_buffers(S->det, 0, 0, (size_t)S->lev[0].lw, 0)) return -2;
++        if (stream_progress(S)) return -2;
++    }
++    napa_detector *det = S->det;
++    det->failed_n = 0;
++    int found = 0;
++    for (int li = 0; li < S->nlev; li++) {
++        stream_level *L = &S->lev[li];
++        const int s = L->s;
++        qsort(L->cands, (size_t)L->ncand, sizeof(stream_cand), cand_cmp);
++        for (int ci = 0; ci < L->ncand; ci++) {
++            const stream_cand *c = &L->cands[ci];
++            int bw = c->maxx - c->minx + 1, bh = c->maxy - c->miny + 1;
++            int big = bw > bh ? bw : bh;
++            double ccx = 0.5 * (c->minx + c->maxx) * s, ccy = 0.5 * (c->miny + c->maxy) * s;
++            if (covered(out, found < max_out ? found : max_out, ccx, ccy, 0.3 * big * s + 2.0)) continue;
++            if (c->stage == 0) continue;
++            if (failed_before(det, c->fine, s, 0.3)) continue;
++            if (c->stage == 1) {
++                remember_failure(det, c->fine, s);
++                continue;
++            }
++            if (c->stage == 2) continue;
++            if (already_found(out, found < max_out ? found : max_out, &c->d)) continue;
++            if (found < max_out) out[found] = c->d;
++            found++;
++        }
++    }
++    S->ok = 0;
++    return found < max_out ? found : max_out;
++}
++
++int napa_stream_lag(const napa_stream *S, int *rows, int max) {
++    if (S == NULL) return 0;
++    int n = S->nlev < max ? S->nlev : max;
++    for (int i = 0; i < n; i++) rows[i] = S->lag_rows[i];
++    return n;
++}
+--- a/third_party/napa/napa_core.h
++++ b/third_party/napa/napa_core.h
+@@ -63,6 +63,27 @@
+ /* SpectrumJetson (patches/napa-01-early-slack.patch): the early decode's slack in bits, 0-3 (default 2,
+  * NAPA's built-in value). 0 or -1 if det is NULL or slack is out of range. */
+ NAPA_API int napa_set_early_slack(napa_detector *det, int slack);
++/* SpectrumJetson (patches/napa-03-streaming.patch): napa_detect while the frame arrives, row band by row
++ * band. begin() takes the frame's buffer (rows may still be arriving); feed(rows) says rows [0, rows) are
++ * in it and does the work they allow; finish() completes the frame and returns exactly what napa_detect
++ * would (same detections, order and corners). The buffer must stay valid until finish(). A stream borrows
++ * its detector (family, early slack, scratch): use neither for anything else between begin and finish.
++ * Returns: begin/feed 0, -1 invalid input, -2 out of memory; finish as napa_detect. */
++typedef struct napa_stream napa_stream;
++typedef struct {
++    long frames;    /* finished frames */
++    long reruns;    /* frames reprocessed because a level's frame-wide noise floor differed from the guess */
++    long fallbacks; /* frames handed to napa_detect (not expected) */
++} napa_stream_stats;
++NAPA_API napa_stream *napa_stream_create(napa_detector *det);
++NAPA_API void napa_stream_destroy(napa_stream *s);
++NAPA_API int napa_stream_begin(napa_stream *s, const uint8_t *img, int width, int height, int stride,
++                               const napa_params *params);
++NAPA_API int napa_stream_feed(napa_stream *s, int rows);
++NAPA_API int napa_stream_finish(napa_stream *s, napa_detection *out, int max_out);
++NAPA_API void napa_stream_get_stats(const napa_stream *s, napa_stream_stats *out);
++/* Per level, its rows still to threshold when the frame's last row arrived (the last frame). */
++NAPA_API int napa_stream_lag(const napa_stream *s, int *rows, int max);
+ /* Detect the detector's family of tags in an 8-bit grayscale image. Returns the number of detections written
+  * (at most max_out), -1 on invalid input or parameters (see napa_params for ranges), or -2 if
+  * allocation fails. A detector handle is not thread-safe; use one per thread or camera stream. */
