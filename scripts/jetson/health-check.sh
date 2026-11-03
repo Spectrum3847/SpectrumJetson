@@ -367,9 +367,9 @@ for parm in payload_cap hwtimestamps urb_packets; do
 done
 urbp=$(cat /sys/module/uvcvideo/parameters/urb_packets 2>/dev/null || echo none)
 case $urbp in
-  16) pass "camera driver hands frames over in 2 ms steps (urb_packets 16)" ;;
+  4) pass "camera driver hands frames over in 0.5 ms steps (urb_packets 4)" ;;
   none) warn "stock camera driver: no payload_cap or urb_packets (11-uvcvideo-payload-cap.sh --install)" ;;
-  *) warn "camera driver urb_packets is $urbp (16 is 1.2 ms lower latency than the stock 32; 11-uvcvideo-payload-cap.sh --install)" ;;
+  *) warn "camera driver urb_packets is $urbp (4 is ~1.8 ms lower latency than the stock 32, ~0.5-1 ms lower than 16; 11-uvcvideo-payload-cap.sh --install)" ;;
 esac
 # photonvision-49/50: idle mode (30 fps per camera while the robot is disabled) switched off?
 idle=$(timeout 5 python3 -c 'import json,urllib.request; s=json.load(urllib.request.urlopen("http://localhost:5800/api/robotState", timeout=3)); print("on %g" % s["idleFps"] if s["idleWhileDisabled"] else "off")' 2>/dev/null || true)

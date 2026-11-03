@@ -1,0 +1,37 @@
+07:59:47 timing min16 TXMAN1_Q24 (tj 60.437)
+: 2 cameras, 545 frames, config min16, mode timing, band 8
+Whole-frame sightings (margin >= 15): 404; stream mismatches: 0 frames; base-stream reruns 0
+whole ms p50/p95/p99/mean 2.038 2.244 2.466 1.994
+tail ms p50/p95/p99/mean 0.114 0.172 0.228 0.117
+stream cpu ms p50/p95/p99/mean 2.615 2.901 3.151 2.562
+behind ms p50/p99 0.000 0.001
+IDENTICAL
+Time: replay took 7 s
+07:59:59 timing min16 TXMAN1_Q17 (tj 61.031)
+: 2 cameras, 357 frames, config min16, mode timing, band 8
+Whole-frame sightings (margin >= 15): 434; stream mismatches: 0 frames; base-stream reruns 0
+whole ms p50/p95/p99/mean 2.065 2.270 2.396 2.038
+tail ms p50/p95/p99/mean 0.108 0.171 0.199 0.110
+stream cpu ms p50/p95/p99/mean 2.676 3.089 3.268 2.654
+behind ms p50/p99 0.000 0.001
+IDENTICAL
+Time: replay took 5 s
+08:00:08 timing far TXMAN1_Q24 (tj 61.375)
+: 2 cameras, 545 frames, config far, mode timing, band 8
+Whole-frame sightings (margin >= 15): 354; stream mismatches: 0 frames; base-stream reruns 0
+whole ms p50/p95/p99/mean 1.016 1.363 1.641 1.031
+tail ms p50/p95/p99/mean 0.051 0.405 0.621 0.127
+stream cpu ms p50/p95/p99/mean 1.344 1.797 2.105 1.368
+behind ms p50/p99 0.000 0.000
+IDENTICAL
+Time: replay took 7 s
+08:00:20 timing far TXMAN1_Q17 (tj 62.093)
+: 2 cameras, 357 frames, config far, mode timing, band 8
+Whole-frame sightings (margin >= 15): 395; stream mismatches: 0 frames; base-stream reruns 0
+whole ms p50/p95/p99/mean 1.118 1.454 1.579 1.119
+tail ms p50/p95/p99/mean 0.123 0.519 0.619 0.178
+stream cpu ms p50/p95/p99/mean 1.465 1.867 2.204 1.468
+behind ms p50/p99 0.000 0.000
+IDENTICAL
+Time: replay took 5 s
+done

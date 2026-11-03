@@ -88,12 +88,21 @@ find_package(JNI REQUIRED COMPONENTS JVM)
 find_package(OpenCV REQUIRED core imgproc)
 find_package(JPEG REQUIRED)  # libjpeg-turbo (libjpeg-turbo8-dev), for decodeMjpegGray
 
+# The streaming decoder (SPECTRUM_JPEG_DECODER=stream) is its own library, libspectrum-stream.so, shared
+# with the CPU-only NAPA library (streaming NAPA hands it band sinks; one set of watcher threads per
+# process). Only its spectrum_stream_* C API is exported. Installed next to the detector, in /usr/lib.
+add_library(spectrum_stream SHARED stream_decode.cc)
+set_target_properties(spectrum_stream PROPERTIES OUTPUT_NAME spectrum-stream CXX_VISIBILITY_PRESET hidden)
+target_link_libraries(spectrum_stream PRIVATE JPEG::JPEG Threads::Threads)
+target_link_options(spectrum_stream PRIVATE -Wl,--no-undefined)
+
 add_library(971apriltag_jni SHARED GpuDetectorJNI.cc far_search.cc fault_kernel.cu)
-set_target_properties(971apriltag_jni PROPERTIES OUTPUT_NAME spectrum-gpu-apriltag)
+set_target_properties(971apriltag_jni PROPERTIES OUTPUT_NAME spectrum-gpu-apriltag
+                                                 BUILD_RPATH "\$ORIGIN")  # libspectrum-stream.so beside it
 target_include_directories(971apriltag_jni PRIVATE ${BOS_DIR} ${JNI_INCLUDE_DIRS}
                                                    ${OpenCV_INCLUDE_DIRS})
 # bos uses ABSL_FLAG (use_neon, debug_blob_index) but its CMake does not link absl::flags.
-target_link_libraries(971apriltag_jni PRIVATE 971apriltag absl::flags CUDA::cudart JPEG::JPEG
+target_link_libraries(971apriltag_jni PRIVATE 971apriltag absl::flags CUDA::cudart JPEG::JPEG spectrum_stream
                                               ${JNI_LIBRARIES} Threads::Threads ${CMAKE_DL_LIBS})
 # Only the JNI entry points (JNIEXPORT) and spectrum_cuda_* are exported; everything linked in
 # statically (AprilTag, abseil, bos) stays private to this library. --no-undefined: fail at link

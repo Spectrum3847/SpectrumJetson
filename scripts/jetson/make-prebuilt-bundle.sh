@@ -7,7 +7,7 @@
 # What's in it (each where install.sh expects it):
 #   usr/local/lib/   libwpiutil.so libwpimath.so libapriltag.so   (the parts of allwpilib the
 #                    detector needs at runtime; the full build is 17 minutes)
-#   build/gpu-detector/  libspectrum-gpu-apriltag.so libspectrumnvjpg.so libspectrumtrt.so
+#   build/gpu-detector/  libspectrum-gpu-apriltag.so libspectrum-stream.so libspectrumnvjpg.so libspectrumtrt.so
 #   build/fieldcal-detect/fieldcal_detect
 #   build/gpu-detector/far_search_test   (the synthetic-tag generator fake-cameras.sh uses)
 #   photonvision-spectrum-<tag>-linuxarm64.jar   (default: the jar PhotonVision is running)
@@ -50,6 +50,7 @@ files=(
   /usr/local/lib/libwpimath.so:usr/local/lib/libwpimath.so
   /usr/local/lib/libapriltag.so:usr/local/lib/libapriltag.so
   "$HOME/build/gpu-detector/libspectrum-gpu-apriltag.so:build/gpu-detector/libspectrum-gpu-apriltag.so"
+  "$HOME/build/gpu-detector/libspectrum-stream.so:build/gpu-detector/libspectrum-stream.so"
   "$HOME/build/gpu-detector/libspectrumnvjpg.so:build/gpu-detector/libspectrumnvjpg.so"
   "$HOME/build/gpu-detector/libspectrumtrt.so:build/gpu-detector/libspectrumtrt.so"
   "$HOME/build/fieldcal-detect/fieldcal_detect:build/fieldcal-detect/fieldcal_detect"
