@@ -7,6 +7,7 @@
 # Builds only; install (PhotonVision loads it from java.library.path, like the GPU detector):
 #   sudo install -m 755 ~/build/napa-detector/libspectrum-napa-apriltag.so /usr/lib/
 # Without it installed, the fork's NAPA option falls back to its normal detector and logs why.
+# Streaming NAPA (SPECTRUM_NAPA_STREAM=1, tests/napa-stream) also needs libspectrum-stream.so (built here too).
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 OUT=${1:-$HOME/build/napa-detector}
@@ -34,7 +35,18 @@ for f in napa_far NapaDetectorJNI; do
     -I"$JAVA_HOME/include/linux" -o "$OUT/$f.o"
 done
 $CXX -shared -Wl,-z,defs -o "$OUT/libspectrum-napa-apriltag.so" "$OUT/napa_core.o" "$OUT/napa_far.o" \
-  "$OUT/NapaDetectorJNI.o" -lm -lpthread
+  "$OUT/NapaDetectorJNI.o" -lm -lpthread -ldl
+# The streaming decoder, libspectrum-stream.so (detector/stream_decode.cc; libjpeg-turbo only), which streaming
+# NAPA opens at run time (no link dependency: the NAPA library works without it). The Jetson's GPU build
+# (07-build-gpu-detector.sh) makes the same library; on a CPU-only machine install this one:
+#   sudo install -m 755 ~/build/napa-detector/libspectrum-stream.so /usr/lib/
+if echo '#include <stdio.h>
+#include <jpeglib.h>' | $CC -E -x c - >/dev/null 2>&1; then
+  timeout 300 $CXX $CF -std=c++17 -Wall -Wextra -Wno-clobbered -shared -Wl,-z,defs -Wl,-soname,libspectrum-stream.so "$REPO/detector/stream_decode.cc" \
+    -o "$OUT/libspectrum-stream.so" -ljpeg -lpthread
+else
+  echo "no jpeglib.h for $ARCH (libjpeg-turbo dev package): skipping libspectrum-stream.so (streaming NAPA)"
+fi
 timeout 300 $CXX -O2 -std=c++17 -Wall "$D/napa_test.cc" "$OUT/napa_far.o" "$OUT/napa_core.o" -I"$N" -I"$D" \
   -lm -lpthread -o "$OUT/napa_test"
 if [[ $ARCH == "$(uname -m)" ]]; then

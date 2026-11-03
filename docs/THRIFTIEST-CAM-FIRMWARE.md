@@ -74,6 +74,9 @@ A backup is the camera's whole 512 KiB flash, so it puts back exactly what was t
 it managed. A camera left in maintenance mode (`list` shows `IN MAINTENANCE MODE`) comes back with
 a replug or a power cycle; then run `flash` again. Keep it powered while it's writing.
 
+Firmware internals (JPEG header, sensor modes, candidate latency patch): see
+[THRIFTIEST-FIRMWARE-ANALYSIS.md](THRIFTIEST-FIRMWARE-ANALYSIS.md).
+
 ## Testing other firmware
 
 For a new release, or a modified image such as the "usbrecov" patch below:
