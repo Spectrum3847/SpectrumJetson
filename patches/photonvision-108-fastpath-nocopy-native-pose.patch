@@ -1,0 +1,100 @@
+diff --git a/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java b/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
+index 5e38cb02..f2d2a099 100644
+--- a/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
++++ b/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
+@@ -85,6 +85,21 @@ public final class NapaDetectorJNI {
+     public static native int streamDecodeGray(
+             long rawFramePtr, long dataAddr, int width, int height, int step);
+ 
++    /**
++     * Spectrum (sc/mjpeg-napa): false = streamDecodeGray hands over a streamed frame without copying its
++     * pixels (only a tag that detectStreamed reads), for frames whose tags the band sink already found and
++     * when nobody watches the stream. Returns false if the library can't.
++     */
++    public static native boolean setStreamCopy(boolean on);
++
++    /**
++     * Spectrum (sc/mjpeg-napa): single-tag pose natively (IPPE for a square + Gauss-Newton refine, ~10 us).
++     * corners: AprilTag order, raw pixels (x0, y0, ...); k: 3x3 intrinsics row-major; dist: OpenCV distortion
++     * (up to 8). Returns {best tx, ty, tz, R (9, row-major), err px, alt tx, ty, tz, R (9), err px} in AprilTag's
++     * tag frame, or null.
++     */
++    public static native double[] poseSquare(double[] corners, double[] k, double[] dist, double tagSize);
++
+     /**
+      * As {@link #detect}, for a frame the streaming decoder just wrote into dataAddr on this thread:
+      * returns the result NAPA computed band by band while the frame arrived (identical to detect()),
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+index a6e022b1..7fef1a0b 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+@@ -845,6 +845,16 @@ public class USBFrameProvider extends CpuImageProcessor {
+             // Spectrum: streaming NAPA without the CUDA library (SystemCore): the streaming decoder
+             // (libspectrum-stream.so via the NAPA library) decoded the frame while it arrived.
+             if (!half && cpuGray && org.photonvision.vision.pipe.impl.NapaDetector.streamEnabled()) {
++                // Spectrum (sc/mjpeg-napa): with no stream viewer the pipeline only needs the tags the band
++                // sink found, not the 1 MB image: skip the copy (SPECTRUM_STREAM_NOCOPY=0 turns this off).
++                // The Mat is then only touched in its first row, so its fresh pages aren't faulted in either.
++                if (NO_COPY_OK) {
++                    boolean copy = org.photonvision.vision.frame.consumer.MJPGFrameConsumer.anyViewers();
++                    if (copy != lastStreamCopy) {
++                        lastStreamCopy = copy;
++                        if (!org.photonvision.jni.NapaDetectorJNI.setStreamCopy(copy)) NO_COPY_OK = false;
++                    }
++                }
+                 Mat s = new Mat(height, width, CvType.CV_8UC1);
+                 if (org.photonvision.jni.NapaDetectorJNI.streamDecodeGray(
+                                 frame.getNativeObj(), s.dataAddr(), width, height, (int) s.step1())
+@@ -1084,6 +1094,10 @@ public class USBFrameProvider extends CpuImageProcessor {
+ 
+     private boolean loggedMidExposure = false;
+ 
++    // Spectrum (sc/mjpeg-napa): streamDecodeGray without the image copy while nobody watches the stream
++    private static volatile boolean NO_COPY_OK = !"0".equals(System.getenv("SPECTRUM_STREAM_NOCOPY"));
++    private static volatile boolean lastStreamCopy = true;
++
+     /**
+      * SpectrumJetson (photonvision-13): move a frame's timestamp to mid-exposure. uvcvideo stamps a
+      * frame when its first USB packet arrives, which is after the whole exposure and the camera's
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagPoseEstimatorPipe.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagPoseEstimatorPipe.java
+index 3d3ec8c3..1f05dcc6 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagPoseEstimatorPipe.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagPoseEstimatorPipe.java
+@@ -53,8 +53,37 @@ public class AprilTagPoseEstimatorPipe
+ 
+     MatOfPoint2f cornersMat = new MatOfPoint2f();
+ 
++    // Spectrum (sc/mjpeg-napa): the native IPPE + Gauss-Newton pose when the NAPA library is there
++    // (SPECTRUM_NATIVE_POSE=0: WPILib's orthogonal iteration as before). Measured: the Java path (orthogonal
++    // iteration + OpenCV IPPE for the alternate) was 0.28 ms of every frame's latency on the SystemCore.
++    private static final boolean NATIVE_POSE = !"0".equals(System.getenv("SPECTRUM_NATIVE_POSE"));
++
++    private static Transform3d nativeTransform(double[] r, int o) {
++        var m = MatBuilder.fill(
++                Nat.N3(), Nat.N3(), r[o + 3], r[o + 4], r[o + 5], r[o + 6], r[o + 7], r[o + 8], r[o + 9], r[o + 10],
++                r[o + 11]);
++        return new Transform3d(new Translation3d(r[o], r[o + 1], r[o + 2]), new Rotation3d(m));
++    }
++
+     @Override
+     protected AprilTagPoseEstimate process(AprilTagDetection in) {
++        if (NATIVE_POSE && NapaDetector.usable() && params.calibration() != null) {
++            try {
++                double[] c = new double[8];
++                for (int i = 0; i < 4; i++) {
++                    c[2 * i] = in.getCornerX(i);
++                    c[2 * i + 1] = in.getCornerY(i);
++                }
++                double[] r = org.photonvision.jni.NapaDetectorJNI.poseSquare(
++                        c,
++                        params.calibration().getIntrinsicsArr(),
++                        params.calibration().getDistCoeffsArr(),
++                        params.config().tagSize);
++                if (r != null) return new AprilTagPoseEstimate(nativeTransform(r, 0), nativeTransform(r, 13), r[12], r[25]);
++            } catch (UnsatisfiedLinkError e) {
++                // an older NAPA library: the Java path below
++            }
++        }
+         // Save the corner points of our detection to an array
+         Point[] corners = new Point[4];
+         for (int i = 0; i < 4; i++) {

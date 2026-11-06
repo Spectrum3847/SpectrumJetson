@@ -241,7 +241,7 @@ static int selftest() {
 
 // ------------------------------------------------------------------------------------------- main
 int main(int argc, char **argv) {
-  double secs = 0, tag_size = 0.1651, mid_offset_ms = 5.0, fps_max = 0;
+  double secs = 0, tag_size = 0.1651, mid_offset_ms = -1, camera_delay_ms = 2.5, fps_max = 0;
   const char *lock_path = nullptr, *cam_serial = nullptr, *cam_port = nullptr;
   const char *csv = nullptr, *calib = nullptr, *save = nullptr, *nt_host = nullptr, *cam_name = "thrifty";
   int cpu = -1, fifo = 0, exposure = -1, gain = -1, gamma = -1, backlight = -1, sharpness = -1, brightness = -1000, every = 1, check = 64, whole = 0, no_napa = 0;
@@ -273,7 +273,8 @@ int main(int argc, char **argv) {
     else if (a == "--no-napa") no_napa = 1;
     else if (a == "--nt") nt_host = nx();
     else if (a == "--name") cam_name = nx();
-    else if (a == "--mid-offset-ms") mid_offset_ms = atof(nx());  // first packet -> mid-exposure
+    else if (a == "--mid-offset-ms") mid_offset_ms = atof(nx());  // first packet -> mid-exposure (overrides)
+    else if (a == "--camera-delay-ms") camera_delay_ms = atof(nx());  // exposure end -> first packet (per camera)
     else if (a == "--no-refine") pose_refine = 0;
     else if (a == "--usb") {  // camera model VID:PID (hex), default 1bcf:28c5 (Thriftiest); Swyft: 0bda:3035
       unsigned v = 0, p = 0;
@@ -334,6 +335,10 @@ int main(int argc, char **argv) {
     if (sched_setscheduler(0, SCHED_FIFO, &sp)) perror("SCHED_FIFO");
   }
   NtPub *pub = nt_host ? nt_pub_create(nt_host, cam_name) : nullptr;
+  // first packet -> mid-exposure: half the exposure (exposure_time_absolute is 0.1 ms steps) + the camera's delay
+  // from exposure end to its first packet (default 2.5 ms, Team 100's figure; the firmware analysis measured
+  // ~0.35 ms from the payload PTS, to be confirmed with an LED test before the default changes)
+  if (mid_offset_ms < 0) mid_offset_ms = (exposure > 0 ? exposure * 0.05 : 0) + camera_delay_ms;
   if (pub) nt_pub_config(pub, have_cam ? &cam : nullptr, tag_size, (int64_t)(mid_offset_ms * 1e6));
   if (lock_path) {  // the bench's camera lock: wait up to 30 s, then give up
     int lfd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0666);

@@ -163,7 +163,7 @@ std::mutex g_mu;
 std::vector<std::unique_ptr<Watcher>> &g_watchers = *new std::vector<std::unique_ptr<Watcher>>;
 Clock::time_point g_next_scan{};
 std::atomic<bool> g_off{false};
-std::atomic<long> g_hit{0}, g_miss{0}, g_waited{0}, g_check_ok{0}, g_check_differ{0};
+std::atomic<long> g_hit{0}, g_miss{0}, g_waited{0}, g_check_ok{0}, g_check_differ{0}, g_refs{0};
 
 // The frames DecodeGray handed out (by output pointer; the pipeline may see a copy, so take() also
 // matches by content): which watcher and which of its frames.
@@ -173,6 +173,23 @@ struct Served {
   long seq = 0;
 };
 thread_local Served t_served;
+
+// sc/mjpeg-napa: without a stream viewer the consumer doesn't need the pixels, only the band sink's result (the
+// tags): spectrum_stream_set_copy(0) skips the 1 MB copy into its image and writes this tag into its first row
+// instead, so spectrum_stream_take() (on another thread) still finds the frame.
+std::atomic<int> g_copy{1};
+struct RefTag {
+  char magic[8];
+  uint32_t dev_hash;
+  uint32_t pad;
+  int64_t seq;
+};
+constexpr char kRefMagic[8] = {'S', 'J', 'R', 'E', 'F', 'v', '1', 0};
+uint32_t DevHash(const std::string &s) {
+  uint32_t h = 2166136261u;
+  for (char c : s) h = (h ^ static_cast<uint8_t>(c)) * 16777619u;
+  return h;
+}
 
 // Is `img` (stride bytes a row) the frame r decoded? Every 16th row compared whole.
 bool SameImage(const Result &r, const uint8_t *img, int width, int height, size_t stride) {
@@ -793,8 +810,19 @@ SPECTRUM_STREAM_API int spectrum_stream_decode_gray(const uint8_t *jpeg, size_t 
         }
       }
     }
-    for (int y = 0; y < height; y++)
-      std::memcpy(out + static_cast<size_t>(y) * stride, r->gray.data() + static_cast<size_t>(y) * width, width);
+    // copy unless asked not to, and always when no band-sink result came with this frame (the consumer then
+    // detects on the pixels itself)
+    if (g_copy.load(std::memory_order_relaxed) || !r->sink_out || width < static_cast<int>(sizeof(RefTag))) {
+      for (int y = 0; y < height; y++)
+        std::memcpy(out + static_cast<size_t>(y) * stride, r->gray.data() + static_cast<size_t>(y) * width, width);
+    } else {
+      RefTag t{};
+      std::memcpy(t.magic, kRefMagic, sizeof kRefMagic);
+      t.dev_hash = DevHash(w->dev);
+      t.seq = r->seq;
+      std::memcpy(out, &t, sizeof t);
+      g_refs++;
+    }
     const long hit = ++g_hit;
     if (hit % 64 == 0)
       Check(std::vector<uint8_t>(jpeg, jpeg + size), r->gray, width, height);
@@ -816,6 +844,16 @@ SPECTRUM_STREAM_API int spectrum_stream_take(const uint8_t *out, int width, int 
     for (auto &x : g_watchers)
       if (x->dev == t_served.dev && !x->dead) w = x.get();
     seq = t_served.seq;
+  }
+  if (!w && width >= static_cast<int>(sizeof(RefTag))) {  // not copied (no viewer): the tag in its first row
+    RefTag t;
+    std::memcpy(&t, out, sizeof t);
+    if (std::memcmp(t.magic, kRefMagic, sizeof kRefMagic) == 0)
+      for (auto &x : g_watchers)
+        if (!x->dead && DevHash(x->dev) == t.dev_hash) {
+          w = x.get();
+          seq = static_cast<long>(t.seq);
+        }
   }
   if (!w) {  // a copy of the decoded frame: find it by content
     for (auto &x : g_watchers) {
@@ -856,6 +894,10 @@ SPECTRUM_STREAM_API int spectrum_stream_take(const uint8_t *out, int width, int 
     }
   return 0;
 }
+
+SPECTRUM_STREAM_API void spectrum_stream_set_copy(int on) { g_copy.store(on ? 1 : 0, std::memory_order_relaxed); }
+
+SPECTRUM_STREAM_API long spectrum_stream_refs(void) { return g_refs.load(); }
 
 SPECTRUM_STREAM_API void spectrum_stream_detach(void *ctx) {
   if (!ctx) return;

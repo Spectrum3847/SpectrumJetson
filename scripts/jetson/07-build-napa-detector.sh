@@ -34,8 +34,10 @@ for f in napa_far NapaDetectorJNI; do
   timeout 300 $CXX $CF -std=c++17 -Wall -Wextra -c "$D/$f.cc" -I"$N" -I"$D" -I"$JAVA_HOME/include" \
     -I"$JAVA_HOME/include/linux" -o "$OUT/$f.o"
 done
+# the native single-tag pose (NapaDetectorJNI.poseSquare): native/sc-vision/src/pose.c
+timeout 300 $CC $CF -std=gnu11 -c "$REPO/native/sc-vision/src/pose.c" -o "$OUT/pose.o"
 $CXX -shared -Wl,-z,defs -o "$OUT/libspectrum-napa-apriltag.so" "$OUT/napa_core.o" "$OUT/napa_far.o" \
-  "$OUT/NapaDetectorJNI.o" -lm -lpthread -ldl
+  "$OUT/NapaDetectorJNI.o" "$OUT/pose.o" -lm -lpthread -ldl
 # The streaming decoder, libspectrum-stream.so (detector/stream_decode.cc; libjpeg-turbo only), which streaming
 # NAPA opens at run time (no link dependency: the NAPA library works without it). The Jetson's GPU build
 # (07-build-gpu-detector.sh) makes the same library; on a CPU-only machine install this one:

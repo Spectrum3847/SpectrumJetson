@@ -49,6 +49,9 @@
 
 #include "../stream_decode.h"
 #include "napa_far.h"
+extern "C" {
+#include "../../native/sc-vision/src/pose.h"  // poseSquare (sc/mjpeg-napa)
+}
 
 namespace {
 jclass detectionCls = nullptr;
@@ -59,6 +62,7 @@ struct StreamApi {
   decltype(&spectrum_stream_decode_gray) decode = nullptr;
   decltype(&spectrum_stream_take) take = nullptr;
   decltype(&spectrum_stream_detach) detach = nullptr;
+  decltype(&spectrum_stream_set_copy) set_copy = nullptr;  // newer libspectrum-stream.so only
 };
 const StreamApi *Stream() {
   static const StreamApi *api = [] () -> const StreamApi * {
@@ -71,6 +75,7 @@ const StreamApi *Stream() {
     a->decode = reinterpret_cast<decltype(a->decode)>(dlsym(h, "spectrum_stream_decode_gray"));
     a->take = reinterpret_cast<decltype(a->take)>(dlsym(h, "spectrum_stream_take"));
     a->detach = reinterpret_cast<decltype(a->detach)>(dlsym(h, "spectrum_stream_detach"));
+    a->set_copy = reinterpret_cast<decltype(a->set_copy)>(dlsym(h, "spectrum_stream_set_copy"));
     if (!a->decode || !a->take || !a->detach) {
       std::cout << "NAPA: libspectrum-stream.so is too old for streaming NAPA" << std::endl;
       return nullptr;
@@ -277,6 +282,52 @@ struct RawFrame {
 };
 static_assert(sizeof(RawFrame) == 72, "WPI_RawFrame layout changed");
 
+// sc/mjpeg-napa: the single-tag pose natively (native/sc-vision/src/pose.c: IPPE for a square + Gauss-Newton on
+// the pixel reprojection error, ~10 us), instead of WPILib's orthogonal iteration plus OpenCV's IPPE for the
+// alternate in Java (~0.28 ms a frame). corners: AprilTag order, raw pixels. K: 3x3 row-major; dist: up to 8
+// OpenCV coefficients. Returns {best t[3], R[9], err, alt t[3], R[9], err} in the AprilTag frame (x right, y down,
+// z into the tag), errors in pixels; null for a degenerate quad.
+JNIEXPORT jdoubleArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_poseSquare(JNIEnv *env, jclass,
+                                                                                   jdoubleArray jc, jdoubleArray jk,
+                                                                                   jdoubleArray jd, jdouble size) {
+  double c[8], k[9], d[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  if (env->GetArrayLength(jc) < 8 || env->GetArrayLength(jk) < 9) return nullptr;
+  env->GetDoubleArrayRegion(jc, 0, 8, c);
+  env->GetDoubleArrayRegion(jk, 0, 9, k);
+  const jsize nd = std::min<jsize>(8, env->GetArrayLength(jd));
+  if (nd > 0) env->GetDoubleArrayRegion(jd, 0, nd, d);
+  cam_model cam{};
+  cam.fx = k[0], cam.cx = k[2], cam.fy = k[4], cam.cy = k[5];
+  for (int i = 0; i < 8; i++) cam.k[i] = d[i];
+  tag_pose best, alt;
+  if (pose_ippe_square(&cam, c, size, &best, &alt)) return nullptr;
+  double out[26];
+  const tag_pose *ps[2] = {&best, &alt};
+  for (int s = 0; s < 2; s++) {
+    double *o = out + 13 * s;
+    for (int i = 0; i < 3; i++) o[i] = ps[s]->t[i];
+    // the homography frame (x right, y up, z out of the tag) -> AprilTag's (y down, z into the tag): R diag(1,-1,-1)
+    for (int r = 0; r < 3; r++) {
+      o[3 + r * 3 + 0] = ps[s]->R[r * 3 + 0];
+      o[3 + r * 3 + 1] = -ps[s]->R[r * 3 + 1];
+      o[3 + r * 3 + 2] = -ps[s]->R[r * 3 + 2];
+    }
+    o[12] = ps[s]->err;
+  }
+  jdoubleArray arr = env->NewDoubleArray(26);
+  if (arr) env->SetDoubleArrayRegion(arr, 0, 26, out);
+  return arr;
+}
+
+// Whether streamDecodeGray copies the decoded image (false: only when nobody watches the stream; the tags come from
+// the band sink). True if the library supports it.
+JNIEXPORT jboolean JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setStreamCopy(JNIEnv *, jclass, jboolean on) {
+  const StreamApi *api = Stream();
+  if (!api || !api->set_copy) return JNI_FALSE;
+  api->set_copy(on ? 1 : 0);
+  return JNI_TRUE;
+}
+
 JNIEXPORT jint JNICALL Java_org_photonvision_jni_NapaDetectorJNI_streamDecodeGray(JNIEnv *, jclass, jlong raw,
                                                                                   jlong data, jint width,
                                                                                   jint height, jint step) {
@@ -308,7 +359,9 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_detectS
       tags.swap(*static_cast<std::vector<napa_far::Tag> *>(res));
       n->sink->c.free_result(res);
       n->streamed++;
-      if (++n->check_due % 64 == 0) IdentityCheck(n, img, width, height, step, tags, now_us);
+      // (a frame handed over without its pixels (no stream viewer) can't be re-detected here)
+      if (++n->check_due % 64 == 0 && !(width >= 8 && std::memcmp(img, "SJREFv1", 8) == 0))
+        IdentityCheck(n, img, width, height, step, tags, now_us);
     }
   }
   if (rc != 1) {

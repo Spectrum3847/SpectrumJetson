@@ -106,7 +106,11 @@ int uvc_v4l2_set(int vid, int pid, uint32_t id, int value) {
     int fd = open(dev, O_RDWR);
     if (fd < 0) continue;
     struct v4l2_control c = {id, value};
-    if (ioctl(fd, VIDIOC_S_CTRL, &c) == 0) {
+    struct v4l2_control cur = {id, 0};
+    // read first, write only a value that differs: the Swyft stores control values in its flash settings sector
+    if (ioctl(fd, VIDIOC_G_CTRL, &cur) == 0 && cur.value == value) {
+      rc = 0;
+    } else if (ioctl(fd, VIDIOC_S_CTRL, &c) == 0) {
       // read it back: power-up defaults that silently stay (sharpness 5, gamma 150, backlight 1 on the Thriftiest)
       // cost ~46% more decode CPU, so a control that didn't take is reported
       struct v4l2_control g = {id, 0};

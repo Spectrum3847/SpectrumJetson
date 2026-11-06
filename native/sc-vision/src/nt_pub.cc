@@ -159,7 +159,7 @@ void nt_pub_health(NtPub *p, int64_t now, long frames_total, long failures, doub
   p->h_recov.Set(0);
   p->h_age.Set(age);
   bool stale = age < 0 || age > 500;
-  p->h_state.Set(stale ? "no frames" : "running");
+  p->h_state.Set(stale ? "no frames" : "streaming");  // PhotonVision's word
   p->h_problem.Set(stale ? "sc-vision: no complete frames from the camera" : "");
   p->h_beat.Set(++p->h_beats);
   p->h_win_frames = 0, p->h_sum_pipe = 0, p->h_max_pipe = 0, p->h_sum_lat = 0;

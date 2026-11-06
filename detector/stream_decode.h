@@ -46,6 +46,12 @@ int spectrum_stream_take(const uint8_t *out, int width, int height, size_t strid
 // Detach ctx's sink from every watcher; on return no watcher calls it any more.
 void spectrum_stream_detach(void *ctx);
 
+// 0: spectrum_stream_decode_gray() doesn't copy the decoded image (nobody looks at it; the band sink's result is
+// what's used): it writes a small tag into the image's first row instead, which spectrum_stream_take() reads.
+// 1 (default): copy. spectrum_stream_refs(): frames handed over by tag so far.
+void spectrum_stream_set_copy(int on);
+long spectrum_stream_refs(void);
+
 #ifdef __cplusplus
 }
 

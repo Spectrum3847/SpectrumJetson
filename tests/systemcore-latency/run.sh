@@ -44,7 +44,7 @@ if [[ $mode == pv ]]; then
   pid=$(systemctl show -p MainPID --value photonvision)
   sudo -n truncate -s 0 "$OUT/$name.csv" 2>/dev/null
 else
-  BIN=${SC_VISION_BIN:-$HOME/builder/sc-vision/sc-vision}
+  BIN=${SC_VISION_BIN:-/opt/sc-vision/bin/sc-vision}
   sudo -n "$BIN" --csv "$OUT/$name.csv" "$@" > "$OUT/$name.log" 2>&1 &
   npid=$!
   sleep 3
