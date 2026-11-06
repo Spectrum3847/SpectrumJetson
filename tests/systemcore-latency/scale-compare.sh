@@ -1,7 +1,7 @@
 #!/bin/bash
 # sc-vision's per-frame decode scale (full / 1/2 / 1/4: mjdec's reduced IDCT, NAPA on the smaller image with min tag
 # / scale, corners back to full-res pixels) on each camera: CPU per frame, detection, pose and corner noise.
-#   scale-compare.sh [SECS] [CAMS] [SCALES]     default 15 s, "SJ-05 SJ-SW01", "1 2 4"; min tag 32 at full scale
+#   scale-compare.sh [SECS] [CAMS] [SCALES]     default 15 s, "SJ-05 SJ-SW01", "1 2 4"; min tag 22 at full scale
 # Holds /tmp/camera.lock for the whole run; PhotonVision must be stopped (sc-vision takes the camera).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -20,7 +20,7 @@ for c in $cams; do
   else cal=$HOME/builder/swyft-cal.json; cargs="--usb 0bda:3035"; fi
   for s in $scales; do
     # shellcheck disable=SC2086
-    "$HERE/run.sh" native "$secs" "scale-$c-$s" --serial "$c" --cpu 3 --fifo 40 --pkts 2 $cargs --min-tag 32 \
+    "$HERE/run.sh" native "$secs" "scale-$c-$s" --serial "$c" --cpu 3 --fifo 40 --pkts 2 $cargs --min-tag 22 \
       --calib "$cal" --scale "$s" > "$OUT/scale-$c-$s.runlog" 2>&1
     grep -h "processed at" "$OUT/scale-$c-$s.log" 2>/dev/null | tail -1
   done

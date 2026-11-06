@@ -1,11 +1,11 @@
 #!/bin/bash
 # sc-vision on the Thriftiest (1bcf:28c5) and the Swyft (0bda:3035): each alone, then both at once on separate cores.
 # performance governor for the session (restored after). Short runs. Holds /tmp/camera.lock (both cameras).
-#   two-cams.sh [SECS] [MINTAG]     default 20 s, min tag 32
+#   two-cams.sh [SECS] [MINTAG]     default 20 s, min tag 22
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 secs=${1:-20}
-m=${2:-32}
+m=${2:-22}
 BIN=${SC_VISION_BIN:-/opt/sc-vision/bin/sc-vision}
 CAL=${CAL:-/opt/sc-vision/etc/calib.json}
 OUT=${OUT:-$HOME/shared/latency/twocam}

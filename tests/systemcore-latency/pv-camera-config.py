@@ -68,7 +68,7 @@ def main():
             if cal:
                 d['calibrations'] = [cal]
             p = d['pipelineSettings'][d.get('currentPipelineIndex', 0)]
-            p.update(napa=True, napaMinTagPx=32, napaMaxHamming=1, napaFarSearch=False, solvePNPEnabled=True,
+            p.update(napa=True, napaMinTagPx=22, napaMaxHamming=1, napaFarSearch=False, solvePNPEnabled=True,
                      doMultiTarget=False, tagFpsMax=0)
             for k, v in kv.items():
                 p[k] = val(v)

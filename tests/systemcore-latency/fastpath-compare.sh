@@ -23,7 +23,7 @@ for s in $steps; do
     nocopy) "$HERE/run.sh" pv "$secs" pv-nocopy $S SPECTRUM_NATIVE_POSE=0 >/dev/null 2>&1 ;;
     nativepose) "$HERE/run.sh" pv "$secs" pv-nativepose $S >/dev/null 2>&1 ;;
     scv) EXPOSURE_MS=0.2 "$HERE/run.sh" native "$secs" scv --serial SJ-05 --cpu 3 --fifo 40 --pkts 2 --exposure 2 \
-           --gain 128 --gamma 100 --backlight 0 --sharpness 1 --min-tag 32 --calib /opt/sc-vision/etc/calib.json \
+           --gain 128 --gamma 100 --backlight 0 --sharpness 1 --min-tag 22 --calib /opt/sc-vision/etc/calib.json \
            >/dev/null 2>&1 ;;
   esac
 done

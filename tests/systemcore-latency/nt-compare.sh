@@ -13,7 +13,7 @@ secs=${1:-15}
 configs=${2:-pvjava pvnative scv}
 OUT=${OUT:-$HOME/shared/latency/nt}
 CAM=${CAM:-thrifty}   # the PhotonVision / sc-vision camera name (topic)
-SCV_ARGS=${SCV_ARGS:---serial SJ-05 --cpu 3 --fifo 40 --pkts 2 --exposure 2 --gain 128 --gamma 100 --backlight 0 --sharpness 1 --min-tag 32 --calib /opt/sc-vision/etc/calib.json}
+SCV_ARGS=${SCV_ARGS:---serial SJ-05 --cpu 3 --fifo 40 --pkts 2 --exposure 2 --gain 128 --gamma 100 --backlight 0 --sharpness 1 --min-tag 22 --calib /opt/sc-vision/etc/calib.json}
 mkdir -p "$OUT"
 DROPIN=/etc/systemd/system/photonvision.service.d/zz-ntcompare.conf
 PROBE=/opt/sc-vision/bin/nt_probe

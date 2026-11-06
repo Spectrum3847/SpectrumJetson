@@ -3,7 +3,7 @@
 
   pv-config.py [--db PATH] key=value ...
 
-Keys are the pipeline's JSON fields, e.g. napa=true napaMinTagPx=32 napaMaxHamming=1 cameraExposureRaw=2
+Keys are the pipeline's JSON fields, e.g. napa=true napaMinTagPx=22 napaMaxHamming=1 cameraExposureRaw=2
 cameraGain=128 cameraGamma=100 cameraBacklightCompensation=0 tagFpsMax=0. Values: true/false, ints, floats, strings.
 Prints the fields it changed.
 """

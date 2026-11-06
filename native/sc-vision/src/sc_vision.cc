@@ -9,7 +9,7 @@
 // and counts any difference (identity, live).
 //
 //   sc-vision [--secs S] [--csv FILE] [--cpu K] [--fifo PRIO] [--exposure N(0.1ms)] [--gain G]
-//             [--pkts 4] [--urbs 32] [--alt -1] [--min-tag 16] [--hamming 1] [--min-contrast 20]
+//             [--pkts 4] [--urbs 32] [--alt -1] [--min-tag 22] [--hamming 1] [--min-contrast 20]
 //             [--every N] [--check N] [--calib FILE] [--tag-size M] [--save DIR] [--no-napa] [--whole]
 //             [--nt HOST] [--name CAM] [--selftest]
 #include <errno.h>
@@ -249,7 +249,7 @@ int main(int argc, char **argv) {
   int cpu = -1, fifo = 0, exposure = -1, gain = -1, gamma = -1, backlight = -1, sharpness = -1, brightness = -1000, every = 1, check = 64, whole = 0, no_napa = 0;
   uvc_config uc{};
   uc.width = 1280, uc.height = 800, uc.fps = 120, uc.alt = -1, uc.pkts_per_urb = 4, uc.nurbs = 32, uc.verbose = 1;
-  napa_params np{16, 1, 20, 22, 25};
+  napa_params np{22, 1, 20, 22, 25};
   // Frame policy (docs/FRAME-POLICY.md): process 1 frame in `every`, decode processed ones at 1/scale (NAPA on that
   // image, min tag / scale, corners back to full-res pixels), every full_every-th processed frame at full scale.
   // The robot can override each over NT (/photonvision/<name>/input/*); defaults: full scale, every frame.

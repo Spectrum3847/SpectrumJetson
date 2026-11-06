@@ -41,7 +41,7 @@ for h in $modes; do
     name=scv
     # Thriftiest exposure setting 2 = really ~1.1 ms: mid offset 0.55 + 0.4; logged as the shift back to the packet
     sudo -n /opt/sc-vision/bin/sc-vision --serial SJ-05 --cpu 3 --fifo 40 --pkts 2 --exposure 2 --gain 128 --gamma 100 \
-      --backlight 0 --sharpness 1 --min-tag 32 --calib /opt/sc-vision/etc/calib.json --nt 127.0.0.1 --name thrifty \
+      --backlight 0 --sharpness 1 --min-tag 22 --calib /opt/sc-vision/etc/calib.json --nt 127.0.0.1 --name thrifty \
       --secs $((secs + 8)) > "$OUT/scv.log" 2>&1 &
     sleep 4
     NT_PROBE_CSV=$OUT/scv.probe.csv "$PROBE" 127.0.0.1 thrifty $((secs - 4)) > "$OUT/scv.probe" 2>&1

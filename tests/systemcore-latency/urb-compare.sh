@@ -37,7 +37,7 @@ for d in stock $urbs; do
 done
 "$L" stock >/dev/null
 EXPOSURE_MS=0.2 "$HERE/run.sh" native "$secs" "scv" --cpu 3 --fifo 40 --pkts 2 --exposure 2 --gain 128 --gamma 100 \
-  --backlight 0 --min-tag 32 --calib /opt/sc-vision/etc/calib.json >/dev/null 2>&1
+  --backlight 0 --min-tag 22 --calib /opt/sc-vision/etc/calib.json >/dev/null 2>&1
 for d in stock $urbs; do row "pv-whole-$d"; row "pv-stream-$d"; done
 printf '%-18s ' scv
 grep -E "^(first USB packet -> pose|TAIL last packet -> pose)" "$OUT/scv.table" | awk '{printf "%s %s/%s/%s | ", $1" "$2, $(NF-2), $(NF-1), $NF}'

@@ -1,6 +1,6 @@
 #!/bin/bash
 # PhotonVision (the user's Chief Delphi NAPA post #46 setup) vs sc-vision, same camera settings, on the SystemCore.
-#   post-compare.sh [SECS] [MINTAGS]       default 30 s, min tag px "32 16"
+#   post-compare.sh [SECS] [MINTAGS]       default 30 s, min tag px "22 16"
 # Camera: 1280x800 MJPEG 120 fps, exposure_time_absolute 2 ("0.2 ms"), gain 128, gamma 100, backlight comp 0.
 # PhotonVision: whole-frame NAPA (SPECTRUM_NAPA_STREAM=0), libjpeg-turbo CPU decode (SPECTRUM_JPEG_DECODER=turbo),
 # no SystemCore 50 fps cap (SPECTRUM_SYSTEMCORE_PROFILE=0), no idle mode, max hamming 1, single tag.
@@ -9,7 +9,7 @@
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 secs=${1:-30}
-mins=${2:-32 16}
+mins=${2:-22 16}
 DB=/opt/photonvision/photonvision_config/photon.sqlite
 OUT=${OUT:-$HOME/shared/latency/$(date +%Y%m%d)}
 export OUT
