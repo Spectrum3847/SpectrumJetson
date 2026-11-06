@@ -290,7 +290,7 @@ struct Opt {
   double frame_ms = 8;
   size_t chunk = 16384;
   long max_frames = -1;
-  int every = 1, cpu = -1, fifo = 0, band = 8, fill = 0;
+  int every = 1, cpu = -1, fifo = 0, band = 8, fill = 0, repeat = 1;
   unsigned seed = 1;
 };
 
@@ -312,6 +312,9 @@ static std::vector<Item> LoadFrames(const Opt &o) {
       v.push_back({c, fr[i]}), ++n;
     }
   }
+  const size_t one = v.size();  // --repeat: the same frames again (profiling runs)
+  for (int r = 1; r < o.repeat; r++)
+    for (size_t i = 0; i < one; i++) v.push_back(v[i]);
   return v;
 }
 
@@ -757,6 +760,7 @@ int main(int argc, char **argv) {
     else if (a == "--cpu") o.cpu = std::atoi(v), ++i;
     else if (a == "--fifo") o.fifo = std::atoi(v), ++i;
     else if (a == "--times") o.times = v, ++i;
+    else if (a == "--repeat") o.repeat = std::max(1, std::atoi(v)), ++i;
     else if (a == "--band") o.band = std::max(1, std::atoi(v)), ++i;
     else if (a == "--fill") o.fill = std::atoi(v), ++i;
     else if (a == "--min-contrast") g_min_contrast = std::atoi(v), ++i;
