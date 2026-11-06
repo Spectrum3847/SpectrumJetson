@@ -75,6 +75,32 @@ elif cmd == "mintag":  # pvdb.py mintag DB N: napaMinTagPx = N in every NAPA Apr
     db.commit()
     db.close()
     check(sys.argv[2])
+elif cmd == "set":  # pvdb.py set DB NICKNAME key=value ...: pipeline settings (numbers as numbers) on that camera
+    nick, kvs = sys.argv[3], sys.argv[4:]
+    db = sqlite3.connect(sys.argv[2])
+    for uniq, contents in db.execute("select unique_name, contents from cameras").fetchall():
+        c = json.loads(contents)
+        if c.get("nickname") != nick:
+            continue
+        key = "pipelineSettings" if "pipelineSettings" in c else "pipelines"
+        out = []
+        for p in c.get(key, []):
+            wrapped = isinstance(p, list) and len(p) == 2
+            s = p[1] if wrapped else p
+            as_str = isinstance(s, str)
+            d = json.loads(s) if as_str else s
+            if isinstance(d, dict) and d.get("pipelineType") == "AprilTag":
+                for kv in kvs:
+                    k, v = kv.split("=", 1)
+                    d[k] = float(v) if "." in v else int(v)
+                    print(f"  {nick}: pipeline {d.get('pipelineIndex')} {k} = {d[k]}")
+            s = json.dumps(d) if as_str else d
+            out.append([p[0], s] if wrapped else s)
+        c[key] = out
+        db.execute("update cameras set contents = ? where unique_name = ?", (json.dumps(c), uniq))
+    db.commit()
+    db.close()
+    check(sys.argv[2])
 elif cmd == "show":
     show(sys.argv[2])
 else:
