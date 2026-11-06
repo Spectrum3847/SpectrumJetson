@@ -22,7 +22,7 @@ v4l2-ctl -d ${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-inde
 for e in $EXPS; do
   for g in $GAINS; do
     n=e${e}_g${g}
-    sudo "$SCV" --cpu 3 --fifo 40 --pkts 2 --exposure "$e" --gain "$g" --min-tag 32 --calib /opt/sc-vision/etc/calib.json \
+    sudo "$SCV" --cpu 3 --fifo 40 --pkts 2 --exposure "$e" --gain "$g" --min-tag 22 --calib /opt/sc-vision/etc/calib.json \
       --secs "$SECS" --csv "$OUT/$n.csv" "$@" >"$OUT/$n.log" 2>&1 </dev/null
     python3 - "$OUT/$n.csv" "$n" <<'EOF'
 import csv, statistics as st, sys
