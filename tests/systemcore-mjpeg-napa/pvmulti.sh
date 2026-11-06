@@ -13,8 +13,10 @@ T=/sys/kernel/tracing
 LOAD=${UVC_LOAD:-$HOME/builder/scripts/systemcore/uvcvideo-load.sh}
 DROP=/etc/systemd/system/photonvision.service.d/zz-tester.conf
 mkdir -p "$OUT"
-exec 9>/tmp/camera.lock
-flock -w 300 9 || { echo "camera lock busy" >&2; exit 1; }
+if [[ ${SCMN_HAVE_LOCK:-0} != 1 ]]; then  # pvboth.sh holds it around the DB edit + this run
+  exec 9>/tmp/camera.lock
+  flock -w 300 9 || { echo "camera lock busy" >&2; exit 1; }
+fi
 was=$(systemctl is-active photonvision)
 cleanup() {
   sudo systemctl stop photonvision
