@@ -152,6 +152,7 @@ int main(int argc, char **argv) {
   usleep(500000);
   std::printf("connected %d to %s; rawBytes type '%s'\n", (int)inst.IsConnected(), host.c_str(),
               raw.GetTopic().GetTypeString().c_str());
+  raw.ReadQueue();  // drop what queued while connecting (it would count as late)
   long n = 0, tagged = 0, gaps = 0, bad = 0;
   double last_seq = -1;
   std::vector<double> rx_lat, pub_lat, pub_rx;
