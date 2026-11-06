@@ -5,6 +5,8 @@
 #     JAR       photonvision-*-linuxarm64.jar (fork: ./gradlew photon-server:shadowJar -PArchOverride=linuxarm64)
 #     NAPA_OUT  scripts/systemcore/build-napa.sh's output (default ~/builder/sc-napa)
 #     HOST      default systemcore@172.26.0.1 (USB link; or robot.local)
+#   KEEP_DROPIN=1 keeps an existing 10-spectrum.conf (else our defaults are written); GOVERNOR=0 skips the
+#            performance-governor boot unit (enabled by default since the bench supply was fixed)
 #   NATIVE=0 writes 20-native-camera.conf with SPECTRUM_NATIVE_CAMERA=0 (native cameras are on by default)
 #   UVC_KO=path  our uvcvideo (build-uvcvideo.sh; default ~/builder/uvcvideo-sc/uvcvideo.ko): installed to
 #            /opt/sc-vision/modules with sc-uvcvideo.service, which loads it at boot (stock on any failure;
@@ -27,6 +29,11 @@
 # Switch (on the SystemCore):  sc-vision photonvision | limelight | off | status
 # Streaming NAPA etc. are environment switches in /etc/systemd/system/photonvision.service.d/10-spectrum.conf.
 set -euo pipefail
+# SSH_OPTS: extra ssh/scp options, e.g. "-o HostKeyAlias=172.26.0.1" when reaching the SystemCore by another address
+# shellcheck disable=SC2086
+ssh() { command ssh ${SSH_OPTS:-} "$@"; }
+# shellcheck disable=SC2086
+scp() { command scp ${SSH_OPTS:-} "$@"; }
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 JAR=${1:?usage: install-photonvision.sh JAR [NAPA_OUT] [HOST]}
 NAPA=${2:-$HOME/builder/sc-napa}
@@ -40,7 +47,8 @@ done
 ssh "$HOST" 'mkdir -p /dev/shm/pv-install'
 scp -q "$JAR" "$HOST:/dev/shm/pv-install/photonvision.jar"
 scp -q "$NAPA/libspectrum-napa-apriltag.so" "$NAPA/libspectrum-stream.so" "$NAPA/napa_test" \
-  "$REPO/scripts/systemcore/sc-vision" "$REPO/scripts/systemcore/photonvision-run.sh" "$HOST:/dev/shm/pv-install/"
+  "$REPO/scripts/systemcore/sc-vision" "$REPO/scripts/systemcore/photonvision-run.sh" \
+  "$REPO/scripts/systemcore/performance-governor.sh" "$HOST:/dev/shm/pv-install/"
 UVC=${UVC:-1}
 if [[ $UVC == 1 && -f $UVC_KO ]]; then
   scp -q "$UVC_KO" "$HOST:/dev/shm/pv-install/uvcvideo-sc.ko"
@@ -49,7 +57,7 @@ elif [[ $UVC == 1 ]]; then
   echo "no $UVC_KO (scripts/systemcore/build-uvcvideo.sh): boot-time uvcvideo not installed" >&2
   UVC=0
 fi
-ssh "$HOST" ENABLE="${ENABLE:-0}" NATIVE="${NATIVE:-1}" UVC="$UVC" AOT="${AOT:-1}" AOT_TRAIN_S="${AOT_TRAIN_S:-45}" 'bash -s' <<'REMOTE'
+ssh "$HOST" ENABLE="${ENABLE:-0}" NATIVE="${NATIVE:-1}" UVC="$UVC" KEEP_DROPIN="${KEEP_DROPIN:-0}" GOVERNOR="${GOVERNOR:-1}" AOT="${AOT:-1}" AOT_TRAIN_S="${AOT_TRAIN_S:-45}" 'bash -s' <<'REMOTE'
 set -euo pipefail
 S=/dev/shm/pv-install
 TRAIN_DROPIN=/etc/systemd/system/photonvision.service.d/zz-aot-train.conf
@@ -125,18 +133,35 @@ Nice=0
 WantedBy=multi-user.target
 EOF
 sudo mkdir -p /etc/systemd/system/photonvision.service.d
-if [[ ! -f /etc/systemd/system/photonvision.service.d/10-spectrum.conf ]]; then
-  sudo tee /etc/systemd/system/photonvision.service.d/10-spectrum.conf >/dev/null <<'EOF'
+# Our current defaults (docs/SYSTEMCORE-NATIVE-BACKEND.md), for native cameras and the cscore/Java fallback path
+# alike. A different existing 10-spectrum.conf is kept next to it as 10-spectrum.conf.before-<date> (systemd reads
+# only *.conf); KEEP_DROPIN=1 leaves an existing one alone.
+D=/etc/systemd/system/photonvision.service.d/10-spectrum.conf
+cat > "$S/10-spectrum.conf" <<'EOF'
 [Service]
-# Decoder: stream (Y-only libjpeg-turbo, decodes while the frame arrives) | turbo
+# SpectrumJetson defaults (install-photonvision.sh). Native cameras (Thriftiest, Swyft) need none of these; the
+# fallback (cscore) path uses them: the stream decoder (decodes while the frame arrives), mjdec, streaming NAPA.
 Environment=SPECTRUM_JPEG_DECODER=stream
-# Streaming NAPA (tags while the frame arrives; needs a pipeline with Tags on CPU (NAPA))
+Environment=SPECTRUM_STREAM_DECODER=mjdec
 Environment=SPECTRUM_NAPA_STREAM=1
-# Exposure end -> first USB packet, per camera ("N" or "N,name=N"); measured 0.41 ms on the Thriftiest
-# (LED test), the Swyft uses the same until measured. The fork converts its own time reference (driver stamp
-# or the streaming watcher's first sight) back to the first packet before applying it.
+# Exposure end -> first USB packet (measured 0.41 ms on the Thriftiest, LED test)
 Environment=SPECTRUM_CAMERA_DELAY_US=400
+# No SystemCore 50 fps cap and no idle-mode rate while disabled: cameras at their full 120 fps (as measured)
+Environment=SPECTRUM_SYSTEMCORE_PROFILE=0
+Environment=SPECTRUM_IDLE_FPS=0
 EOF
+if [[ ${KEEP_DROPIN:-0} == 1 && -f $D ]]; then
+  echo "10-spectrum.conf kept (KEEP_DROPIN=1)"
+elif ! sudo cmp -s "$S/10-spectrum.conf" "$D"; then
+  if [[ -f $D ]]; then sudo cp "$D" "$D.before-$(date +%Y%m%d-%H%M%S)"; fi
+  put "$S/10-spectrum.conf" "$D" 644
+  echo "10-spectrum.conf: SpectrumJetson defaults written"
+fi
+# CPU governor performance at boot (performance-governor.sh's unit; GOVERNOR=0 leaves it as it is)
+if [[ ${GOVERNOR:-1} == 1 ]]; then
+  sed -i 's/\r$//' "$S/performance-governor.sh"
+  bash "$S/performance-governor.sh" enable >/dev/null
+  echo "governor: $(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor) (enabled at boot)"
 fi
 # Native cameras (docs/SYSTEMCORE-NATIVE-BACKEND.md) are on by default for verified cameras; NATIVE=0 turns them off
 # with its own drop-in (20-native-camera.conf: SPECTRUM_NATIVE_CAMERA=0). Older installs' 20-native-camera.conf
