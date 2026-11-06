@@ -406,11 +406,16 @@ struct NativeCam {
   std::atomic<long> frames{0}, bad{0}, skipped{0}, rec_kept{0};
   std::atomic<int64_t> last_frame_ns{0};
   bool sj_wait = false;
+  uint32_t sj_seq = 0;  // the driver's copy counter last seen (UVCIOC_SJ_WAIT sleeps until it moves on)
   // the latest full-size image for Java (copied only while Java asks, at most once per request)
   std::mutex gmu;
   std::vector<uint8_t> gray;
   int64_t gray_capture_ns = 0;
   std::atomic<bool> want_gray{false};
+  // the latest camera JPEG for the stream (passthrough, no re-encode), copied only while Java asks
+  std::vector<uint8_t> jpeg;
+  int64_t jpeg_capture_ns = 0;
+  std::atomic<bool> want_jpeg{false};
   // Rewind
   std::mutex rmu;
   RewindWriter *rw = nullptr;
@@ -462,13 +467,19 @@ struct NativeCam {
     if (xioctl(VIDIOC_STREAMON, &type)) return false;
     sj_wait_arg a{0, 0};
     sj_wait = xioctl(SJ_WAIT_IOC, &a) == 0;  // our uvcvideo: sleep until the driver copied more bytes
+    if (sj_wait) sj_seq = a.seq;
     return true;
   }
   void wipe(int i) { std::memset(buf[i], 0xFF, std::min<size_t>(blen[i], 256 * 1024)); }
   void wait_bytes() {
     if (sj_wait) {
-      sj_wait_arg a{0, 2000};
-      xioctl(SJ_WAIT_IOC, &a);
+      // sleeps until the driver copied more bytes since sj_seq (one wake per URB), or 2 ms; passing a stale seq
+      // returns at once (the 1-camera dark run spun a core at 98% with seq 0)
+      sj_wait_arg a{sj_seq, 2000};
+      if (xioctl(SJ_WAIT_IOC, &a) == 0)
+        sj_seq = a.seq;
+      else
+        sj_wait = false;
     } else {
       timespec ts{0, 100000};
       nanosleep(&ts, nullptr);
@@ -574,12 +585,28 @@ struct NativeCam {
       if (i == next && !(b.flags & V4L2_BUF_FLAG_ERROR) && rows >= hs) {
         frames++;
         last_frame_ns = mono();
-        if (scale == 1 && want_gray.load()) {  // Java's UI / stream: the latest image, when it asks
+        if (want_gray.load()) {  // Java's UI / pipeline: the latest image, when it asks
           std::lock_guard<std::mutex> l(gmu);
-          gray.assign(img.begin(), img.end());
+          if (scale == 1) {
+            gray.assign(img.begin(), img.end());
+          } else {  // decoded at 1/scale (frame policy): nearest-neighbour back to full size for Java
+            gray.resize(static_cast<size_t>(w) * h);
+            const int ws = w / scale;
+            for (int y = 0; y < h; y++) {
+              const uint8_t *src = img.data() + static_cast<size_t>(std::min(y / scale, hs - 1)) * ws;
+              uint8_t *dst = gray.data() + static_cast<size_t>(y) * w;
+              for (int x = 0; x < w; x++) dst[x] = src[std::min(x / scale, ws - 1)];
+            }
+          }
           gray_capture_ns = stamp;
           want_gray = false;
         }
+      }
+      if (i == next && !(b.flags & V4L2_BUF_FLAG_ERROR) && b.bytesused > 0 && want_jpeg.load()) {
+        std::lock_guard<std::mutex> l(gmu);  // the stream: the camera's own JPEG, as it came
+        jpeg.assign(buf[i], buf[i] + std::min<size_t>(b.bytesused, blen[i]));
+        jpeg_capture_ns = stamp;
+        want_jpeg = false;
       }
       {
         std::lock_guard<std::mutex> l(rmu);
@@ -998,6 +1025,24 @@ JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraLatestGr
   return t;
 }
 
+// The latest camera JPEG (as it came from the camera, for the stream: no re-encode) into a direct buffer. Returns its
+// length (0: none newer yet, the next frame provides one; -n: the buffer needs n bytes).
+JNIEXPORT jint JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraLatestJpeg(JNIEnv *env, jclass, jlong h,
+                                                                                 jobject direct) {
+  auto *n = Handle(h);
+  if (!n || !n->cam || !direct) return 0;
+  auto *c = n->cam.get();
+  auto *dst = static_cast<uint8_t *>(env->GetDirectBufferAddress(direct));
+  const jlong cap = env->GetDirectBufferCapacity(direct);
+  std::lock_guard<std::mutex> l(c->gmu);
+  c->want_jpeg = true;
+  if (c->jpeg.empty() || c->jpeg_capture_ns == 0) return 0;
+  if (!dst || cap < static_cast<jlong>(c->jpeg.size())) return -static_cast<jint>(c->jpeg.size());
+  std::memcpy(dst, c->jpeg.data(), c->jpeg.size());
+  c->jpeg_capture_ns = 0;
+  return static_cast<jint>(c->jpeg.size());
+}
+
 // {frames, bad frames, frames skipped by the policy, ms since the last frame (-1: none), Rewind frames kept}.
 JNIEXPORT jlongArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraStats(JNIEnv *env, jclass, jlong h) {
   auto *n = Handle(h);
@@ -1177,6 +1222,160 @@ JNIEXPORT jdoubleArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_stats(J
   jdoubleArray arr = env->NewDoubleArray(7);
   if (arr) env->SetDoubleArrayRegion(arr, 0, 7, v);
   return arr;
+}
+
+}  // extern "C"
+
+// ---- native camera backend: the device without a capture handle (docs/SYSTEMCORE-NATIVE-BACKEND.md) ----
+// PhotonVision's NativeCameraSettables read the camera's video modes and controls and set controls through these, so
+// no cscore UsbCamera is ever made for a native camera. Controls don't need uvcvideo's streaming privileges, so one
+// control fd per device (no S_FMT on it) works whether or not the capture thread (or a cscore UsbCamera, during
+// calibration) owns the stream.
+namespace {
+std::mutex g_ctl_mu;
+std::vector<std::pair<std::string, int>> g_ctl_fds;
+int CtlFd(const std::string &dev) {  // under g_ctl_mu
+  for (auto &p : g_ctl_fds)
+    if (p.first == dev) return p.second;
+  const int fd = ::open(dev.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+  if (fd >= 0) g_ctl_fds.emplace_back(dev, fd);
+  return fd;
+}
+void CtlDrop(const std::string &dev) {  // under g_ctl_mu: the device went away; reopen next time
+  for (auto it = g_ctl_fds.begin(); it != g_ctl_fds.end(); ++it)
+    if (it->first == dev) {
+      ::close(it->second);
+      g_ctl_fds.erase(it);
+      return;
+    }
+}
+int Xio(int fd, unsigned long req, void *arg) {
+  int r;
+  do r = ioctl(fd, req, arg);
+  while (r < 0 && errno == EINTR);
+  return r;
+}
+std::string JStr(JNIEnv *env, jstring s) {
+  if (!s) return {};
+  const char *c = env->GetStringUTFChars(s, nullptr);
+  std::string r(c ? c : "");
+  if (c) env->ReleaseStringUTFChars(s, c);
+  return r;
+}
+}  // namespace
+
+extern "C" {
+
+// The device's video modes in the order the driver lists them (as cscore enumerates them): {fourcc, width, height,
+// fps} per mode, fps = denominator / numerator of each discrete frame interval. null if the device can't be opened.
+JNIEXPORT jintArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_deviceModes(JNIEnv *env, jclass, jstring jdev) {
+  const std::string dev = JStr(env, jdev);
+  std::lock_guard<std::mutex> l(g_ctl_mu);
+  const int fd = CtlFd(dev);
+  if (fd < 0) return nullptr;
+  std::vector<jint> out;
+  v4l2_fmtdesc fmt{};
+  fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  bool any = false;
+  for (fmt.index = 0; Xio(fd, VIDIOC_ENUM_FMT, &fmt) == 0; fmt.index++) {
+    any = true;
+    v4l2_frmsizeenum fs{};
+    fs.pixel_format = fmt.pixelformat;
+    for (fs.index = 0; Xio(fd, VIDIOC_ENUM_FRAMESIZES, &fs) == 0; fs.index++) {
+      if (fs.type != V4L2_FRMSIZE_TYPE_DISCRETE) break;
+      v4l2_frmivalenum fi{};
+      fi.pixel_format = fmt.pixelformat, fi.width = fs.discrete.width, fi.height = fs.discrete.height;
+      for (fi.index = 0; Xio(fd, VIDIOC_ENUM_FRAMEINTERVALS, &fi) == 0; fi.index++) {
+        if (fi.type != V4L2_FRMIVAL_TYPE_DISCRETE || fi.discrete.numerator == 0) break;
+        out.insert(out.end(), {static_cast<jint>(fmt.pixelformat), static_cast<jint>(fs.discrete.width),
+                               static_cast<jint>(fs.discrete.height),
+                               static_cast<jint>(fi.discrete.denominator / fi.discrete.numerator)});
+      }
+    }
+  }
+  if (!any) {
+    CtlDrop(dev);  // gone (or not a capture device): reopen next time
+    return nullptr;
+  }
+  jintArray a = env->NewIntArray(static_cast<jsize>(out.size()));
+  if (a && !out.empty()) env->SetIntArrayRegion(a, 0, static_cast<jsize>(out.size()), out.data());
+  return a;
+}
+
+// The device's controls: one string per control, "id,type,min,max,step,default,value,flags,name" (V4L2 values,
+// the camera's own units; menus/booleans as integers). Disabled controls and control classes are left out.
+JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_deviceControls(JNIEnv *env, jclass,
+                                                                                       jstring jdev) {
+  const std::string dev = JStr(env, jdev);
+  std::vector<std::string> rows;
+  {
+    std::lock_guard<std::mutex> l(g_ctl_mu);
+    const int fd = CtlFd(dev);
+    if (fd < 0) return nullptr;
+    v4l2_queryctrl q{};
+    q.id = V4L2_CTRL_FLAG_NEXT_CTRL;
+    while (Xio(fd, VIDIOC_QUERYCTRL, &q) == 0) {
+      if (!(q.flags & V4L2_CTRL_FLAG_DISABLED) &&
+          (q.type == V4L2_CTRL_TYPE_INTEGER || q.type == V4L2_CTRL_TYPE_BOOLEAN || q.type == V4L2_CTRL_TYPE_MENU ||
+           q.type == V4L2_CTRL_TYPE_INTEGER_MENU)) {
+        v4l2_control c{};
+        c.id = q.id;
+        const int val = Xio(fd, VIDIOC_G_CTRL, &c) == 0 ? c.value : q.default_value;
+        char b[256];
+        std::snprintf(b, sizeof b, "%u,%u,%d,%d,%d,%d,%d,%u,%s", q.id, q.type, q.minimum, q.maximum, q.step,
+                      q.default_value, val, q.flags, reinterpret_cast<const char *>(q.name));
+        rows.emplace_back(b);
+      }
+      q.id |= V4L2_CTRL_FLAG_NEXT_CTRL;
+    }
+    if (rows.empty() && errno == ENODEV) CtlDrop(dev);
+  }
+  jclass sc = env->FindClass("java/lang/String");
+  jobjectArray a = env->NewObjectArray(static_cast<jsize>(rows.size()), sc, nullptr);
+  for (size_t i = 0; a && i < rows.size(); i++) {
+    jstring s = env->NewStringUTF(rows[i].c_str());
+    env->SetObjectArrayElement(a, static_cast<jsize>(i), s);
+    env->DeleteLocalRef(s);
+  }
+  return a;
+}
+
+// Sets a control by device path, read first (the Swyft writes its controls to flash): 1 written, 0 already that
+// value, -1 error.
+JNIEXPORT jint JNICALL Java_org_photonvision_jni_NapaDetectorJNI_deviceSetControl(JNIEnv *env, jclass, jstring jdev,
+                                                                                 jint id, jint value) {
+  const std::string dev = JStr(env, jdev);
+  std::lock_guard<std::mutex> l(g_ctl_mu);
+  const int fd = CtlFd(dev);
+  if (fd < 0) return -1;
+  v4l2_control c{};
+  c.id = static_cast<uint32_t>(id);
+  if (Xio(fd, VIDIOC_G_CTRL, &c) == 0 && c.value == value) return 0;
+  c.value = value;
+  if (Xio(fd, VIDIOC_S_CTRL, &c) == 0) return 1;
+  if (errno == ENODEV) CtlDrop(dev);
+  return -1;
+}
+
+// A control's value by device path, or Integer.MIN_VALUE.
+JNIEXPORT jint JNICALL Java_org_photonvision_jni_NapaDetectorJNI_deviceGetControl(JNIEnv *env, jclass, jstring jdev,
+                                                                                 jint id) {
+  const std::string dev = JStr(env, jdev);
+  std::lock_guard<std::mutex> l(g_ctl_mu);
+  const int fd = CtlFd(dev);
+  if (fd < 0) return INT32_MIN;
+  v4l2_control c{};
+  c.id = static_cast<uint32_t>(id);
+  if (Xio(fd, VIDIOC_G_CTRL, &c) == 0) return c.value;
+  if (errno == ENODEV) CtlDrop(dev);
+  return INT32_MIN;
+}
+
+// Closes the device's control fd (the camera was removed, or PhotonVision released it).
+JNIEXPORT void JNICALL Java_org_photonvision_jni_NapaDetectorJNI_deviceClose(JNIEnv *env, jclass, jstring jdev) {
+  const std::string dev = JStr(env, jdev);
+  std::lock_guard<std::mutex> l(g_ctl_mu);
+  CtlDrop(dev);
 }
 
 }  // extern "C"

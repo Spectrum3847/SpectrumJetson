@@ -49,6 +49,8 @@ put() {
   [[ $(sha256sum < "$1") == $(sudo sha256sum < "$2") ]] || { echo "install: $2 differs from $1" >&2; exit 1; }
 }
 chmod +x "$S/napa_test"
+# a Windows checkout (core.autocrlf) has CRLF scripts: "#!/bin/sh\r" fails to exec (status 203/EXEC)
+sed -i 's/\r$//' "$S/sc-vision" "$S/photonvision-run.sh"
 "$S/napa_test" >/dev/null || { echo "napa_test failed on this machine" >&2; exit 1; }
 # A truncated jar would crash-loop the service.
 python3 -c "import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); z.getinfo('org/photonvision/Main.class')" \

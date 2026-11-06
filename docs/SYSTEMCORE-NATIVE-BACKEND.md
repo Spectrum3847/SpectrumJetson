@@ -99,3 +99,37 @@ Options:
 3. Our uvcvideo: a module parameter that skips the privileges check (a kernel-module change: needs approval).
 4. usbfs (sc-vision's capture): detaching uvcvideo removes the node from under cscore; hot-plug handling ours.
 Recommended: 1 (or 2 as a first step).
+
+## Status 2026-11-06 night (BUILDER2): option 1 built and running live: no cscore UsbCamera
+
+Fork `sc/mjpeg-napa` 97cc032e (= patches/photonvision-128-native-camera-source.patch), SpectrumJetson native side
+(NapaDetectorJNI.cc: `device*` JNI, `cameraLatestJpeg`, scaled-frame upscale for Java, driver-wait fix).
+
+- `VisionSourceManager`: a USB camera whose VID:PID is 1bcf:28c5 (Thriftiest) or 0bda:3035 (Swyft)
+  (`SPECTRUM_NATIVE_CAMERA_IDS` overrides the list) and that has MJPEG modes gets `NativeCameraSource`, when
+  native publish is on (`SPECTRUM_NATIVE_PUBLISH=1`) and libspectrum-napa-apriltag loads. `SPECTRUM_NATIVE_CAMERA=0`
+  opts out. Anything else, or any failure in the check, is a normal `USBCameraSource` (cscore). No UsbCamera is
+  ever created for a native camera, so uvcvideo's streaming privileges are free (the EBUSY blocker is gone).
+- `NativeCameraSettables`: controls and modes from the driver through `NapaDetectorJNI.device*` on a control-only
+  fd (no S_FMT on it, so it works while the capture thread or a temporary UsbCamera streams). Names as cscore
+  normalizes them, cscore's 0-100 percentage properties (brightness, contrast, saturation, hue, sharpness, gain,
+  exposure) with `raw_*` in the camera's units, the same mode list order (saved mode indices keep their meaning),
+  Thriftiest exposure range 1-2400, the real-exposure table (USBFrameProvider.realExposureUs, shared), every write
+  read first and skipped when equal (Swyft flash).
+- `NativeFrameProvider`: opens the native capture in the selected mode (reopens on a mode change), gives the Java
+  pipeline a fresh latest image at `SPECTRUM_NATIVE_CAMERA_JAVA_FPS` (default 5) while no stream is watched, at
+  the stream rate (`SPECTRUM_NATIVE_PUBLISH_JAVA_FPS`, 30) while one is; Rewind through RewindRecorder.forNative;
+  health getters (CameraHealthPublisher). cscore handover: the calibration pipeline, a non-MJPEG mode or a failed
+  native open close the native capture and stream the device through a temporary UsbCamera + CvSink (closed and
+  native reopened afterwards). The old in-cscore variant needs `SPECTRUM_NATIVE_CAMERA=cscore-legacy`.
+- Native fixes: the capture loop passed a stale sequence to UVCIOC_SJ_WAIT, which returns at once: the
+  SpectrumCamera thread spun at 98% of a core (now 16.6% dark at 33 fps). Java's latest image is now always the
+  next frame (the kept one was a Java period old: 210 ms "latency" in the Java loop, now 28 ms).
+- Test: `tests/systemcore-native-camera/nativecam.sh OUT CAMERA [SECS]` (one camera, lock held throughout, DB
+  backup/restore, temporary drop-in, Swyft exposure restored).
+
+Live, Swyft only, DARK room, exposure 300 (30 ms: the camera runs ~33 fps), 12 s (`/dev/shm/b2-run3`): PV is the
+only owner of /dev/video0 (2 fds: control + capture; no cscore), 397 results (33.1/s), 387 with targets, tag
+quality 387/387 matched by sequence ID, health/fps 33.1, capture->publish p50 23.2 ms (mid-exposure of a 30 ms
+exposure), PV 24.3% of a core (SpectrumCamera 16.6%, VisionRunner 1.7%).
+

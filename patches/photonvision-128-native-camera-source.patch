@@ -1,0 +1,1300 @@
+From 97cc032e3c247b5ac065eca103ed236c322b180e Mon Sep 17 00:00:00 2001
+From: Allen Gregory <allengregoryiv@gmail.com>
+Date: Fri, 6 Nov 2026 04:34:21 -0600
+Subject: [PATCH] Native camera source: verified cameras run with no cscore
+ UsbCamera (NativeCameraSource)
+
+VisionSourceManager gives Thriftiest (1bcf:28c5) and Swyft (0bda:3035) cameras with MJPEG modes a
+NativeCameraSource while native publish is on and the NAPA library is there (SPECTRUM_NATIVE_CAMERA=0 opts
+out, SPECTRUM_NATIVE_CAMERA_IDS overrides the list); any other camera, or any failure, gets USBCameraSource
+as before. No UsbCamera is ever made for it, so uvcvideo's streaming privileges are free for the native
+capture thread (the EBUSY blocker).
+
+NativeCameraSettables: controls and video modes read from the driver (NapaDetectorJNI.device*, a
+control-only fd), named and scaled as cscore does (percentage properties, raw_*), the same mode order and
+so the same saved mode indices, Thriftiest exposure range, every write read first.
+NativeFrameProvider: opens the native capture in the selected mode, hands the Java pipeline the latest
+fresh image at 5 fps (SPECTRUM_NATIVE_CAMERA_JAVA_FPS) or the stream rate while a stream is watched,
+Rewind via RewindRecorder.forNative, health getters; calibration, a non-MJPEG mode or a failed native
+open hand the device to a temporary cscore UsbCamera, closed again afterwards. The old in-cscore variant
+in USBFrameProvider only runs with SPECTRUM_NATIVE_CAMERA=cscore-legacy.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../org/photonvision/jni/NapaDetectorJNI.java |  29 +
+ .../USBCameras/NativeCameraSettables.java     | 527 ++++++++++++++++++
+ .../camera/USBCameras/NativeCameraSource.java | 137 +++++
+ .../frame/provider/NativeFrameProvider.java   | 345 ++++++++++++
+ .../frame/provider/USBFrameProvider.java      |  19 +-
+ .../vision/processes/VisionModule.java        |  30 +-
+ .../vision/processes/VisionRunner.java        |  34 ++
+ .../vision/processes/VisionSourceManager.java |   9 +-
+ 8 files changed, 1118 insertions(+), 12 deletions(-)
+ create mode 100644 photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSettables.java
+ create mode 100644 photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSource.java
+ create mode 100644 photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+
+diff --git a/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java b/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
+index bcd4ec85..6b671fe2 100644
+--- a/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
++++ b/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
+@@ -157,6 +157,35 @@ public final class NapaDetectorJNI {
+     public static native boolean cameraRecord(
+             long handle, String prefix, int ringMb, double recordFps);
+ 
++    /**
++     * The camera's latest JPEG, as the camera sent it (for the stream: no re-encode), into a direct
++     * buffer. Returns its length; 0 when none newer is ready yet; -n when the buffer needs n bytes.
++     */
++    public static native int cameraLatestJpeg(long handle, java.nio.ByteBuffer direct);
++
++    // The device itself, without a capture handle (NativeCameraSettables: no cscore UsbCamera)
++
++    /**
++     * The device's video modes as the driver lists them: {fourcc, width, height, fps} per mode, or
++     * null if it can't be opened.
++     */
++    public static native int[] deviceModes(String dev);
++
++    /**
++     * The device's controls, one "id,type,min,max,step,default,value,flags,name" string each (the
++     * camera's own units), or null if it can't be opened.
++     */
++    public static native String[] deviceControls(String dev);
++
++    /** Sets a control, reading it first: 1 written, 0 already that value, -1 error. */
++    public static native int deviceSetControl(String dev, int id, int value);
++
++    /** A control's value, or Integer.MIN_VALUE. */
++    public static native int deviceGetControl(String dev, int id);
++
++    /** Closes the device's control fd. */
++    public static native void deviceClose(String dev);
++
+     /**
+      * Spectrum (sc/mjpeg-napa): this camera's frame policy for streamed frames: decode scale 1, 2 or
+      * 4, every fullEvery-th processed frame at full scale (0: never), process 1 frame in
+diff --git a/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSettables.java b/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSettables.java
+new file mode 100644
+index 00000000..b8a392e2
+--- /dev/null
++++ b/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSettables.java
+@@ -0,0 +1,527 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.vision.camera.USBCameras;
++
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.function.Consumer;
++import java.util.stream.Collectors;
++import org.photonvision.common.configuration.CameraConfiguration;
++import org.photonvision.jni.NapaDetectorJNI;
++import org.photonvision.vision.camera.CameraQuirk;
++import org.photonvision.vision.processes.VisionSourceSettables;
++import org.wpilib.util.PixelFormat;
++import org.wpilib.vision.camera.VideoMode;
++
++/**
++ * Spectrum (sc/mjpeg-napa) native camera backend (SpectrumJetson
++ * docs/SYSTEMCORE-NATIVE-BACKEND.md): GenericUSBCameraSettables' behaviour for a camera that has no
++ * cscore UsbCamera. Controls and video modes come from the driver through NapaDetectorJNI.device*
++ * (V4L2 on a control-only fd, so it works whether the native capture thread or, during calibration,
++ * a temporary UsbCamera streams). Names, units and the video-mode list (and so the saved video-mode
++ * indices) are cscore's: controls named as cscore normalizes V4L2 names, cscore's 0-100 percentage
++ * properties for brightness/contrast/saturation/hue/sharpness/gain/exposure with the camera's own
++ * values as raw_*, modes in the driver's order then PhotonVision's sort. Every write is read first
++ * and skipped when equal (the Swyft stores controls in flash).
++ */
++public class NativeCameraSettables extends VisionSourceSettables {
++    /** One V4L2 control, as cscore names it. */
++    static final class Ctl {
++        final int id, type, min, max, step, def;
++        final String name;
++        volatile int value;
++
++        Ctl(String row) {
++            String[] f = row.split(",", 9);
++            id = (int) Long.parseLong(f[0]);
++            type = Integer.parseInt(f[1]);
++            min = Integer.parseInt(f[2]);
++            max = Integer.parseInt(f[3]);
++            step = Integer.parseInt(f[4]);
++            def = Integer.parseInt(f[5]);
++            value = Integer.parseInt(f[6]);
++            name = normalize(f[8]);
++        }
++    }
++
++    /** cscore's UsbCameraProperty name normalization: lower case, words joined by '_'. */
++    static String normalize(String v4l2Name) {
++        var b = new StringBuilder();
++        boolean newWord = false;
++        for (char c : v4l2Name.toCharArray()) {
++            if (Character.isLetterOrDigit(c) && c < 128) {
++                if (newWord) b.append('_');
++                newWord = false;
++                b.append(Character.toLowerCase(c));
++            } else if (b.length() > 0) {
++                newWord = true;
++            }
++        }
++        return b.toString();
++    }
++
++    private static boolean isPercentage(String name) {
++        return switch (name) {
++            case "brightness",
++                    "contrast",
++                    "saturation",
++                    "hue",
++                    "sharpness",
++                    "gain",
++                    "exposure_absolute",
++                    "exposure_time_absolute" ->
++                    true;
++            default -> false;
++        };
++    }
++
++    /** A cscore-style property: raw (the control itself) or cscore's 0-100 percentage of it. */
++    final class Prop {
++        final Ctl ctl;
++        final boolean percent;
++        final String name;
++
++        Prop(Ctl ctl, boolean percent, String name) {
++            this.ctl = ctl;
++            this.percent = percent;
++            this.name = name;
++        }
++
++        int getMin() {
++            return percent ? 0 : ctl.min;
++        }
++
++        int getMax() {
++            return percent ? 100 : ctl.max;
++        }
++
++        int getStep() {
++            return percent ? 1 : ctl.step;
++        }
++
++        int getDefault() {
++            return percent ? toPercent(ctl.def) : ctl.def;
++        }
++
++        int get() {
++            int v = NapaDetectorJNI.deviceGetControl(dev, ctl.id);
++            if (v != Integer.MIN_VALUE) ctl.value = v;
++            return percent ? toPercent(ctl.value) : ctl.value;
++        }
++
++        /** Read first, written only when different; logs a value that doesn't read back. */
++        void set(int v) {
++            int raw = percent ? toRaw(v) : v;
++            int r = NapaDetectorJNI.deviceSetControl(dev, ctl.id, raw);
++            if (r < 0) {
++                logger.warn("Camera control " + name + " on " + dev + ": set " + raw + " failed");
++                return;
++            }
++            int back = NapaDetectorJNI.deviceGetControl(dev, ctl.id);
++            if (back != Integer.MIN_VALUE) ctl.value = back;
++            if (r == 1 && back != raw)
++                logger.warn("Camera control " + name + " on " + dev + ": set " + raw + ", reads " + back);
++        }
++
++        // cscore's conversions (UsbCameraProperty)
++        private int toPercent(int raw) {
++            return ctl.max == ctl.min ? 0 : (int) (100.0 * (raw - ctl.min) / (ctl.max - ctl.min));
++        }
++
++        private int toRaw(int pct) {
++            return (int) (ctl.min + (ctl.max - ctl.min) * (pct / 100.0));
++        }
++    }
++
++    protected static final int PROP_AUTO_EXPOSURE_ENABLED = 3;
++    protected static final int PROP_AUTO_EXPOSURE_DISABLED = 1;
++
++    private final String dev;
++    private final CameraConfiguration configuration;
++    private final Map<String, Ctl> controls = new LinkedHashMap<>();
++    private VideoMode currentMode;
++    // the frame provider follows video-mode changes (reopens the camera in the new mode)
++    private volatile Consumer<VideoMode> modeListener = m -> {};
++
++    protected double lastExposureRaw = -1;
++    protected volatile boolean autoExposureOn = false;
++    protected double minExposure = 1, maxExposure = 80000;
++    protected double minWhiteBalanceTemp = 1, maxWhiteBalanceTemp = 4000;
++    protected int lastWhiteBalanceTemp = 4000;
++    private Prop exposureAbsProp, autoExposureProp, wbTempProp;
++
++    /** The device's modes, cscore's list order, or null when it can't be read. */
++    static List<VideoMode> readModes(String dev) {
++        int[] m = NapaDetectorJNI.deviceModes(dev);
++        if (m == null) return null;
++        var out = new ArrayList<VideoMode>();
++        for (int i = 0; i + 3 < m.length; i += 4)
++            out.add(new VideoMode(pixelFormat(m[i]), m[i + 1], m[i + 2], m[i + 3]));
++        return out;
++    }
++
++    /** V4L2 fourcc -> cscore's pixel format (UsbCameraImpl's ToPixelFormat). */
++    static PixelFormat pixelFormat(int fourcc) {
++        String s =
++                new String(
++                        new char[] {
++                            (char) (fourcc & 0xff),
++                            (char) ((fourcc >> 8) & 0xff),
++                            (char) ((fourcc >> 16) & 0xff),
++                            (char) ((fourcc >> 24) & 0xff)
++                        });
++        return switch (s) {
++            case "MJPG" -> PixelFormat.MJPEG;
++            case "YUYV" -> PixelFormat.YUYV;
++            case "RGBP" -> PixelFormat.RGB565;
++            case "BGR3" -> PixelFormat.BGR;
++            case "GREY" -> PixelFormat.GRAY;
++            case "Y16 " -> PixelFormat.Y16;
++            case "UYVY" -> PixelFormat.UYVY;
++            default -> PixelFormat.UNKNOWN;
++        };
++    }
++
++    public NativeCameraSettables(CameraConfiguration configuration, String dev) {
++        super(configuration);
++        this.configuration = configuration;
++        this.dev = dev;
++        onCameraConnected(); // the device is there (NativeCameraSource checked): modes and controls now
++        if (!configuration.cameraQuirks.hasQuirk(CameraQuirk.StickyFPS) && !videoModes.isEmpty())
++            setVideoMode(videoModes.get(0));
++    }
++
++    public String devicePath() {
++        return dev;
++    }
++
++    void setModeListener(Consumer<VideoMode> l) {
++        modeListener = l;
++    }
++
++    private Prop findProp(String name) {
++        boolean raw = name.startsWith("raw_");
++        String base = raw ? name.substring(4) : name;
++        Ctl c = controls.get(base);
++        if (c == null) return null;
++        if (raw) return isPercentage(base) ? new Prop(c, false, name) : null;
++        return new Prop(c, isPercentage(base), name);
++    }
++
++    private Prop findProperty(String... options) {
++        for (String o : options) {
++            Prop p = findProp(o);
++            if (p != null) return p;
++        }
++        logger.warn("Expected at least one of " + String.join(", ", options));
++        return null;
++    }
++
++    private Prop rawProperty(String name) {
++        Prop p = findProp("raw_" + name);
++        return p != null ? p : findProp(name);
++    }
++
++    protected void softSet(String property, int value) {
++        Prop p = findProp(property);
++        if (p == null) {
++            logger.debug("No property " + property + " for " + dev + ", skipping.");
++            return;
++        }
++        p.set(value);
++    }
++
++    private void readControls() {
++        String[] rows = NapaDetectorJNI.deviceControls(dev);
++        if (rows == null) return;
++        controls.clear();
++        for (String r : rows) {
++            try {
++                Ctl c = new Ctl(r);
++                controls.putIfAbsent(c.name, c);
++            } catch (RuntimeException e) {
++                logger.debug("Unreadable control " + r);
++            }
++        }
++        var dump = new StringBuilder("Native camera controls:\n");
++        for (Ctl c : controls.values())
++            dump.append(
++                    String.format(
++                            "  %s id 0x%08x type %d min %d max %d step %d default %d value %d%n",
++                            c.name, c.id, c.type, c.min, c.max, c.step, c.def, c.value));
++        logger.debug(dump.toString());
++    }
++
++    private void cacheVideoModes() {
++        List<VideoMode> list = readModes(dev);
++        if (list == null) list = List.of();
++        var filtered = new ArrayList<VideoMode>();
++        for (VideoMode m : list) {
++            if (m.pixelFormat == PixelFormat.UNKNOWN) continue;
++            if (configuration.cameraQuirks.hasQuirk(CameraQuirk.FPSCap100) && m.fps > 100) continue;
++            if (configuration.cameraQuirks.hasQuirk(CameraQuirk.MJPEGOnly)
++                    && m.pixelFormat != PixelFormat.MJPEG) continue;
++            filtered.add(m);
++        }
++        // exactly GenericUSBCameraSettables' order, so saved video-mode indices mean the same mode
++        var sorted =
++                filtered.stream()
++                        .distinct()
++                        .sorted(((a, b) -> (b.width + b.height) - (a.width + a.height)))
++                        .collect(Collectors.toList());
++        Collections.reverse(sorted);
++        videoModes = sorted;
++        if (videoModes.isEmpty())
++            logger.info("Camera " + dev + " has no video modes PhotonVision supports");
++    }
++
++    @Override
++    public void onCameraConnected() {
++        super.onCameraConnected();
++        readControls();
++        cacheVideoModes();
++        // GenericUSBCameraSettables.setUpExposureProperties / setUpWhiteBalanceProperties
++        exposureAbsProp =
++                findProperty(
++                        "raw_exposure_absolute", "raw_exposure_time_absolute", "exposure", "raw_Exposure");
++        if (exposureAbsProp != null) {
++            minExposure = exposureAbsProp.getMin();
++            maxExposure = exposureAbsProp.getMax();
++        }
++        if (configuration.cameraQuirks.hasQuirk(CameraQuirk.ThriftyOV9281Controls)) {
++            minExposure = 1; // ThriftyOV9281CameraSettables: 0.1-240 ms
++            maxExposure = 2400;
++        }
++        autoExposureProp = findProp("exposure_auto");
++        if (autoExposureProp == null) autoExposureProp = findProp("auto_exposure");
++        wbTempProp = findProp("white_balance_temperature");
++        if (wbTempProp != null) {
++            minWhiteBalanceTemp = wbTempProp.getMin();
++            maxWhiteBalanceTemp = wbTempProp.getMax();
++        }
++        setAllCamDefaults();
++        if (currentMode != null) calculateFrameStaticProps();
++    }
++
++    public void setAllCamDefaults() {
++        if (configuration.cameraQuirks.hasQuirk(CameraQuirk.ThriftyOV9281Controls))
++            softSet("focus_automatic_continuous", 0);
++        softSet("image_stabilization", 0);
++        softSet("power_line_frequency", 2);
++        softSet("scene_mode", 0);
++        softSet("exposure_metering_mode", 0);
++        softSet("exposure_dynamic_framerate", 0);
++        softSet("focus_auto", 0);
++        softSet("focus_absolute", 0);
++    }
++
++    @Override
++    public void setWhiteBalanceTemp(double tempNumber) {
++        if (wbTempProp == null) return;
++        int temp = (int) Math.round(tempNumber);
++        softSet("white_balance_automatic", 0);
++        wbTempProp.set((int) Math.clamp(temp, minWhiteBalanceTemp, maxWhiteBalanceTemp));
++        lastWhiteBalanceTemp = temp;
++    }
++
++    @Override
++    public void setAutoWhiteBalance(boolean autoWB) {
++        if (autoWB) {
++            softSet("white_balance_automatic", 1);
++        } else {
++            softSet("white_balance_automatic", 0);
++            if (wbTempProp != null) wbTempProp.set(lastWhiteBalanceTemp);
++        }
++    }
++
++    @Override
++    public void setAutoExposure(boolean cameraAutoExposure) {
++        autoExposureOn = cameraAutoExposure;
++        if (!cameraAutoExposure) {
++            softSet("auto_exposure_bias", 0);
++            softSet("iso_sensitivity_auto", 0);
++            softSet("iso_sensitivity", 0);
++            if (autoExposureProp != null) autoExposureProp.set(PROP_AUTO_EXPOSURE_DISABLED);
++            setExposureRaw(lastExposureRaw);
++        } else {
++            softSet("auto_exposure_bias", 12);
++            softSet("iso_sensitivity_auto", 1);
++            softSet("iso_sensitivity", 1);
++            if (autoExposureProp != null) autoExposureProp.set(PROP_AUTO_EXPOSURE_ENABLED);
++        }
++    }
++
++    /** V4L2 exposure_time_absolute is in 100 us units; unknown under auto exposure. */
++    @Override
++    public double getExposureTimeUs() {
++        if (autoExposureOn || lastExposureRaw <= 0) return -1;
++        return Math.clamp(lastExposureRaw, minExposure, maxExposure) * 100.0;
++    }
++
++    @Override
++    public double getMinExposureRaw() {
++        return minExposure;
++    }
++
++    @Override
++    public double getMaxExposureRaw() {
++        return maxExposure;
++    }
++
++    @Override
++    public void setExposureRaw(double exposureRaw) {
++        if (exposureRaw < 0.0 || exposureAbsProp == null) return;
++        if (autoExposureProp != null) autoExposureProp.set(PROP_AUTO_EXPOSURE_DISABLED);
++        exposureAbsProp.set((int) Math.clamp(exposureRaw, minExposure, maxExposure));
++        lastExposureRaw = exposureRaw;
++    }
++
++    @Override
++    public void setBrightness(int brightness) {
++        softSet("brightness", brightness);
++    }
++
++    @Override
++    public void setGain(int gain) {
++        softSet("gain_automatic", 0);
++        softSet("gain", gain);
++    }
++
++    @Override
++    public VideoMode getCurrentVideoMode() {
++        return currentMode != null
++                ? currentMode
++                : videoModes.isEmpty()
++                        ? new VideoMode(PixelFormat.MJPEG, 1280, 800, 120)
++                        : videoModes.get(0);
++    }
++
++    @Override
++    protected void setVideoModeInternal(VideoMode videoMode) {
++        if (videoMode == null) {
++            logger.error("Got a null video mode! Doing nothing...");
++            return;
++        }
++        boolean changed = !videoMode.equals(currentMode);
++        currentMode = videoMode;
++        if (changed) modeListener.accept(videoMode);
++    }
++
++    @Override
++    public List<VideoMode> getAllVideoModes() {
++        return videoModes;
++    }
++
++    // photonvision-28's extra controls
++    private static final String[][] EXTRA_CONTROLS = {
++        {"cameraContrast", "contrast", "Contrast"},
++        {"cameraGamma", "gamma", "Gamma"},
++        {"cameraSharpness", "sharpness", "Sharpness"},
++        {"cameraBacklightCompensation", "backlight_compensation", "Backlight Compensation"}
++    };
++
++    private void setRawControl(String name, int value) {
++        Prop p = rawProperty(name);
++        if (p == null) return;
++        p.set(value < 0 ? p.getDefault() : Math.clamp(value, p.getMin(), p.getMax()));
++    }
++
++    @Override
++    public void setContrast(int value) {
++        setRawControl("contrast", value);
++    }
++
++    @Override
++    public void setGamma(int value) {
++        setRawControl("gamma", value);
++    }
++
++    @Override
++    public void setSharpness(int value) {
++        setRawControl("sharpness", value);
++    }
++
++    @Override
++    public void setBacklightCompensation(int value) {
++        setRawControl("backlight_compensation", value);
++    }
++
++    @Override
++    public List<Map<String, Object>> getExtraControls() {
++        var out = new ArrayList<Map<String, Object>>();
++        for (String[] c : EXTRA_CONTROLS) {
++            Prop p = rawProperty(c[1]);
++            if (p == null) continue;
++            var m = new LinkedHashMap<String, Object>();
++            m.put("key", c[0]);
++            m.put("label", c[2]);
++            m.put("min", p.getMin());
++            m.put("max", p.getMax());
++            m.put("step", Math.max(1, p.getStep()));
++            m.put("default", p.getDefault());
++            m.put("value", p.get());
++            out.add(m);
++        }
++        return out;
++    }
++
++    private static final String[] LOGGED_CONTROLS = {
++        "exposure_time_absolute",
++        "exposure_absolute",
++        "auto_exposure",
++        "brightness",
++        "contrast",
++        "gamma",
++        "sharpness",
++        "saturation",
++        "gain",
++        "white_balance_temperature",
++        "white_balance_automatic",
++        "backlight_compensation",
++        "power_line_frequency",
++        "focus_automatic_continuous"
++    };
++
++    @Override
++    public Map<String, Long> getRawControls() {
++        var m = new LinkedHashMap<String, Long>();
++        for (String name : LOGGED_CONTROLS) {
++            Prop p = rawProperty(name);
++            if (p != null) m.put(name, (long) p.get());
++        }
++        return m;
++    }
++
++    @Override
++    public boolean hasControl(String name) {
++        return findProp(name) != null || findProp("raw_" + name) != null;
++    }
++
++    @Override
++    public double getMaxWhiteBalanceTemp() {
++        return maxWhiteBalanceTemp;
++    }
++
++    @Override
++    public double getMinWhiteBalanceTemp() {
++        return minWhiteBalanceTemp;
++    }
++}
+diff --git a/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSource.java b/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSource.java
+new file mode 100644
+index 00000000..15482081
+--- /dev/null
++++ b/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSource.java
+@@ -0,0 +1,137 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.vision.camera.USBCameras;
++
++import java.util.Locale;
++import org.photonvision.common.configuration.CameraConfiguration;
++import org.photonvision.common.logging.LogGroup;
++import org.photonvision.common.logging.Logger;
++import org.photonvision.jni.NapaDetectorJNI;
++import org.photonvision.vision.camera.PVCameraInfo.PVUsbCameraInfo;
++import org.photonvision.vision.camera.QuirkyCamera;
++import org.photonvision.vision.frame.FrameProvider;
++import org.photonvision.vision.frame.provider.NativeFrameProvider;
++import org.photonvision.vision.pipe.impl.NativePublish;
++import org.photonvision.vision.processes.VisionSource;
++import org.photonvision.vision.processes.VisionSourceSettables;
++import org.wpilib.util.PixelFormat;
++
++/**
++ * Spectrum (sc/mjpeg-napa) native camera backend (SpectrumJetson
++ * docs/SYSTEMCORE-NATIVE-BACKEND.md): a USB camera with no cscore UsbCamera. Chosen per camera by
++ * {@link #createOrNull}: verified cameras (Thriftiest Cam 1bcf:28c5, Swyft 0bda:3035; more with
++ * SPECTRUM_NATIVE_CAMERA_IDS) with MJPEG modes, while native publish is on and the library is
++ * there. SPECTRUM_NATIVE_CAMERA=0 turns it off. Anything else, or any failure here, and the camera
++ * is a normal USBCameraSource.
++ */
++public class NativeCameraSource extends VisionSource {
++    private static final Logger staticLogger = new Logger(NativeCameraSource.class, LogGroup.Camera);
++
++    private final Logger logger;
++    private final String dev;
++    private NativeCameraSettables settables;
++    private NativeFrameProvider provider;
++
++    /** "vid:pid" (hex) pairs the native backend takes. */
++    private static final String IDS =
++            System.getenv().getOrDefault("SPECTRUM_NATIVE_CAMERA_IDS", "1bcf:28c5,0bda:3035");
++
++    static boolean verified(int vid, int pid) {
++        String want = String.format(Locale.ROOT, "%04x:%04x", vid, pid);
++        for (String s : IDS.split(",")) if (s.trim().equalsIgnoreCase(want)) return true;
++        return false;
++    }
++
++    /** A native source for this camera, or null (it gets a USBCameraSource). */
++    public static VisionSource createOrNull(CameraConfiguration config) {
++        if ("0".equals(System.getenv("SPECTRUM_NATIVE_CAMERA")) || !NativePublish.ENABLED) return null;
++        if (!(config.matchedCameraInfo instanceof PVUsbCameraInfo usb)) return null;
++        if (!verified(usb.vendorId, usb.productId)) return null;
++        String dev = config.getDevicePath();
++        try {
++            if (!NapaDetectorJNI.isAvailable()) {
++                staticLogger.warn(
++                        "Native camera: library not loaded (" + NapaDetectorJNI.loadError() + "); cscore");
++                return null;
++            }
++            var modes = NativeCameraSettables.readModes(dev);
++            if (modes == null || modes.stream().noneMatch(m -> m.pixelFormat == PixelFormat.MJPEG)) {
++                staticLogger.warn("Native camera: " + dev + " has no readable MJPEG modes; cscore");
++                return null;
++            }
++            return new NativeCameraSource(config, dev);
++        } catch (Throwable e) {
++            staticLogger.error("Native camera: " + dev + " failed (" + e + "); cscore", e);
++            return null;
++        }
++    }
++
++    private NativeCameraSource(CameraConfiguration config, String dev) {
++        super(config);
++        this.dev = dev;
++        this.logger = new Logger(NativeCameraSource.class, config.nickname, LogGroup.Camera);
++        var usb = (PVUsbCameraInfo) config.matchedCameraInfo;
++        if (getCameraConfiguration().cameraQuirks == null)
++            getCameraConfiguration().cameraQuirks =
++                    QuirkyCamera.getQuirkyCamera(
++                            usb.vendorId, usb.productId, config.matchedCameraInfo.name());
++        settables = new NativeCameraSettables(config, dev);
++        provider = new NativeFrameProvider(dev, config.nickname, settables);
++        settables.setModeListener(provider::onVideoModeChanged);
++        logger.info("Native camera source for " + dev + " (no cscore UsbCamera)");
++    }
++
++    public String devicePath() {
++        return dev;
++    }
++
++    @Override
++    public FrameProvider getFrameProvider() {
++        return provider;
++    }
++
++    @Override
++    public VisionSourceSettables getSettables() {
++        return settables;
++    }
++
++    @Override
++    public boolean isVendorCamera() {
++        return false;
++    }
++
++    @Override
++    public boolean hasLEDs() {
++        return false;
++    }
++
++    @Override
++    public void remakeSettables() {
++        var old = settables.getCurrentVideoMode();
++        settables = new NativeCameraSettables(getCameraConfiguration(), dev);
++        settables.setModeListener(provider::onVideoModeChanged);
++        settables.setVideoMode(old);
++        provider.updateSettables(settables);
++    }
++
++    @Override
++    public void release() {
++        if (provider != null) provider.release();
++        provider = null;
++    }
++}
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+new file mode 100644
+index 00000000..e41d85b9
+--- /dev/null
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+@@ -0,0 +1,345 @@
++/*
++ * Copyright (C) Photon Vision.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++package org.photonvision.vision.frame.provider;
++
++import org.opencv.core.CvType;
++import org.opencv.core.Mat;
++import org.opencv.imgproc.Imgproc;
++import org.photonvision.common.logging.LogGroup;
++import org.photonvision.common.logging.Logger;
++import org.photonvision.jni.NapaDetectorJNI;
++import org.photonvision.rewind.RewindRecorder;
++import org.photonvision.vision.frame.FrameThresholdType;
++import org.photonvision.vision.opencv.CVMat;
++import org.photonvision.vision.processes.VisionSourceSettables;
++import org.wpilib.util.PixelFormat;
++import org.wpilib.vision.camera.CvSink;
++import org.wpilib.vision.camera.UsbCamera;
++import org.wpilib.vision.camera.VideoMode;
++
++/**
++ * Spectrum (sc/mjpeg-napa) native camera backend (SpectrumJetson
++ * docs/SYSTEMCORE-NATIVE-BACKEND.md): the frame provider of a camera with no cscore UsbCamera. A
++ * native thread (NapaDetectorJNI.cameraOpen) owns the V4L2 queue and captures, decodes as the bytes
++ * land, runs streaming NAPA, pose, publish, tag quality and Rewind every frame; this only hands the
++ * Java pipeline (UI, stream, health) the latest image at its own low rate.
++ *
++ * <p>cscore handover: while the calibration pipeline runs, or the selected video mode isn't MJPEG,
++ * or the native open failed, the native capture is closed and a temporary cscore UsbCamera streams
++ * the device for the Java pipeline (closed again, and native reopened, afterwards).
++ */
++public class NativeFrameProvider extends CpuImageProcessor {
++    private final Logger logger;
++    private final String dev;
++    private final String name;
++    private VisionSourceSettables settables;
++
++    private long handle = 0;
++    private VideoMode openMode = null;
++    private volatile boolean reopen = false;
++    private volatile boolean calibrating = false;
++    private boolean nativeFailed = false;
++    private Mat gray;
++    private RewindRecorder rewind;
++    private long opens = 0;
++    private volatile String state = "starting";
++    private volatile String problem = "";
++
++    // the cscore handover (calibration, non-MJPEG modes, native open failure)
++    private UsbCamera cscore;
++    private CvSink cscoreSink;
++    private VideoMode cscoreMode;
++
++    public NativeFrameProvider(String dev, String name, VisionSourceSettables settables) {
++        this.dev = dev;
++        this.name = name;
++        this.settables = settables;
++        this.logger =
++                new Logger(
++                        NativeFrameProvider.class, settables.getConfiguration().nickname, LogGroup.Camera);
++        cameraPropertiesCached = true; // the settables read the device already
++    }
++
++    /** The video mode changed (settables): reopen in it on the vision thread. */
++    public void onVideoModeChanged(VideoMode mode) {
++        reopen = true;
++    }
++
++    /** VisionRunner: the calibration pipeline is (not) running; it gets cscore's frames. */
++    public void setCalibrating(boolean on) {
++        if (on != calibrating) {
++            calibrating = on;
++            reopen = true;
++        }
++    }
++
++    /** The NAPA handle that owns this camera (0: not capturing natively right now). */
++    public long nativeCameraHandle() {
++        return handle;
++    }
++
++    public boolean isNative() {
++        return handle != 0;
++    }
++
++    private boolean wantNative() {
++        VideoMode m = settables.getCurrentVideoMode();
++        return !calibrating && !nativeFailed && m != null && m.pixelFormat == PixelFormat.MJPEG;
++    }
++
++    private void closeNative() {
++        if (rewind != null) {
++            rewind.stop();
++            rewind = null;
++        }
++        if (handle != 0) {
++            NapaDetectorJNI.destroy(handle); // stops the camera thread, closes the capture fd
++            handle = 0;
++            openMode = null;
++        }
++    }
++
++    private boolean openNative(VideoMode m) {
++        long h = 0;
++        for (int attempt = 0; attempt < 10 && h == 0; attempt++) {
++            h = NapaDetectorJNI.cameraOpen(dev, m.width, m.height, m.fps, "tag36h11");
++            if (h == 0) sleepMs(100);
++        }
++        if (h == 0) return false;
++        handle = h;
++        openMode = m;
++        opens++;
++        if (gray == null || gray.cols() != m.width || gray.rows() != m.height) {
++            if (gray != null) gray.release();
++            gray = new Mat(m.height, m.width, CvType.CV_8UC1);
++        }
++        rewind = RewindRecorder.forNative(h, () -> settables.getConfiguration().nickname);
++        logger.info(
++                "Native camera: "
++                        + dev
++                        + " captured natively ("
++                        + m.width
++                        + "x"
++                        + m.height
++                        + " MJPEG "
++                        + m.fps
++                        + " fps)");
++        return true;
++    }
++
++    private void closeCscore() {
++        if (cscoreSink != null) {
++            cscoreSink.close();
++            cscoreSink = null;
++        }
++        if (cscore != null) {
++            cscore.close(); // closes the device: native may take it again
++            cscore = null;
++            cscoreMode = null;
++            logger.info("Native camera: cscore handover ended");
++        }
++    }
++
++    private void openCscore(VideoMode m) {
++        if (cscore == null) {
++            cscore = new UsbCamera(name + "-handover", dev);
++            cscoreSink = new CvSink("native_handover_" + name);
++            cscoreSink.setSource(cscore);
++            logger.info(
++                    "Native camera: cscore handover ("
++                            + (calibrating
++                                    ? "calibration"
++                                    : nativeFailed ? "native open failed" : "non-MJPEG mode")
++                            + ")");
++        }
++        if (!m.equals(cscoreMode)) {
++            cscore.setVideoMode(m);
++            cscoreMode = m;
++        }
++    }
++
++    /** On the vision thread: native or the cscore handover, in the selected mode. */
++    private void sync() {
++        VideoMode m = settables.getCurrentVideoMode();
++        boolean wantNative = wantNative();
++        if (!reopen && (wantNative ? handle != 0 : cscore != null)) return;
++        reopen = false;
++        if (wantNative) {
++            if (handle != 0 && m.equals(openMode)) return;
++            closeNative();
++            closeCscore();
++            if (!openNative(m)) {
++                logger.error("Native camera: could not open " + dev + " natively; using cscore for it");
++                problem = "native open failed";
++                nativeFailed = true;
++                openCscore(m);
++            } else {
++                problem = "";
++            }
++        } else {
++            closeNative();
++            openCscore(m);
++        }
++    }
++
++    // timestamps: the native thread stamps from the camera clock; this keeps NativePublish's shifts
++    private long cameraDelayUs = -1, ptsDelayUs = -1;
++
++    /** First bytes -> mid-exposure for this camera's native publish (see USBFrameProvider). */
++    public volatile long nativeMidShiftNs = 0;
++
++    /** Camera-clock stamp -> mid-exposure for the native publish; 0 without hwtimestamps. */
++    public volatile long nativeCamShiftNs = 0;
++
++    private long toMidExposureNs(long stampNs) {
++        if (stampNs == 0) return 0;
++        if (cameraDelayUs < 0) {
++            var c = settables.getConfiguration();
++            cameraDelayUs =
++                    USBFrameProvider.cameraDelayUs(
++                            USBFrameProvider.CAMERA_DELAY_SPEC, c.nickname, c.uniqueName, 400);
++            ptsDelayUs =
++                    USBFrameProvider.cameraDelayUs(
++                            USBFrameProvider.PTS_DELAY_SPEC, c.nickname, c.uniqueName, 180);
++        }
++        long halfExposureUs =
++                USBFrameProvider.realExposureUs(settables, settables.getExposureTimeUs()) / 2;
++        nativeMidShiftNs = (halfExposureUs + cameraDelayUs + USBFrameProvider.SEEN_LAG_US) * 1000;
++        nativeCamShiftNs = USBFrameProvider.HW_TIMESTAMPS ? (halfExposureUs + ptsDelayUs) * 1000 : 0;
++        long shiftUs =
++                USBFrameProvider.HW_TIMESTAMPS
++                        ? halfExposureUs + ptsDelayUs
++                        : halfExposureUs + cameraDelayUs + USBFrameProvider.UVC_STAMP_LAG_US;
++        return stampNs - shiftUs * 1000;
++    }
++
++    private long lastFrameNs = 0;
++
++    @Override
++    CapturedFrame getInputMat() {
++        try {
++            sync();
++        } catch (RuntimeException e) {
++            logger.error("Native camera: switching capture failed", e);
++        }
++        if (handle != 0) {
++            state = "streaming";
++            long end = System.nanoTime() + 200_000_000L;
++            while (System.nanoTime() < end) {
++                long stamp =
++                        NapaDetectorJNI.cameraLatestGray(handle, gray.dataAddr(), gray.cols(), gray.rows());
++                // the image kept since the last request is up to a Java period old (the camera stamp is
++                // CLOCK_MONOTONIC, like nanoTime): this call asked for the next one; wait for it
++                if (stamp != 0 && System.nanoTime() - stamp > 60_000_000L) stamp = 0;
++                if (stamp != 0) {
++                    lastFrameNs = System.nanoTime();
++                    return new CapturedFrame(
++                            new CVMat(forPipeline(gray)),
++                            settables.getFrameStaticProperties(),
++                            toMidExposureNs(stamp));
++                }
++                sleepMs(2);
++            }
++            state = "no-frames";
++        } else if (cscoreSink != null) {
++            state = "cscore-handover";
++            Mat mat = new Mat();
++            long t = cscoreSink.grabFrame(mat, 0.25);
++            if (t != 0 && !mat.empty()) {
++                lastFrameNs = System.nanoTime();
++                return new CapturedFrame(
++                        new CVMat(mat), settables.getFrameStaticProperties(), toMidExposureNs(t));
++            }
++            mat.release();
++        }
++        return new CapturedFrame(new CVMat(), settables.getFrameStaticProperties(), 0);
++    }
++
++    /** The gray image as the pipeline wants it: gray as is, else BGR (HSV / colored pipelines). */
++    private Mat forPipeline(Mat g) {
++        if (m_processType == FrameThresholdType.GREYSCALE) return g.clone();
++        Mat bgr = new Mat();
++        Imgproc.cvtColor(g, bgr, Imgproc.COLOR_GRAY2BGR);
++        return bgr;
++    }
++
++    // health (CameraHealthPublisher)
++
++    public long getDecodeFailures() {
++        long[] s = handle != 0 ? NapaDetectorJNI.cameraStats(handle) : null;
++        return s != null ? s[1] : 0;
++    }
++
++    public long getRecoveries() {
++        return Math.max(0, opens - 1);
++    }
++
++    public String getProblem() {
++        return problem;
++    }
++
++    public String getHealthState() {
++        return state;
++    }
++
++    public long getLastFrameAgeMs() {
++        if (handle != 0) {
++            long[] s = NapaDetectorJNI.cameraStats(handle);
++            if (s != null) return s[3];
++        }
++        return lastFrameNs == 0 ? -1 : (System.nanoTime() - lastFrameNs) / 1_000_000;
++    }
++
++    @Override
++    public String getName() {
++        return "NativeFrameProvider - " + name;
++    }
++
++    @Override
++    protected boolean checkCameraConnected() {
++        return new java.io.File(dev).exists();
++    }
++
++    public void updateSettables(VisionSourceSettables settables) {
++        this.settables = settables;
++        reopen = true;
++    }
++
++    @Override
++    public void release() {
++        closeNative();
++        closeCscore();
++        if (gray != null) {
++            gray.release();
++            gray = null;
++        }
++        try {
++            NapaDetectorJNI.deviceClose(dev);
++        } catch (UnsatisfiedLinkError e) {
++            // no library: nothing open
++        }
++    }
++
++    private static void sleepMs(long ms) {
++        try {
++            Thread.sleep(ms);
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++        }
++    }
++}
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+index ed9ab4db..43bf4015 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+@@ -108,8 +108,11 @@ public class USBFrameProvider extends CpuImageProcessor {
+     // image at its own
+     // low rate (UI, stream, settings). Any failure: this camera stays on the cscore path (the fast
+     // path).
++    // Superseded by NativeCameraSource (no UsbCamera at all, photonvision-128): cscore's UsbCamera
++    // keeps uvcvideo's privileges, so this in-cscore variant can't open the camera. Only
++    // SPECTRUM_NATIVE_CAMERA=cscore-legacy turns it on (kept for comparison).
+     private static final boolean NATIVE_CAMERA =
+-            "1".equals(System.getenv("SPECTRUM_NATIVE_CAMERA"))
++            "cscore-legacy".equals(System.getenv("SPECTRUM_NATIVE_CAMERA"))
+                     && org.photonvision.vision.pipe.impl.NativePublish.ENABLED;
+ 
+     private long nativeHandle = 0;
+@@ -1218,9 +1221,9 @@ public class USBFrameProvider extends CpuImageProcessor {
+      * SPECTRUM_CAMERA_DELAY_US=2500 with hwtimestamps=1 now gets the PTS delay instead (its reference
+      * is the PTS too).
+      */
+-    private static final String CAMERA_DELAY_SPEC = System.getenv("SPECTRUM_CAMERA_DELAY_US");
++    static final String CAMERA_DELAY_SPEC = System.getenv("SPECTRUM_CAMERA_DELAY_US");
+ 
+-    private static final String PTS_DELAY_SPEC = System.getenv("SPECTRUM_CAMERA_PTS_DELAY_US");
++    static final String PTS_DELAY_SPEC = System.getenv("SPECTRUM_CAMERA_PTS_DELAY_US");
+ 
+     static long cameraDelayUs(String spec, String nickname, String uniqueName, long def) {
+         if (spec == null || spec.isBlank()) return def;
+@@ -1255,7 +1258,7 @@ public class USBFrameProvider extends CpuImageProcessor {
+         }
+     }
+ 
+-    private static final boolean HW_TIMESTAMPS = hwTimestamps();
++    static final boolean HW_TIMESTAMPS = hwTimestamps();
+ 
+     /**
+      * Spectrum (sc/mjpeg-napa): with hwtimestamps=0, the driver's buffer timestamp minus the frame's
+@@ -1268,7 +1271,7 @@ public class USBFrameProvider extends CpuImageProcessor {
+      * re-measured). SPECTRUM_UVC_STAMP_LAG_US overrides. 0 with hwtimestamps=1 (not used: the PTS
+      * delay applies).
+      */
+-    private static final long UVC_STAMP_LAG_US =
++    static final long UVC_STAMP_LAG_US =
+             envLong("SPECTRUM_UVC_STAMP_LAG_US", HW_TIMESTAMPS ? 0 : stampLagUs());
+ 
+     /**
+@@ -1277,7 +1280,7 @@ public class USBFrameProvider extends CpuImageProcessor {
+      * +0.085 ms mean (sd 0.074 ms; 0.01-0.15 ms with the URB boundary and the wake). Bigger URBs: the
+      * URB's length (not measured). SPECTRUM_STREAM_SEEN_LAG_US overrides.
+      */
+-    private static final long SEEN_LAG_US = envLong("SPECTRUM_STREAM_SEEN_LAG_US", seenLagUs());
++    static final long SEEN_LAG_US = envLong("SPECTRUM_STREAM_SEEN_LAG_US", seenLagUs());
+ 
+     private static int urbPackets() {
+         try {
+@@ -1328,6 +1331,10 @@ public class USBFrameProvider extends CpuImageProcessor {
+      * minimum, 2).
+      */
+     private long realExposureUs(double nominalUs) {
++        return realExposureUs(settables, nominalUs);
++    }
++
++    static long realExposureUs(VisionSourceSettables settables, double nominalUs) {
+         if (nominalUs <= 0) return 0;
+         var info = settables.getConfiguration().matchedCameraInfo;
+         if (info instanceof org.photonvision.vision.camera.PVCameraInfo.PVUsbCameraInfo usb
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
+index 8bce15c4..6cac4ad3 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
+@@ -208,25 +208,45 @@ public class VisionModule implements AutoCloseable {
+                         () ->
+                                 visionSource.getFrameProvider() instanceof USBFrameProvider usb
+                                         ? usb.getDecodeFailures()
+-                                        : 0,
++                                        : visionSource.getFrameProvider()
++                                                        instanceof
++                                                        org.photonvision.vision.frame.provider.NativeFrameProvider nat
++                                                ? nat.getDecodeFailures()
++                                                : 0,
+                         () ->
+                                 visionSource.getFrameProvider() instanceof USBFrameProvider usb
+                                         ? usb.getRecoveries()
+-                                        : 0,
++                                        : visionSource.getFrameProvider()
++                                                        instanceof
++                                                        org.photonvision.vision.frame.provider.NativeFrameProvider nat
++                                                ? nat.getRecoveries()
++                                                : 0,
+                         // SpectrumJetson (photonvision-31): e.g. "not enough USB bandwidth (...)".
+                         () ->
+                                 visionSource.getFrameProvider() instanceof USBFrameProvider usb
+                                         ? usb.getProblem()
+-                                        : "",
++                                        : visionSource.getFrameProvider()
++                                                        instanceof
++                                                        org.photonvision.vision.frame.provider.NativeFrameProvider nat
++                                                ? nat.getProblem()
++                                                : "",
+                         // SpectrumJetson (photonvision-81): e.g. "streaming", "gave-up".
+                         () ->
+                                 visionSource.getFrameProvider() instanceof USBFrameProvider usb
+                                         ? usb.getHealthState()
+-                                        : "",
++                                        : visionSource.getFrameProvider()
++                                                        instanceof
++                                                        org.photonvision.vision.frame.provider.NativeFrameProvider nat
++                                                ? nat.getHealthState()
++                                                : "",
+                         () ->
+                                 visionSource.getFrameProvider() instanceof USBFrameProvider usb
+                                         ? usb.getLastFrameAgeMs()
+-                                        : -1));
++                                        : visionSource.getFrameProvider()
++                                                        instanceof
++                                                        org.photonvision.vision.frame.provider.NativeFrameProvider nat
++                                                ? nat.getLastFrameAgeMs()
++                                                : -1));
+         // SpectrumJetson: the camera's mount (height, pitch, roll) from the tags it sees
+         // (photonvision-17).
+         resultConsumers.add(
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
+index 9b5b609e..8c95b0d8 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
+@@ -48,6 +48,19 @@ import org.photonvision.vision.pipeline.result.CVPipelineResult;
+  */
+ @SuppressWarnings("rawtypes")
+ public class VisionRunner implements AutoCloseable {
++    // Spectrum (sc/mjpeg-napa) native camera backend: the Java pipeline's rate while no stream is
++    // watched (results, tag quality and health counters come from the native thread every frame)
++    private static final double NATIVE_IDLE_JAVA_FPS = nativeIdleJavaFps();
++
++    private static double nativeIdleJavaFps() {
++        try {
++            String v = System.getenv("SPECTRUM_NATIVE_CAMERA_JAVA_FPS");
++            return v == null || v.isBlank() ? 5 : Double.parseDouble(v.trim());
++        } catch (NumberFormatException e) {
++            return 5;
++        }
++    }
++
+     private final Logger logger;
+     private final Thread visionProcessThread;
+     private final FrameProvider frameSupplier;
+@@ -290,6 +303,27 @@ public class VisionRunner implements AutoCloseable {
+                     nativePublish.camShiftNs = usb.nativeCamShiftNs;
+                     nativePublish.cameraHandle = usb.nativeCameraHandle();
+                 }
++                // Spectrum (sc/mjpeg-napa) native camera backend: no cscore UsbCamera; the native thread
++                // does every frame, the Java pipeline only the UI/stream/health frames (fewer while nobody
++                // watches a stream), and calibration gets a temporary cscore camera
++                if (frameSupplier
++                        instanceof org.photonvision.vision.frame.provider.NativeFrameProvider nat) {
++                    nat.setCalibrating(
++                            pipelineSupplier.get()
++                                    instanceof org.photonvision.vision.pipeline.Calibrate3dPipeline);
++                    if (nativePublish != null) {
++                        nativePublish.midShiftNs = nat.nativeMidShiftNs;
++                        nativePublish.camShiftNs = nat.nativeCamShiftNs;
++                        nativePublish.cameraHandle = nat.nativeCameraHandle();
++                    }
++                    if (nat.isNative()) {
++                        double fps =
++                                org.photonvision.vision.frame.consumer.MJPGFrameConsumer.anyViewers()
++                                        ? org.photonvision.vision.pipe.impl.NativePublish.JAVA_FPS
++                                        : NATIVE_IDLE_JAVA_FPS;
++                        if (fps > 0) capNanos = Math.max(capNanos, (long) (1e9 / fps));
++                    }
++                }
+                 boolean nativeOn =
+                         nativePublish != null
+                                 && nativePublish.active()
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionSourceManager.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionSourceManager.java
+index dbd95159..c6e92766 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionSourceManager.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionSourceManager.java
+@@ -594,7 +594,14 @@ public class VisionSourceManager implements AutoCloseable {
+ 
+         VisionSource source =
+                 switch (configuration.matchedCameraInfo.type()) {
+-                    case UsbCamera -> new USBCameraSource(configuration);
++                    // Spectrum (sc/mjpeg-napa): verified cameras get the native backend (no cscore
++                    // UsbCamera); anything else, or any failure there, the normal cscore source
++                    case UsbCamera -> {
++                        VisionSource nativeSource =
++                                org.photonvision.vision.camera.USBCameras.NativeCameraSource.createOrNull(
++                                        configuration);
++                        yield nativeSource != null ? nativeSource : new USBCameraSource(configuration);
++                    }
+                     case ZeroCopyPicam -> new LibcameraGpuSource(configuration);
+                     case FileCamera -> new FileVisionSource(configuration);
+                 };
+-- 
+2.55.0.windows.2
+
