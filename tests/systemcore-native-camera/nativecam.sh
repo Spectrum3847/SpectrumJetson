@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Native camera backend (NativeCameraSource: no cscore UsbCamera), one camera live, ON THE SYSTEMCORE:
-#   nativecam.sh OUT CAMERA [SECS]      CAMERA: a PhotonVision nickname (swyft | thrifty); SECS default 12
+#   nativecam.sh OUT CAMERA [SECS]      CAMERA: PhotonVision nickname(s), comma-separated (swyft | thrifty |
+#                                       swyft,thrifty for both in one PV); SECS default 12
 # Holds /tmp/camera.lock for the whole run. Stops PV and limelight_visionserver, backs up photon.sqlite (SQLite
 # backup API + integrity_check, ~/bench/scmn/pvdb.py), leaves only CAMERA active, loads the small-URB uvcvideo
 # (urb 2), adds a TEMPORARY drop-in (stream decoder, mjdec, streaming NAPA, native publish + EXTRA_ENV), starts PV,
@@ -59,13 +60,14 @@ import json, sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
 for uniq, contents in db.execute("select unique_name, contents from cameras").fetchall():
     c = json.loads(contents)
-    c["deactivated"] = c.get("nickname") != sys.argv[2]
+    c["deactivated"] = c.get("nickname") not in sys.argv[2].split(",")
     db.execute("update cameras set contents = ? where unique_name = ?", (json.dumps(c), uniq))
 db.commit()
 print(db.execute("pragma integrity_check").fetchone()[0])
 PY
+# SET applies to the first camera named (e.g. the Swyft's exposure in the dark)
 # shellcheck disable=SC2086
-[[ -n ${SET:-} ]] && sudo python3 "$B/pvdb.py" set "$DB" "$CAM" $SET
+[[ -n ${SET:-} ]] && sudo python3 "$B/pvdb.py" set "$DB" "${CAM%%,*}" $SET
 SC_VISION_HAVE_LOCK=1 bash "$LOAD" urb 2 >/dev/null
 {
   printf '[Service]\n'
@@ -90,14 +92,19 @@ pid=$(systemctl show -p MainPID --value photonvision)
   sudo ls -l "/proc/$pid/fd" 2>/dev/null | grep -E "video" || echo "(none)"
 } >"$OUT/owners.txt"
 sudo python3 "$B/topcpu.py" "$SECS" 12 >"$OUT/cpu.txt" &
-"$HOME/bench/bin/nt_check" --camera "$CAM" --secs "$SECS" --dump 0 --csv "$OUT/$CAM.csv" 2>&1 |
-  grep -v -E '^NT:|topic /photon' >"$OUT/$CAM.nt" &
+for c in ${CAM//,/ }; do
+  "$HOME/bench/bin/nt_check" --camera "$c" --secs "$SECS" --dump 0 --csv "$OUT/$c.csv" 2>&1 |
+    grep -v -E '^NT:|topic /photon' >"$OUT/$c.nt" &
+done
 [[ -n ${EXTRA_CMD:-} ]] && bash -c "$EXTRA_CMD" >"$OUT/extra.txt" 2>&1 &
 wait
 sudo journalctl -u photonvision --since "@$t0" --no-pager |
   grep -i -E "native|handover|moved|exception|error" | cut -c1-260 | tail -40 >"$OUT/pv.journal"
 echo "PV ran $(($(date +%s) - t0)) s"
 cat "$OUT/owners.txt"
-grep -E "results in|capture ->|tagQuality|^  id |health" "$OUT/$CAM.nt"
+for c in ${CAM//,/ }; do
+  echo "== $c"
+  grep -E "results in|capture ->|tagQuality|^  id |health" "$OUT/$c.nt"
+done
 head -10 "$OUT/cpu.txt"
 cat "$OUT/pv.journal"

@@ -218,3 +218,29 @@ never does; fixed to read 1 s. Dark room, single camera, no harm seen; the clean
 
 **Installer.** `install-photonvision.sh` now writes `20-native-camera.conf` (`SPECTRUM_NATIVE_PUBLISH=1`) so a
 plain PV start runs verified cameras natively; `NATIVE=0` removes it; 10-spectrum.conf is left as it is.
+
+**Both cameras in one PV (done; DARK).** `nativecam.sh OUT swyft,thrifty 12` (urb 2 uvcvideo, Swyft exposure 300 so
+~33 fps, Thriftiest 120 fps with no tags), `/dev/shm/b2-two-{native,fast}`:
+
+| | fast path (SPECTRUM_NATIVE_CAMERA=0) | native |
+|---|---|---|
+| device ownership | PV only (video0, video2: cscore + watcher fds) | PV only (video0, video2: control + capture fds, no cscore) |
+| Swyft results / targets / tag quality | 395 / 395 / 395 of 395 | 396 / 396 / 396 of 396 |
+| Swyft capture->publish p50/p95/p99 ms | 23.17 / 24.68 / 26.61 | 23.42 / 24.52 / 26.07 |
+| Thriftiest results/s, capture->publish p50/p95/p99 ms | 121.2, 8.142 / 8.306 / 8.408 | 121.2, 8.375 / 8.481 / 8.556 |
+| PV % of one core | 42.4 (SpectrumStream 16.4 + 11.9, VisionRunner 2.2) | 39.2 (SpectrumCamera 17.3 + 12.0, VisionRunner 1.8) |
+
+The Thriftiest's native capture->publish is 0.23 ms above the fast path's in this two-camera run (single camera:
+8.372 vs 8.368): not explained yet (both are camera-clock stamps; check with tsref-compare / tsresid against USB).
+
+**Installed with the AOT cache (done).** `AOT=1 AOT_TRAIN_S=28` (training run held to 28 s): 44.8 MB cache;
+20-native-camera.conf present. A plain start (only 10-spectrum.conf + 20-native-camera.conf, STOCK uvcvideo, no test
+drop-in): both cameras native (PV the only owner, 4 video fds), both 120 fps (Swyft at exposure 10), capture->publish
+p50 10.9 ms on both, PV 46.4% of a core (SpectrumCamera 27.2 + 12.5: with the stock driver there is no
+UVCIOC_SJ_WAIT, so the capture threads poll every 0.1 ms; our urb-2 uvcvideo is not loaded at boot). The
+SystemCore RESET right after that run, while PV stopped and its settings DB was being restored (journal of the
+previous boot: "Voltage normalised" just before; boot dmesg shows undervoltage again). After it came back: DB
+restored from the run's backup (integrity ok, both cameras active), limelight_visionserver stopped, Swyft exposure 10.
+
+Open items: polling cost with the stock uvcvideo (load ours at boot, or a cheaper wait without it); the 0.23 ms
+two-camera Thriftiest offset; lit-scene CPU vs sc-vision; a UI pass over every control.
