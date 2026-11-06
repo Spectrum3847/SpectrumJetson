@@ -1,0 +1,42 @@
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
+index b0007942..f11df105 100644
+--- a/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
++++ b/photon-core/src/main/java/org/photonvision/rewind/RewindManager.java
+@@ -648,11 +648,35 @@ public class RewindManager {
+ 
+     // ---- helpers
+ 
++    /**
++     * Spectrum (pv-perf): the defaults, scaled down on a small disk. 100 GB / 15 GB free suit the
++     * Jetson's SSD; on the SystemCore (a 6.8 GB root on its SD card/eMMC, ~1 GB free) they meant
++     * Rewind never recorded ("disk nearly full"). A small disk gets a quota of half the filesystem
++     * and keeps 10% of it (at least 0.5 GB) free.
++     */
++    static Settings defaultsForDisk(long totalBytes) {
++        var s = new Settings();
++        double totalGB = totalBytes / 1e9;
++        if (totalGB > 0 && totalGB < 150) {
++            s.quotaGB = Math.min(s.quotaGB, Math.max(0.5, totalGB / 2));
++            s.minFreeGB = Math.min(s.minFreeGB, Math.max(0.5, totalGB / 10));
++        }
++        return s;
++    }
++
++    private static Settings defaults() {
++        var dir = Files.isDirectory(ROOT) ? ROOT : ROOT.getParent();
++        return defaultsForDisk(dir == null ? 0 : dir.toFile().getTotalSpace());
++    }
++
+     private void loadSettings() {
+-        if (!Files.exists(SETTINGS_FILE)) return;
++        if (!Files.exists(SETTINGS_FILE)) {
++            settings = defaults(); // pv-perf
++            return;
++        }
+         try {
+             JsonObject j = json.fromJsonObject(Files.readString(SETTINGS_FILE));
+-            var s = new Settings();
++            var s = defaults();
+             s.fps = j.extract("fps", s.fps);
+             s.quotaGB = j.extract("quotaGB", s.quotaGB);
+             s.minFreeGB = j.extract("minFreeGB", s.minFreeGB);

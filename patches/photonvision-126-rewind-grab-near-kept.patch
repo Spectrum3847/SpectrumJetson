@@ -1,0 +1,47 @@
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java b/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java
+index 910b9c1c..9daaf93e 100644
+--- a/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java
++++ b/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java
+@@ -61,6 +61,8 @@ public class RewindRecorder {
+     private static final long SYNC_NS = 2_000_000_000L;
+     // 2 ms of slack so a 30 fps target from a ~90 fps camera keeps every 3rd frame.
+     private static final long KEEP_SLACK_NS = 2_000_000L;
++    // pv-perf: wake this long before the next keep is due (about one frame of a 120 fps camera)
++    private static final long GRAB_LEAD_NS = 6_000_000L;
+ 
+     /** A 1280x800 MJPEG frame is ~50-60 KB; 4 MB covers any mode these cameras have. */
+     private static final int FRAME_BUFFER_BYTES = 4 << 20;
+@@ -201,6 +203,23 @@ public class RewindRecorder {
+                 }
+                 setSinkEnabled(true);
+ 
++                // Spectrum (pv-perf): sleep until shortly before the next frame we'd keep. The sink copies
++                // every frame it's given (~20-200 KB), so at 30 fps from a 120 fps camera three of every
++                // four copies (and wake-ups) were thrown away by the check below.
++                long minIntervalNs0 = RewindManager.getInstance().minFrameIntervalNs();
++                if (s == session && lastKeptNs > 0 && minIntervalNs0 > 0) {
++                    long waitNs =
++                            lastKeptNs
++                                    + minIntervalNs0
++                                    - KEEP_SLACK_NS
++                                    - GRAB_LEAD_NS
++                                    - org.wpilib.networktables.NetworkTablesJNI.now();
++                    if (waitNs > 1_000_000L) {
++                        sleep(Math.min(waitNs / 1_000_000L, 100));
++                        continue; // the session may have ended meanwhile
++                    }
++                }
++
+                 // Unknown pixel format: cscore returns the camera's own image (the JPEG) untouched.
+                 frame.setInfo(0, 0, 0, PixelFormat.UNKNOWN);
+                 long t = sink.grabFrame(frame, 0.5);
+@@ -339,7 +358,8 @@ public class RewindRecorder {
+ 
+     /** Index and video to the SSD, video first: an index line never points past the video. */
+     private void syncFiles() throws IOException {
+-        if (data != null) data.force(true);
++        // pv-perf: fdatasync (force(false)): the data and the file's size, without the other metadata
++        if (data != null) data.force(false);
+         if (index != null) {
+             index.flush();
+             indexFile.getFD().sync();

@@ -1,0 +1,43 @@
+diff --git a/photon-client/src/components/app/photon-camera-stream.vue b/photon-client/src/components/app/photon-camera-stream.vue
+index ca2afb36..b84ca688 100644
+--- a/photon-client/src/components/app/photon-camera-stream.vue
++++ b/photon-client/src/components/app/photon-camera-stream.vue
+@@ -84,16 +84,26 @@ const handleFullscreenRequest = async () => {
+ 
+ const mjpgStream = useTemplateRef("mjpgStream");
+ 
++// pv-perf: retry a failed stream with a growing delay (0.1 s doubling to 5 s), not every 0.1 s forever:
++// each retry is a new HTTP connection to the camera's stream server. A stream that loads resets it.
++let retryDelayMs = 100;
++let retryTimer: ReturnType<typeof setTimeout> | undefined;
+ const handleStreamError = () => {
+   if (streamSrc.value && streamSrc.value !== emptyStreamSrc) {
+-    console.error("Error loading stream:", streamSrc.value, " Trying again.");
+-    setTimeout(() => {
+-      mjpgStream.value!.src = streamSrc.value;
+-    }, 100);
++    console.error("Error loading stream:", streamSrc.value, " Trying again in", retryDelayMs, "ms.");
++    clearTimeout(retryTimer);
++    retryTimer = setTimeout(() => {
++      if (mjpgStream.value) mjpgStream.value.src = streamSrc.value;
++    }, retryDelayMs);
++    retryDelayMs = Math.min(retryDelayMs * 2, 5000);
+   }
+ };
++const handleStreamLoad = () => {
++  retryDelayMs = 100;
++};
+ 
+ onBeforeUnmount(() => {
++  clearTimeout(retryTimer);
+   document.removeEventListener("visibilitychange", onVisibilityChange);
+   if (!mjpgStream.value) return;
+   mjpgStream.value.src = emptyStreamSrc;
+@@ -112,6 +122,7 @@ onBeforeUnmount(() => {
+       :alt="streamDesc"
+       :style="streamStyle"
+       @error="handleStreamError"
++      @load="handleStreamLoad"
+     />
+     <div class="stream-overlay" :style="overlayStyle">
+       <pv-icon
