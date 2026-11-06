@@ -1,0 +1,63 @@
+From 70a41692f200817a4205dacf65e8a0f9e5732b6a Mon Sep 17 00:00:00 2001
+From: Allen Gregory <allengregoryiv@gmail.com>
+Date: Fri, 6 Nov 2026 06:16:19 -0600
+Subject: [PATCH 2/3] Native camera passthrough: compression -1 on the input
+ server before any viewer connects
+
+A connection keeps the compression it started with: switched later, cscore decoded and re-encoded each camera JPEG at 75 (33% of a core). Now an input viewer costs ~0 (Thriftiest dark: 20.5% of a core with no viewer, 19.2% with one, vs 27.0% for today's re-encoded stream).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../vision/frame/consumer/MJPGFrameConsumer.java    | 13 +++++++++++--
+ .../vision/frame/provider/NativeFrameProvider.java  |  1 +
+ 2 files changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/consumer/MJPGFrameConsumer.java b/photon-core/src/main/java/org/photonvision/vision/frame/consumer/MJPGFrameConsumer.java
+index 49bb573e..f827cd59 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/consumer/MJPGFrameConsumer.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/consumer/MJPGFrameConsumer.java
+@@ -101,7 +101,6 @@ public class MJPGFrameConsumer implements AutoCloseable {
+                             cvSource.getName() + "_jpeg", PixelFormat.MJPEG, width, height, 30);
+         if (!onRaw) {
+             mjpegServer.setSource(rawSource);
+-            mjpegServer.setCompression(-1); // pass the camera's JPEG through
+             onRaw = true;
+         }
+         rawSource.putFrame(jpeg, width, height, 0, PixelFormat.MJPEG);
+@@ -110,10 +109,20 @@ public class MJPGFrameConsumer implements AutoCloseable {
+     private synchronized void backToMats() {
+         if (!onRaw || mjpegServer == null) return;
+         mjpegServer.setSource(cvSource);
+-        mjpegServer.setCompression(75);
+         onRaw = false;
+     }
+ 
++    /**
++     * Before any viewer connects: JPEG frames are passed through as they are (each connection keeps
++     * the compression it started with; at 75 cscore decoded and re-encoded every camera JPEG, 33% of
++     * a core at 1280x800 30 fps), Mats are still encoded at 75.
++     */
++    public synchronized void preparePassthrough() {
++        if (mjpegServer == null) return;
++        mjpegServer.setCompression(-1);
++        mjpegServer.setDefaultCompression(75);
++    }
++
+     public void accept(CVMat image) {
+         long now = NetworkTablesJNI.now();
+ 
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+index 0dbf04d0..a8460e06 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+@@ -368,6 +368,7 @@ public class NativeFrameProvider extends CpuImageProcessor {
+     public synchronized void setJpegStream(
+             org.photonvision.vision.frame.consumer.MJPGFrameConsumer target) {
+         jpegTarget = target;
++        if (target != null) target.preparePassthrough();
+         if (jpegPump == null
+                 && target != null
+                 && !"0".equals(System.getenv("SPECTRUM_STREAM_PASSTHROUGH"))) {
+-- 
+2.55.0.windows.2
+

@@ -948,9 +948,20 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_drainNa
 // Opens the camera (a /dev/video path, e.g. /dev/v4l/by-id/...-index0) natively: MJPEG width x height at fps, its own
 // capture thread, decode + streaming NAPA + pose + publish on it. Returns a NAPA handle (all the setNative* calls,
 // setParams, nativeLatencyMs and drainNativeResults work on it; destroy() closes the camera), or 0.
-JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraOpen(JNIEnv *env, jclass, jstring jdev,
+JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraOpenSeq(JNIEnv *env, jclass, jstring jdev,
+                                                                               jint width, jint height, jint fps,
+                                                                               jstring family, jlong lastSeq);
+JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraOpen(JNIEnv *env, jclass c, jstring jdev,
                                                                             jint width, jint height, jint fps,
                                                                             jstring family) {
+  return Java_org_photonvision_jni_NapaDetectorJNI_cameraOpenSeq(env, c, jdev, width, height, fps, family, 0);
+}
+
+// As cameraOpen; the first published result's sequence ID is lastSeq + 1 (sequence IDs keep rising across a
+// handover to cscore and back, so robot code / tag-quality matching never sees them go back).
+JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraOpenSeq(JNIEnv *env, jclass, jstring jdev,
+                                                                               jint width, jint height, jint fps,
+                                                                               jstring family, jlong lastSeq) {
   const char *d = env->GetStringUTFChars(jdev, nullptr);
   const char *f = env->GetStringUTFChars(family, nullptr);
   std::string dev(d), fam(f);
@@ -964,6 +975,7 @@ JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraOpen(JNI
     n->sink->cfg_new = true;
   }
   n->sink->log_last = std::chrono::steady_clock::now();
+  n->sink->seq = lastSeq > 0 ? lastSeq : 0;
   // the streaming decoder's watcher of this camera (from frames cscore delivered before) keeps cscore's buffers
   // mapped, and vb2 then refuses our REQBUFS (EBUSY): stop it first
   if (const StreamApi *sa = Stream())
@@ -1041,6 +1053,21 @@ JNIEXPORT jint JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraLatestJpe
   std::memcpy(dst, c->jpeg.data(), c->jpeg.size());
   c->jpeg_capture_ns = 0;
   return static_cast<jint>(c->jpeg.size());
+}
+
+// Stops the camera's thread and closes the device (the handle stays valid until destroy()); returns the last
+// sequence ID its native publish used, final now (cameraSequence before a destroy could miss the last frame).
+JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraStop(JNIEnv *, jclass, jlong h) {
+  auto *n = Handle(h);
+  if (!n) return 0;
+  n->cam.reset();
+  return n->sink ? static_cast<jlong>(n->sink->seq.load()) : 0;
+}
+
+// The last sequence ID this camera's native publish used.
+JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraSequence(JNIEnv *, jclass, jlong h) {
+  auto *n = Handle(h);
+  return n && n->sink ? static_cast<jlong>(n->sink->seq.load()) : 0;
 }
 
 // {frames, bad frames, frames skipped by the policy, ms since the last frame (-1: none), Rewind frames kept}.

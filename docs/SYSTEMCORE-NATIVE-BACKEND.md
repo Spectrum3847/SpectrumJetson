@@ -178,3 +178,43 @@ websocket client here).
    server compression -1) instead of re-encoding the Java gray frame; the output stream (overlays) re-encodes.
 3. Both cameras at once (when the Pi rules allow two-camera runs): ownership, per-camera CPU, pvboth.sh/nt_check.
 4. Lit-scene CPU vs sc-vision (~27%) and the UI controls check (exposure/gain/brightness sliders, extra controls).
+
+## Leftovers round (BUILDER2, 2026-11-06 late): passthrough stream, sequence IDs, real calibration, installer
+
+Fork sc/mjpeg-napa 69646b4c, 70a41692, 38f8d479 (= photonvision-131..133); native: `cameraOpenSeq`, `cameraSequence`,
+`cameraStop` (NapaDetectorJNI.cc).
+
+**Passthrough stream (done).** NativeFrameProvider's `NativeStream-<camera>` thread hands the camera's own JPEG
+(`cameraLatestJpeg`) to the input MjpegServer through a cscore `raw.RawSource` at the stream rate while the input
+stream is watched (`SPECTRUM_STREAM_PASSTHROUGH=0`: off). The server's compression is -1 from the start (a
+connection keeps the compression it began with; switched later, cscore decoded + re-encoded every JPEG at 75, 33%
+of a core); Mats (handover) are still encoded at 75. The Java pipeline goes to the stream rate only for Mat-fed
+streams (`MJPGFrameConsumer.anyMatViewers`: the output overlay stream). Thriftiest, DARK, 120 fps, 5 s each
+(`stream-cpu.sh`, `/dev/shm/b2-scpu{0,2}`), PV % of one core:
+
+| | no viewer | 1 input viewer | 1 output viewer |
+|---|---|---|---|
+| re-encoded (before) | 17.6 | 27.0 (+9.4) | 26.4 |
+| passthrough | 20.5 | 19.2 (~0) | 27.1 |
+
+The input viewer gets the full 1280x800 camera JPEG at 28.8/s (0.61 MB/s dark); the output stream is unchanged.
+
+**The 21 tag-quality mismatches in the handover test (explained, fixed).** They were sequence IDs going back,
+not wrong data: the native publish counted from where its handle started, the Java path (during the handover)
+from its own frame counter, and the reopened native handle from 1 again (`b2-hand2/swyft.csv`: 297..535, then
+222..333, then 1..128). nt_check pairs tag-quality arrays to results by sequence ID, so reused IDs paired results
+with older arrays of other frames. Now IDs keep rising: the native publish starts at the Java path's last ID + 1
+(`cameraOpenSeq`), the Java path continues from the native publish's final ID (`cameraStop` returns it after the
+thread stopped). Handover test after the fix (`b2-hand3` with only the first half, `b2-cal1` with both): 0
+backwards steps, 0 mismatches.
+
+**Real calibration through the API (done).** `tests/systemcore-native-camera/calibration.sh`: the websocket
+message the UI sends (`startPnpCalibration`, msgpack on /websocket_data, charuco 8x8, video mode index 0), then
+`POST /api/calibration/cancel`. Swyft: "Starting calibration at resolution index 0" -> mode 160x120 MJPEG 60 ->
+"Native camera: cscore handover (calibration)"; cancel -> mode 1280x800 MJPEG 120 -> "cscore handover ended" ->
+"captured natively"; sequence IDs rose throughout (295..1209), tag quality 25/25 matched. (That run lasted ~10
+minutes instead of ~30 s: the first version of calibration.sh read the websocket until it went quiet, which PV
+never does; fixed to read 1 s. Dark room, single camera, no harm seen; the cleanup restored everything.)
+
+**Installer.** `install-photonvision.sh` now writes `20-native-camera.conf` (`SPECTRUM_NATIVE_PUBLISH=1`) so a
+plain PV start runs verified cameras natively; `NATIVE=0` removes it; 10-spectrum.conf is left as it is.

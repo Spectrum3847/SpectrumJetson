@@ -5,6 +5,7 @@
 #     JAR       photonvision-*-linuxarm64.jar (fork: ./gradlew photon-server:shadowJar -PArchOverride=linuxarm64)
 #     NAPA_OUT  scripts/systemcore/build-napa.sh's output (default ~/builder/sc-napa)
 #     HOST      default systemcore@172.26.0.1 (USB link; or robot.local)
+#   NATIVE=0 skips the 20-native-camera.conf drop-in (native publish + native cameras are on by default)
 #
 # What it changes on the SystemCore (nothing else):
 #   /opt/photonvision/photonvision.jar, /opt/photonvision/lib/*.so  (no files in /usr)
@@ -36,7 +37,7 @@ ssh "$HOST" 'mkdir -p /dev/shm/pv-install'
 scp -q "$JAR" "$HOST:/dev/shm/pv-install/photonvision.jar"
 scp -q "$NAPA/libspectrum-napa-apriltag.so" "$NAPA/libspectrum-stream.so" "$NAPA/napa_test" \
   "$REPO/scripts/systemcore/sc-vision" "$REPO/scripts/systemcore/photonvision-run.sh" "$HOST:/dev/shm/pv-install/"
-ssh "$HOST" ENABLE="${ENABLE:-0}" AOT="${AOT:-1}" AOT_TRAIN_S="${AOT_TRAIN_S:-45}" 'bash -s' <<'REMOTE'
+ssh "$HOST" ENABLE="${ENABLE:-0}" NATIVE="${NATIVE:-1}" AOT="${AOT:-1}" AOT_TRAIN_S="${AOT_TRAIN_S:-45}" 'bash -s' <<'REMOTE'
 set -euo pipefail
 S=/dev/shm/pv-install
 TRAIN_DROPIN=/etc/systemd/system/photonvision.service.d/zz-aot-train.conf
@@ -101,6 +102,15 @@ Environment=SPECTRUM_NAPA_STREAM=1
 # or the streaming watcher's first sight) back to the first packet before applying it.
 Environment=SPECTRUM_CAMERA_DELAY_US=400
 EOF
+fi
+# Native cameras (docs/SYSTEMCORE-NATIVE-BACKEND.md): with native publish on, verified cameras (Thriftiest, Swyft)
+# run with no cscore UsbCamera. Its own drop-in so 10-spectrum.conf (whatever the bench set there) is left alone;
+# NATIVE=0 removes it (cscore fast path / Java path only). A later drop-in (zz-*) can still override it.
+if [[ ${NATIVE:-1} == 1 ]]; then
+  printf '[Service]\n# native publish; verified cameras get the native camera backend (SPECTRUM_NATIVE_CAMERA=0 opts out)\nEnvironment=SPECTRUM_NATIVE_PUBLISH=1\n' |
+    sudo tee /etc/systemd/system/photonvision.service.d/20-native-camera.conf >/dev/null
+else
+  sudo rm -f /etc/systemd/system/photonvision.service.d/20-native-camera.conf
 fi
 # An older install pinned Team 100's 2.5 ms; the LED test measured 0.41 ms (2026-11-06). Other values are kept.
 if sudo grep -q '^Environment=SPECTRUM_CAMERA_DELAY_US=2500$' /etc/systemd/system/photonvision.service.d/*.conf 2>/dev/null; then

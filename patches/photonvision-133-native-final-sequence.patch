@@ -1,0 +1,53 @@
+From 38f8d479aa4bbe3218db252c11bde8b76bbb474f Mon Sep 17 00:00:00 2001
+From: Allen Gregory <allengregoryiv@gmail.com>
+Date: Fri, 6 Nov 2026 06:33:07 -0600
+Subject: [PATCH 3/3] Native camera: the Java path continues from the native
+ publish's final sequence ID (cameraStop)
+
+Reading cameraSequence before the destroy could miss the native thread's last result (one ID went back, 659 -> 658, in the handover test). cameraStop stops the thread first and returns the final ID. Real calibration through the API (startPnpCalibration, /api/calibration/cancel) handed over to cscore at 160x120 and back to native 1280x800 with sequence IDs rising throughout.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/main/java/org/photonvision/jni/NapaDetectorJNI.java | 6 ++++++
+ .../vision/frame/provider/NativeFrameProvider.java          | 5 +++--
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java b/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
+index cd7f2c98..5b56f9ab 100644
+--- a/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
++++ b/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
+@@ -167,6 +167,12 @@ public final class NapaDetectorJNI {
+     public static native long cameraOpenSeq(
+             String dev, int width, int height, int fps, String family, long lastSeq);
+ 
++    /**
++     * Stops the camera's thread and closes the device (destroy still needed); returns the native
++     * publish's final last sequence ID.
++     */
++    public static native long cameraStop(long handle);
++
+     /** The last sequence ID the camera's native publish used. */
+     public static native long cameraSequence(long handle);
+ 
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+index a8460e06..7856bad8 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+@@ -133,11 +133,12 @@ public class NativeFrameProvider extends CpuImageProcessor {
+             var np = org.photonvision.vision.pipe.impl.NativePublish.current();
+             if (np != null && np.cameraHandle == handle) np.cameraHandle = 0;
+             long h = handle;
+-            // sequence IDs keep rising across the handover (the Java path continues from the native one)
+-            sequenceID = (int) Math.max(sequenceID, NapaDetectorJNI.cameraSequence(h));
+             synchronized (jpegLock) { // the stream pump uses the handle under this lock
+                 handle = 0;
+             }
++            // sequence IDs keep rising across the handover: the Java path continues from the native
++            // publish's last one, read once its thread has stopped
++            sequenceID = (int) Math.max(sequenceID, NapaDetectorJNI.cameraStop(h));
+             NapaDetectorJNI.destroy(h); // stops the camera thread, closes the capture fd
+             openMode = null;
+         }
+-- 
+2.55.0.windows.2
+
