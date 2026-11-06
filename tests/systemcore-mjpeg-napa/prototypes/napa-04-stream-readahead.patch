@@ -1,0 +1,40 @@
+--- a/third_party/napa/napa_core.c
++++ b/third_party/napa/napa_core.c
+@@ -2766,7 +2766,10 @@
+ }
+ 
+ /* Blobs whose last run is in a row before `upto` - 1 ... finished once row `upto` - 1 is labeled:
+- * a blob ending at row y is final when row y + 1 is done. */
++ * a blob ending at row y is final when row y + 1 is done. Its candidate body samples the frame around the
++ * quad (white border half a cell out, edge fits 1.5 s + 1 px out, border bias), so it also waits until the
++ * frame rows below the blob are fed (tests/systemcore-mjpeg-napa probe: without this, the margins of tags
++ * near the arrived edge depend on rows not yet fed). Gated blobs are finalized by a later Feed. */
+ static int finalize_rows(napa_stream *S, stream_level *L, int upto_done) {
+     /* rows [fin_row, upto_done - 1) can be finalized (their next row is done); at the level's end, all */
+     int end = upto_done >= L->lh ? L->lh : upto_done - 1;
+@@ -2774,6 +2777,14 @@
+         for (int i = L->row_start[y]; i < L->row_start[y + 1]; i++) {
+             int r = find_root(L->P, i);
+             if (L->done[r] || L->B[r].maxy != y) continue;
++            if (S->fed < S->h) {
++                int bh = L->B[r].maxy - L->B[r].miny + 1;
++                long need = (long)(y + 1) * L->s + (long)bh * L->s / 4 + 2L * L->s + 4;
++                if (need > S->fed) {
++                    L->fin_row = y; /* resume here: blobs already done in this row are skipped */
++                    return 0;
++                }
++            }
+             L->done[r] = 1;
+             if (finalize_blob(S, L, r)) return -2;
+         }
+@@ -2905,6 +2916,10 @@
+         }
+         while (L->bands < L->th && band_ready(S, L, L->bands))
+             if (process_band(S, L, L->bands)) return -2;
++        if (L->bands > 0) { /* blobs gated on rows not yet fed (finalize_rows) */
++            int upto = L->bands * TILE < L->lh ? L->bands * TILE : L->lh;
++            if (L->fin_row < (upto >= L->lh ? L->lh : upto - 1) && finalize_rows(S, L, upto)) return -2;
++        }
+     }
+     return 0;
+ }

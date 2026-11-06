@@ -15,7 +15,9 @@ CC=${CC:-$TC-gcc}
 CXX=${CXX:-$TC-g++}
 mkdir -p "$WORK"
 N=$WORK/napa-src
-"$REPO/scripts/jetson/napa-src.sh" "$N"
+# SCMN_NAPA_EXTRA: extra patches after ours (e.g. prototypes/napa-04-stream-readahead.patch)
+# shellcheck disable=SC2086
+"$REPO/scripts/jetson/napa-src.sh" "$N" ${SCMN_NAPA_EXTRA:-}
 MF="-march=armv8-a+simd ${CFLAGS_EXTRA:-}"
 CF="-O3 -g -fno-wrapv $MF"
 "$CC" $CF -std=gnu99 -Wall -Wextra -c "$N/napa_core.c" -I"$N" -o "$WORK/napa_core.o"
