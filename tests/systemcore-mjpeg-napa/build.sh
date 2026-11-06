@@ -30,5 +30,10 @@ CF="-O3 -g -fno-wrapv $MF"
   -I"$N" -I"$REPO/detector/napa" -lm -lpthread -o "$WORK/napa_test"
 "$CXX" -O2 -g -std=c++17 -Wall -Wextra -I"$REPO/detector" -I"$N" "$HERE/live.cc" "$WORK/napa_core.o" "$WORK/napa_far.o" \
   -ljpeg -lpthread -lm -o "$WORK/scmn_live"
+NT=${SCMN_NT:-$HOME/build/scmn-nt}  # fetch-ntcore.sh
+if [[ -d $NT/lib ]]; then
+  "$CXX" -O2 -std=c++23 -Wall "$HERE/nt_check.cc" -I"$NT/inc" -L"$NT/lib" -lntcore -ldatalog -lwpinet -lwpiutil \
+    -lpthread -Wl,-rpath,/opt/sc-vision/lib -Wl,-rpath,'$ORIGIN/../ntlib' -o "$WORK/nt_check"
+fi
 [[ -f $HERE/prof.c ]] && "$CC" -O2 -g -std=gnu11 -Wall -Wextra "$HERE/prof.c" -o "$WORK/scmn_prof"
 echo "built in $WORK: $(cd "$WORK" && ls scmn_* napa_stream_replay napa_test | tr '\n' ' ')"
