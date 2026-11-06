@@ -87,3 +87,36 @@ SystemCore; capture -> received ms p50/p95/p99; PhotonVision process CPU in % of
 Every run at the full camera rate (120-121 results/s per camera, all with tags). Two cameras cost what two single
 cameras cost (the streaming threads are ~35% of a core each) and neither camera's latency moves. Pinning didn't
 help at two cameras. Health read fps 120-121 per camera.
+
+### What knowing it's two cameras buys (2026-11-06, same setup, 20 s runs)
+
+`multicam-native.sh` also writes each probe's per-result CSV; `multicam_phase.py` bins every frame by its offset
+to the other camera's nearest capture. The cameras free-run (120 vs 121 fps), so a 20 s run sweeps every phase.
+capture -> publish (on the SystemCore, no NT) p50/p95/p99 ms:
+
+| Placement | Thriftiest, other camera 0-1 ms away | Thriftiest, 3-4 ms away | Swyft, 0-1 ms | Swyft, 3-4 ms | CPU |
+|---|---|---|---|---|---|
+| unpinned (default) | 7.90 / 8.17 / 8.40 | 7.90 / 8.19 / 8.64 | 8.52 / 8.67 / 8.83 | 8.52 / 8.83 / 9.32 | 85.3% |
+| watcher per core (`spread:2-3`), camera threads pinned | 7.89 / 8.13 / 8.39 | 7.89 / 8.13 / 8.61 | 8.52 / 8.77 / 9.20 | 8.51 / 8.93 / 9.16 | 91.7% |
+| + every other PV thread off cores 2-3 | 7.89 / 8.15 / 8.69 | 7.89 / 8.11 / 8.27 | 8.52 / 8.78 / 9.16 | 8.52 / 8.63 / 8.80 | 89.5% |
+| unpinned, Thriftiest min tag 16 | 8.00 / 9.55 / 11.16 | 7.99 / 9.11 / 12.23 | 8.53 / 8.97 / 10.23 | 8.52 / 8.91 / 10.15 | 109.3% |
+
+- **Phase / staggering:** no dependence on phase: frames that arrive together (24% publish within 1 ms of the
+  other camera's) are as fast as frames 3-4 ms apart. Offsetting the cameras' start would buy nothing at two
+  cameras.
+- **Core placement:** one core per camera's watcher, and keeping PhotonVision's other threads off them, changed
+  nothing measurable (p50 identical, p99 within run-to-run noise); no sign of cross-camera cache or memory
+  interference. Leave it to the scheduler (default). `SPECTRUM_STREAM_CPUS=spread:LIST` (new) places watchers one
+  per core for any number of cameras; photonvision-111 stops `CameraThreads` from moving them back every 2 s (the
+  earlier "pinned" run above was really unpinned watchers).
+- **Shared work:** one NT flush per batch can't work (ntcore's 5 ms rule above), one client per camera is the fix.
+  One watcher thread for both cameras would serialize the 24% of frames that finish together; at ~35% of a core
+  per camera there's no CPU to win back that way.
+- **min tag by role:** min 16 on the Thriftiest costs +20-24% of a core and raises both cameras' p99 by 2-3 ms
+  (ondemand governor); keep min 16 for the camera whose role needs far tags only.
+- **USB:** the two cameras are on separate RP1 xHCI controllers (Swyft usb1 IRQ 129, Thriftiest usb3 IRQ 134).
+  Both hard IRQs are delivered on CPU 0 (RP1's chained interrupt; effective affinity 0) and their threaded
+  handlers (SCHED_FIFO 50) float on 0-3. No contention showed: each camera's latency matches its single-camera run.
+- One unpinned two-camera run was discarded: both NT probes stalled together for ~2 s (received times jumped 2.3 s
+  for both cameras at once while PhotonVision's health kept 120 fps) during bench under-voltage; the rerun
+  matched the earlier one.

@@ -219,7 +219,8 @@ size_t FindFill(const uint8_t *p, size_t from, size_t limit) {
 // (photonvision-102's tag camera threads); or an explicit list such as "0-1" or "1,4". Re-checked
 // every 2 s (pinning is applied after start). With 2 cameras, auto and all measured the same
 // (handoff p99 0.23-0.26 vs 0.13-0.22 ms, tests/latency-breakdown), and with 4 cameras auto would
-// crowd 4 watchers onto 2 cores, so it's not the default.
+// crowd 4 watchers onto 2 cores, so it's not the default. "camera": the cores of the thread that takes
+// the watcher's frames. "spread:LIST": one core of LIST per watcher (device-name order, wrapping).
 std::vector<int> ParseCpus(const std::string &s) {
   std::vector<int> v;
   size_t i = 0;
@@ -255,6 +256,21 @@ void PlaceWatcher(Watcher *w, std::string &applied) {
     }
     for (int k : ParseCpus(c)) CPU_SET(k, &want);
     if (CPU_COUNT(&want) == 0) return;
+  } else if (mode.rfind("spread:", 0) == 0) {
+    // "spread:LIST": one core of LIST per watcher, in device-name order of the live watchers, wrapping past
+    // the end (any number of cameras). For the fast path, where the watcher does a camera's decode + NAPA +
+    // pose + publish.
+    const auto cores = ParseCpus(mode.substr(7));
+    if (cores.empty()) return;
+    std::vector<std::string> devs;
+    {
+      std::lock_guard<std::mutex> l(g_mu);
+      for (auto &x : g_watchers)
+        if (!x->dead) devs.push_back(x->dev);
+    }
+    std::sort(devs.begin(), devs.end());
+    const size_t i = std::find(devs.begin(), devs.end(), w->dev) - devs.begin();
+    CPU_SET(cores[i % cores.size()], &want);
   } else if (mode == "auto") {
     cpu_set_t proc;
     if (sched_getaffinity(getpid(), sizeof(proc), &proc)) return;  // the main thread: the process's cores

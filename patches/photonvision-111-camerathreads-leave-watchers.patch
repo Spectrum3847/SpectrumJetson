@@ -1,0 +1,33 @@
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/CameraThreads.java b/photon-core/src/main/java/org/photonvision/vision/processes/CameraThreads.java
+index 0be0d1d3..6c5a51b7 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/CameraThreads.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/CameraThreads.java
+@@ -345,6 +345,9 @@ public final class CameraThreads {
+                 continue;
+             }
+             if (ours.contains(tid)) continue;
++            // the streaming decoders' watchers place themselves (SPECTRUM_STREAM_CPUS, e.g. "camera":
++            // on their camera thread's core); moving them here made the two fight every 2 s
++            if (isStreamWatcher(tid)) continue;
+             String now = cpusAllowed("self/task/" + tid);
+             if (now == null || now.equals(rest)) continue;
+             if (!others && parse(now).cardinality() >= processCpuCount) continue;
+@@ -352,6 +355,18 @@ public final class CameraThreads {
+         }
+     }
+ 
++    private static boolean isStreamWatcher(int tid) {
++        try {
++            return "SpectrumStream"
++                    .equals(
++                            java.nio.file.Files.readString(
++                                            java.nio.file.Path.of("/proc/self/task/" + tid + "/comm"))
++                                    .trim());
++        } catch (Exception e) {
++            return false;
++        }
++    }
++
+     static String toList(BitSet b) {
+         var sb = new StringBuilder();
+         for (int c = b.nextSetBit(0); c >= 0; c = b.nextSetBit(c + 1)) {

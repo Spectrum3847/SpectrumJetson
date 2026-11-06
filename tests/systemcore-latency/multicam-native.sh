@@ -7,9 +7,12 @@
 #     SECS  default 20
 #     RUNS  default "SJ-SW01:swyft SJ-05:thrifty shared:SJ-05:thrifty+SJ-SW01:swyft SJ-05:thrifty+SJ-SW01:swyft
 #           pin:SJ-05:thrifty+SJ-SW01:swyft"
-#           each run: cameras NAME_SUBSTRING:NICKNAME joined by "+" (any number), all others deactivated;
-#           prefix "pin:" also pins each camera thread to its own core (SPECTRUM_PIN_CAMERAS=1, cores PIN_CORES,
-#           default 1-3) with its watcher on the same core (SPECTRUM_STREAM_CPUS=camera); no SCHED_FIFO.
+#           each run: cameras NAME_SUBSTRING:NICKNAME[:key=value,...] joined by "+" (any number; key=value are
+#           pipeline fields, e.g. napaMinTagPx=16), all others deactivated;
+#           prefix "pin:" pins the camera threads (SPECTRUM_PIN_CAMERAS=1, cores PIN_CORES, default 1-3) and puts
+#           each camera's streaming watcher (decode + NAPA + pose + publish) on its own core of PIN_CORES
+#           (SPECTRUM_STREAM_CPUS=spread:PIN_CORES); no SCHED_FIFO. "others:" = pin: plus every other PhotonVision
+#           thread (GC, JIT, NT, web) off those cores (SPECTRUM_PIN_OTHERS=1).
 #           Prefix "shared:" publishes every camera on PhotonVision's own NT connection
 #           (SPECTRUM_NATIVE_NT_CLIENT=0) instead of one client per camera.
 # Needs PhotonVision stopped; changes its settings DB (backup: ~/builder/photon.sqlite.before-multicam, restored
@@ -44,28 +47,35 @@ threads() { sudo -n sh -c "for t in /proc/$1/task/*; do echo \$(basename \$t) \$
 "$L" urb 2
 S="SPECTRUM_IDLE_FPS=0 SPECTRUM_SYSTEMCORE_PROFILE=0 SPECTRUM_JPEG_DECODER=stream SPECTRUM_NAPA_STREAM=1 SPECTRUM_STREAM_DECODER=mjdec SPECTRUM_NATIVE_PUBLISH=1"
 for r in $runs; do
-  pin=0; shared=0; spec=$r
-  while [[ $spec == pin:* || $spec == shared:* ]]; do
+  pin=0; shared=0; others=0; spec=$r
+  while [[ $spec == pin:* || $spec == shared:* || $spec == others:* ]]; do
     [[ $spec == pin:* ]] && { pin=1; spec=${spec#pin:}; }
     [[ $spec == shared:* ]] && { shared=1; spec=${spec#shared:}; }
+    [[ $spec == others:* ]] && { pin=1; others=1; spec=${spec#others:}; }
   done
-  name=$(echo "$r" | tr ':+' '_-')
+  name=$(echo "$r" | tr ':+=,' '_-.~')
   first=1; cams=()
   for c in ${spec//+/ }; do
-    sub=${c%%:*}; nick=${c#*:}; cams+=("$nick")
-    if ((first)); then sudo -n python3 "$HERE/pv-camera-config.py" only "$sub" "$nick" >/dev/null
-    else sudo -n python3 "$HERE/pv-camera-config.py" add "$sub" "$nick" >/dev/null; fi
+    sub=${c%%:*}; rest=${c#*:}; nick=${rest%%:*}; kv=""
+    [[ $rest == *:* ]] && kv=${rest#*:}
+    cams+=("$nick")
+    # shellcheck disable=SC2086
+    if ((first)); then sudo -n python3 "$HERE/pv-camera-config.py" only "$sub" "$nick" ${kv//,/ } >/dev/null
+    else sudo -n python3 "$HERE/pv-camera-config.py" add "$sub" "$nick" ${kv//,/ } >/dev/null; fi
     first=0
   done
   { printf '[Service]\n'; for v in $S; do printf 'Environment=%s\n' "$v"; done
-    ((pin)) && printf 'Environment=SPECTRUM_PIN_CAMERAS=1\nEnvironment=SPECTRUM_PIN_CAMERA_CORES=%s\nEnvironment=SPECTRUM_PIN_SHARED_CORE=-1\nEnvironment=SPECTRUM_STREAM_CPUS=camera\n' "$PIN_CORES"
+    ((pin)) && printf 'Environment=SPECTRUM_PIN_CAMERAS=1\nEnvironment=SPECTRUM_PIN_CAMERA_CORES=%s\nEnvironment=SPECTRUM_PIN_SHARED_CORE=-1\nEnvironment=SPECTRUM_STREAM_CPUS=spread:%s\n' "$PIN_CORES" "$PIN_CORES"
+    ((others)) && printf 'Environment=SPECTRUM_PIN_OTHERS=1\n'
     ((shared)) && printf 'Environment=SPECTRUM_NATIVE_NT_CLIENT=0\n'
   } | sudo -n tee "$DROPIN" >/dev/null
   sudo -n systemctl daemon-reload; sudo -n systemctl start photonvision
   sleep 45
   pid=$(systemctl show -p MainPID --value photonvision)
   threads "$pid" > "$OUT/$name.t0"
-  for n in "${cams[@]}"; do "$PROBE" 127.0.0.1 "$n" "$secs" > "$OUT/$name.$n.probe" 2>&1 & done
+  for n in "${cams[@]}"; do
+    NT_PROBE_CSV=$OUT/$name.$n.csv "$PROBE" 127.0.0.1 "$n" "$secs" > "$OUT/$name.$n.probe" 2>&1 &
+  done
   wait
   threads "$pid" > "$OUT/$name.t1"
   journalctl -u photonvision --since "-$((secs + 50))s" --no-pager |
@@ -78,10 +88,14 @@ for r in $runs; do
       "$OUT/$name.t0" "$OUT/$name.t1" | sort -rn | head -6 | awk '{printf " %s %s%%", $2, $1}'; echo; } > "$OUT/$name.cpu"
 done
 for r in $runs; do
-  name=$(echo "$r" | tr ':+' '_-')
+  name=$(echo "$r" | tr ':+=,' '_-.~')
   echo "== $r: $(cat "$OUT/$name.cpu")"
   for p in "$OUT/$name".*.probe; do
     printf '  %s: ' "$(basename "$p" .probe | sed "s/^$name\.//")"
     grep -E "^rawBytes|^health" "$p" | tr '\n' ' '; echo
   done
+  grep -h "watcher on cores" "$OUT/$name.journal" | sed 's/^/  /'
+  # shellcheck disable=SC2012
+  csvs=$(ls "$OUT/$name".*.csv 2>/dev/null)
+  [[ $(echo "$csvs" | wc -w) -eq 2 ]] && python3 "$HERE/multicam_phase.py" $csvs | sed 's/^/  /'
 done

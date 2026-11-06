@@ -3,6 +3,7 @@
 //   nt_probe [HOST] [CAMERA] [SECS]
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -44,6 +45,10 @@ int main(int argc, char **argv) {
   long n = 0, tagged = 0;
   int64_t end = mono_ns() + (int64_t)secs * 1000000000LL;
   std::string type;
+  // NT_PROBE_CSV=path: one line per result, seq,capture_ns,publish_ns,received_ns,tags (all CLOCK_MONOTONIC / NT
+  // time; the received time is when this 2 ms poll loop saw it)
+  FILE *csv = getenv("NT_PROBE_CSV") ? fopen(getenv("NT_PROBE_CSV"), "w") : nullptr;
+  if (csv) fprintf(csv, "seq,capture_ns,publish_ns,received_ns,tags\n");
   while (mono_ns() < end) {
     for (auto &v : sub.ReadQueue()) {
       int64_t now = mono_ns();
@@ -56,6 +61,8 @@ int main(int argc, char **argv) {
       memcpy(&pub, b.data() + 16, 8);
       int ntg = (int8_t)b[32];
       lat.push_back((now - cap) / 1e6);
+      if (csv)
+        fprintf(csv, "%lld,%lld,%lld,%lld,%d\n", (long long)seq, (long long)cap, (long long)pub, (long long)now, ntg);
       if (ntg > 0) {
         tagged++;
         // first target's detectedCorners: after 2 TargetCorner lists' headers; minAreaRect list at q + 108
@@ -110,5 +117,6 @@ int main(int argc, char **argv) {
     }
     printf("\n");
   }
+  if (csv) fclose(csv);
   return 0;
 }
