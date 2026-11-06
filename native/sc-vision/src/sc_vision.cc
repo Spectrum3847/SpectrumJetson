@@ -411,8 +411,9 @@ int main(int argc, char **argv) {
         napa_to_apriltag_order(dets[i].corners, c);
         pose_ippe_square(&cam, c, tag_size, &poses[i], &alts[i]);
       }
-    // Each tag's own capture time: when the band holding its centre row arrived (the camera streams rows as it
-    // reads them out, so this is the rolling shutter's time for that tag, not the frame's first row).
+    // Diagnostics only (CSV t_tag_row): when the band holding each tag's centre row arrived, i.e. when the tag's
+    // pixels became available. NOT a capture time: the OV9281 is a global-shutter sensor, so every tag in a frame
+    // was exposed at the same moment (the frame's mid-exposure timestamp); only readout/transfer is row by row.
     int64_t tag_t[64];
     for (int i = 0; i < nt; i++) {
       double yc = (dets[i].corners[1] + dets[i].corners[3] + dets[i].corners[5] + dets[i].corners[7]) / 4;
@@ -424,7 +425,7 @@ int main(int argc, char **argv) {
     if (nt) ndet++;
     int64_t t_pub = t_pose;
     if (pub) {
-      nt_pub_result(pub, t_first, dets.data(), have_cam ? poses : nullptr, have_cam ? alts : nullptr, nt, tag_t);
+      nt_pub_result(pub, t_first, dets.data(), have_cam ? poses : nullptr, have_cam ? alts : nullptr, nt);
       t_pub = mono_ns();
     }
     int64_t frame_cpu = cpu_ns() - c_frame0;

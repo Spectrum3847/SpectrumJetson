@@ -56,5 +56,7 @@ process, % of one core (of the 4-core system in brackets).
   sc-vision first-packet time sd 0.037 ms (p1/p99 -0.06/+0.06 ms); PhotonVision's V4L2 timestamp sd 1.26 ms
   (p1/p99 -2.0/+2.0 ms: the 4 ms URB quantization).
 - The camera sends PTS + SCR in every payload header (48 MHz clock; PTS is ~7.8 ms before the first packet's SCR,
-  about one frame period), see "next" in the report: per-row arrival times give rolling-shutter-correct per-tag
-  timestamps.
+  about one frame period); logged in sc-vision's CSV for timestamp work, not used yet.
+- Every tag in a frame gets the frame's one mid-exposure timestamp: the OV9281 is a global-shutter sensor (all rows
+  exposed together; only readout/transfer is row by row). sc-vision's CSV column t_tag_row (when the band with the
+  tag's centre row arrived) is a data-availability diagnostic, not a capture time.

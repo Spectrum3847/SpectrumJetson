@@ -24,7 +24,6 @@
 
 #include <wpi/nt/BooleanTopic.hpp>
 #include <wpi/nt/DoubleTopic.hpp>
-#include <wpi/nt/IntegerArrayTopic.hpp>
 #include <wpi/nt/IntegerTopic.hpp>
 #include <wpi/nt/NetworkTable.hpp>
 #include <wpi/nt/NetworkTableInstance.hpp>
@@ -123,7 +122,6 @@ struct NtPub {
   wpi::nt::NetworkTableInstance inst;
   wpi::nt::RawPublisher raw;
   wpi::nt::IntegerPublisher heartbeat;
-  wpi::nt::IntegerArrayPublisher tag_capture;  // per target (same order): rolling-shutter capture time, ns
   wpi::nt::DoublePublisher latency, yaw, pitch, area, fps;
   wpi::nt::BooleanPublisher has;
   wpi::nt::StringPublisher version;
@@ -150,7 +148,6 @@ NtPub *nt_pub_create(const char *host, const char *camera) {
   for (const auto &s : kSchemas)
     p->inst.AddSchema(std::string("photonstruct:") + s.name + ":" + s.uuid, "photonstructschema", s.schema);
   p->heartbeat = t->GetIntegerTopic("heartbeat").Publish();
-  p->tag_capture = t->GetIntegerArrayTopic("tagCaptureNanos").Publish();
   p->latency = t->GetDoubleTopic("latencyMillis").Publish();
   p->fps = t->GetDoubleTopic("fps").Publish();
   p->yaw = t->GetDoubleTopic("targetYaw").Publish();
@@ -177,7 +174,7 @@ static int64_t mono_ns() {
 }
 
 void nt_pub_result(NtPub *p, int64_t t_first_ns, const napa_detection *d, const tag_pose *best, const tag_pose *alt,
-                   int n, const int64_t *tag_row_ns) {
+                   int n, const int64_t * /*tag_row_ns: not published (global shutter)*/) {
   static const int perm[4] = {1, 0, 3, 2};
   const int64_t now = mono_ns();
   const int64_t capture = t_first_ns - p->mid_offset_ns;
@@ -248,14 +245,6 @@ void nt_pub_result(NtPub *p, int64_t t_first_ns, const napa_detection *d, const 
   }
   k.put<int8_t>(0);  // no multitag result
   p->raw.Set(k.b);
-  // sc-vision extension: each tag's capture time = the frame's capture timestamp + how much later the band with
-  // the tag's centre row arrived than the frame's first packet (the camera streams rows as it reads them out:
-  // ~8 ms from top to bottom at 120 fps). Same clock and constants as captureTimestampNanos.
-  if (tag_row_ns) {
-    std::vector<int64_t> tc((size_t)n);
-    for (int i = 0; i < n; i++) tc[i] = capture + (tag_row_ns[i] - t_first_ns);
-    p->tag_capture.Set(tc);
-  }
   if (p->last_ns) {
     double f = 1e9 / (double)(now - p->last_ns);
     p->fps_ema = p->fps_ema ? 0.95 * p->fps_ema + 0.05 * f : f;
