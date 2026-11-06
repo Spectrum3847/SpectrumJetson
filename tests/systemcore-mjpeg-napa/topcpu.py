@@ -41,5 +41,16 @@ for d, *_x, cpu in rows:
 ncpu = len(glob.glob("/sys/devices/system/cpu/cpu[0-9]*"))
 print(f"{secs:.0f} s; ALL threads {100 * sum(percore.values()) / 1e9 / secs / ncpu:.1f}% of {ncpu} cores; per core (by last CPU, threads can move): " +
       ", ".join(f"cpu{c} {100 * v / 1e9 / secs:.1f}%" for c, v in sorted(percore.items())))
+procs = {}
+for d, pid, tid, comm, cpu in rows:
+    procs[pid] = procs.get(pid, 0) + d
+names = {}
+for pid in procs:
+    try:
+        names[pid] = open(f"/proc/{pid}/comm").read().strip()
+    except OSError:
+        names[pid] = "?"
+print("per process (all threads, % of one core): " +
+      ", ".join(f"{names[p]}[{p}] {100 * v / 1e9 / secs:.1f}%" for p, v in sorted(procs.items(), key=lambda x: -x[1])[:5]))
 for d, pid, tid, comm, cpu in rows[:n]:
     print(f"  {100 * d / 1e9 / secs:6.1f}%  pid {pid:>6} tid {tid:>6} cpu{cpu}  {comm}")
