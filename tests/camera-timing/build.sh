@@ -10,4 +10,5 @@ CC=$WPI/bin/aarch64-systemcore2027-linux-gnu-gcc
 [[ -f $CC.exe ]] && CC=$CC.exe
 mkdir -p "$OUT"
 "$CC" -O2 -mcpu=cortex-a76 -Wall -Wextra -std=gnu11 "$HERE/uvc_timing.c" "$HERE/uvc_usb.c" -o "$OUT/uvc_timing" -lpthread
-echo "built $OUT/uvc_timing"
+"$CC" -O2 -mcpu=cortex-a76 -Wall -Wextra -std=gnu11 "$HERE/v4l2_ts.c" -o "$OUT/v4l2_ts" -lpthread
+echo "built $OUT/uvc_timing $OUT/v4l2_ts (SystemCore/Pi 5; on a Jetson build natively: gcc -O2 -std=gnu11 v4l2_ts.c -o v4l2_ts -lpthread)"

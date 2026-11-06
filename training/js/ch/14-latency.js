@@ -78,7 +78,7 @@ Site.chapter('latency', (root) => {
   {
     const S = [
       { n: 'Exposure', ms: 5, k: 'm', d: 'The sensor collects light for 5 ms (our setting: exposure 50, in 100 µs units). Every pixel starts and stops together (global shutter). The frame\'s timestamp points at the middle of this bar.' },
-      { n: 'Before sending', ms: 1.2, k: 'u', d: 'Any time between the end of the exposure and the camera\'s first USB packet. This delay is inside the camera and not measured yet (SPECTRUM_CAMERA_DELAY_US). Bar width is a placeholder.' },
+      { n: 'Before sending', ms: 0.4, k: 'm', d: 'The time between the end of the exposure and the camera\'s first USB packet, inside the camera. Measured with a blinking LED: 0.41 ms (SPECTRUM_CAMERA_DELAY_US is set from it).' },
       { n: 'Camera sends', ms: 8.1, k: 'm', d: 'The slowest step, and it\'s the camera: it streams each JPEG (34–36 KB here) out over about one frame period while its sensor reads out. Timed with the camera driver\'s own log: 8.1 ms from the first USB packet to the last, on every camera. At our USB cap the frame could cross in 3.4 ms, so the cap costs no latency. The frame\'s timestamp comes from the camera\'s own clock, at about the start of this bar.' },
       { n: 'To the decoder', ms: 0.15, k: 'm', d: 'From the last packet to the start of decoding: 0.15 ms (measured). Since then, our driver also looks for finished packets every 2 ms instead of every 4 (urb_packets=16), which took another 1.2 ms off: 12.98 → 11.76 ms from capture to result with 5 cameras.' },
       { n: 'Decode', ms: 2.8, k: 'm', d: 'The JPEG is turned back into a 1280×800 gray image: about 2.8 ms on the Jetson\'s NVJPG hardware decoders, with 4–5 cameras sharing the two of them. It was 8.9 ms before our fix.' },

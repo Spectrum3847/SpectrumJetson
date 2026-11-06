@@ -1630,11 +1630,18 @@ inside "N: name". Suite: 5 tests, 1.5 min, all passing.
 - **After:** `hwtimestamps=1` makes uvcvideo convert the camera's own PTS (in its clock, through
   the SCR it sends) to the host clock. The Thriftiest Cam sends both. On the stamp's meaning: it's
   0.74 ms before the first-packet stamp on average, so it marks roughly when the camera starts
-  sending, not the start of exposure. `photonvision-13`'s half-exposure correction is unchanged,
-  and the camera's delay from the end of exposure to sending is set to 2500 µs by default
-  (`SPECTRUM_CAMERA_DELAY_US`, `09-robot-tuning.sh` step 17: Team 100's rotating-disc figure for
-  the Thriftiest Cam in MJPEG), pending our own robot spin test. The TXMAN1 rotation replay
-  (tests/field-replay/RESULTS.md) can't separate it from the robot's log latency.
+  sending, not the start of exposure. `photonvision-13`'s half-exposure correction is unchanged.
+- **Camera delay, measured (2026-11-05/06, tests/camera-timing).** An LED test (an LED pulsed 0.3 ms at
+  swept times, the Thriftiest watching it) put the camera's **PTS 0.045 ± 0.02 ms after the end of
+  exposure**, and the first USB data packet 0.41 ± 0.05 ms after it.
+  - uvcvideo's conversion of the PTS lands 0.135 ms after it (measured on the SystemCore's uvcvideo 6.12
+    with the UVC metadata node). So end of exposure -> camera-clock timestamp is **0.18 ms**.
+  - `SPECTRUM_CAMERA_DELAY_US` is 180 µs by default (`09-robot-tuning.sh` step 17). It was 2500, Team
+    100's figure, which made every timestamp ~2.3 ms early. `health-check.sh` warns on 2500.
+  - The Jetson's own uvcvideo isn't LED-tested yet: tests/camera-timing/README.md, "LED test on a Jetson".
+  - What else from the SystemCore work applies to the Jetson: [SYSTEMCORE-FINDINGS.md](SYSTEMCORE-FINDINGS.md).
+  - The TXMAN1 rotation replay (tests/field-replay/RESULTS.md) can't separate the delay from the robot's
+    log latency.
 - **Measured** (`tests/uvc-timestamps/run.sh`: v4l2-ctl, PhotonVision stopped, one or all
   cameras):
 
@@ -2940,7 +2947,7 @@ p50 from mid-exposure, 1 camera, GPU detector:
 
 | Stage | ms |
 |---|---|
-| Mid-exposure to first USB packet | ~4.5 (2.5 is half the exposure; 2.5 is the assumed camera delay) |
+| Mid-exposure to first USB packet | ~4.5 (2.5 is half the exposure; 2.5 was the assumed camera delay; LED-measured since: 0.41, so ~2.9) |
 | Frame over USB | 8.1 (paced by the sensor readout; bytes arrive evenly) |
 | DQBUF and cscore | 0.1 |
 | NVJPG decode | 2.64 |
@@ -2998,7 +3005,7 @@ p50 from mid-exposure, 1 camera, GPU detector:
   1. Stream decoder, -2.5 ms measured
   2. Exposure, -2.25 ms
   3. `urb_packets=4`, done
-  4. Measure the camera delay (accuracy)
+  4. Measure the camera delay (accuracy): done 2026-11-05, 0.41 ms to the first packet (LED test), default 180 us
 
   With 1 and 2, the estimate is about 11.8 ms.
 

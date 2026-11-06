@@ -145,12 +145,12 @@ jpeg decoder 10 s: nvjpg 362.13 frames/s (2.58713 ms), libjpeg-turbo 0 frames/s;
           <div><small>Driver stamp is late by</small><b id="l-late">2.5 ms + ?</b></div>
           <div><small>Jetson subtracts</small><b id="l-sub">2.5 ms</b></div>
         </div>
-        <p class="hint">The striped block is the camera's own delay between the end of the exposure and its first packet. It's still to be measured on the robot, so for now it's set to 0. The packets then stream for 8.1 ms, as measured.</p>
+        <p class="hint">The striped block is the camera's own delay between the end of the exposure and its first packet. An LED test measured it in 2026: 0.4 ms (the camera's own timestamp is 0.05 ms after the end of the exposure). The packets then stream for 8.1 ms, as measured.</p>
       </div>
     </div>
   </div>
 
-  <div class="callout spectrum full"><h5>What we did</h5><p>Our patch <code>photonvision-13</code> subtracts half the exposure from every frame's timestamp, so it marks the middle of the exposure; robot code shouldn't subtract anything itself. <span class="full">The frames are stamped by the camera's own clock: the USB video standard (UVC) lets a camera send its clock with each frame, and our driver setting <code>hwtimestamps=1</code> uses it. </span>The camera's internal delay before it starts sending is still to be measured on the robot, by spinning in front of a tag.</p></div>
+  <div class="callout spectrum full"><h5>What we did</h5><p>Our patch <code>photonvision-13</code> subtracts half the exposure from every frame's timestamp, so it marks the middle of the exposure; robot code shouldn't subtract anything itself. <span class="full">The frames are stamped by the camera's own clock: the USB video standard (UVC) lets a camera send its clock with each frame, and our driver setting <code>hwtimestamps=1</code> uses it. </span>The camera's internal delay before it starts sending was measured with a blinking LED: about 0.4 ms.</p></div>
 
   <details class="deep"><summary>The code that moves the timestamp</summary><div>
     <p>From <code>photonvision-13-mid-exposure-timestamps.patch</code>, in <code>USBFrameProvider</code>. The exposure comes from the camera setting, which is in 100 µs units (50 → 5,000 µs). With auto exposure on, the exposure time is unknown, so only the camera delay is subtracted.</p>
@@ -320,7 +320,7 @@ jpeg decoder 10 s: nvjpg 362.13 frames/s (2.58713 ms), libjpeg-turbo 0 frames/s;
       <li>Latency is the delay between capture and the answer. Ours is about 15 ms.</li>
       <li>On a moving robot, pretending an answer is "now" costs centimeters: 4 m/s × 15 ms = 6 cm, and spinning is worse.</li>
       <li>The fix is a timestamp plus <code>addVisionMeasurement(pose, timestamp)</code>.</li>
-      <li>Our timestamps come from the camera's own clock and mark the middle of the exposure (<code>photonvision-13</code>). The camera's own delay before sending is still to be measured.</li>
+      <li>Our timestamps come from the camera's own clock and mark the middle of the exposure (<code>photonvision-13</code>). The camera's own delay before sending is about 0.4 ms (LED test).</li>
       <li class="full">Most of the ~14.5 ms is the camera sending the frame (8.1 ms), not USB or PhotonVision.</li>
       <li>Time sync puts Jetson timestamps on the robot's clock.</li>
       <li class="full">Measured in robot code's loop, latency adds half a loop period: 30–31 ms (p50) with a 20 ms loop, 25 ms with 10 ms.</li>

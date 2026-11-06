@@ -6,8 +6,9 @@ capture (ktrace.py) per frame, on CLOCK_MONOTONIC, and print the stage table.
 
 Stage times are p50/p95/p99 ms. The reference point is mid-exposure: the frame's published
 timestamp (the driver's hardware timestamp less half the exposure and SPECTRUM_CAMERA_DELAY_US),
-exactly what robot code fuses at. The camera delay is an assumed constant (Team 100's figure),
-so 'mid-exposure -> first USB packet' is only as right as that constant.
+exactly what robot code fuses at. The camera delay is a constant (it was Team 100's 2.5 ms; LED-measured
+2026-11-05: 0.18 ms to the camera-clock timestamp, tests/camera-timing), so 'mid-exposure -> first USB packet'
+is only as right as the constant the run used (--delay-ms).
 """
 import argparse, bisect, csv, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

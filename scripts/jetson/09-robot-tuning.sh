@@ -65,16 +65,19 @@
 #                               EMC dynamic, CPU idle states on (all cores stay online).
 #                               `sudo spectrum-clocks mode full` keeps them full, `mode shallow`
 #                               never goes deep; `status`.
-#  17. Camera delay           - SPECTRUM_CAMERA_DELAY_US=2500 in PhotonVision's environment: each
+#  17. Camera delay           - SPECTRUM_CAMERA_DELAY_US=180 in PhotonVision's environment: each
 #                               frame's timestamp moves this much earlier on top of half the
-#                               exposure (the camera's own delay before it sends). 2.5 ms is Team
-#                               100's rotating-disc measurement of the Thriftiest Cam in MJPEG
-#                               (team100/all26 config_thrifty_mjpeg.py extra_delay_ms), a starting
-#                               value until our own spin test. CAMERA_DELAY_US=N overrides it.
+#                               exposure: from the end of exposure to the frame's timestamp. With
+#                               uvcvideo hwtimestamps=1 the timestamp is the camera's PTS, which an
+#                               LED test put 0.045 ms after the end of exposure (Thriftiest), and
+#                               uvcvideo's conversion lands 0.135 ms after the PTS (measured on the
+#                               SystemCore's uvcvideo): 0.18 ms. Was 2500 (Team 100's figure).
+#                               The Jetson itself isn't LED-tested yet: tests/camera-timing
+#                               (LED test). CAMERA_DELAY_US=N overrides it.
 #                               Applies at PhotonVision's next start (no restart here).
 #
 # Usage: [FAN=quiet|full|off] [RT=on|off] [CAMERA_DELAY_US=N] 09-robot-tuning.sh [--undo]
-#        (no FAN/RT: keep the saved choice; no CAMERA_DELAY_US: 2500)
+#        (no FAN/RT: keep the saved choice; no CAMERA_DELAY_US: 180)
 set -euo pipefail
 # Writes on the read-only system (ro-root on) land in RAM and vanish at the next boot.
 [[ $(findmnt -n -o FSTYPE /) != overlay ]] || { echo "The system partition is read-only (ro-root on): scripts/jetson/ro-root.sh off first." >&2; exit 1; }
@@ -93,7 +96,7 @@ PV_RESTART_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-restart.c
 PV_OPENCV_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-opencv.conf
 PV_CLOCKS_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-clocks.conf
 PV_DELAY_CONF=/etc/systemd/system/photonvision.service.d/90-spectrum-camera-delay.conf
-CAMERA_DELAY_US=${CAMERA_DELAY_US:-2500}
+CAMERA_DELAY_US=${CAMERA_DELAY_US:-180}
 [[ $CAMERA_DELAY_US =~ ^[0-9]+$ ]] || { echo "CAMERA_DELAY_US must be whole microseconds" >&2; exit 1; }
 CLOCKS_HELPER=/usr/local/bin/spectrum-clocks
 USB_TMPFILES=/etc/tmpfiles.d/90-spectrum-usb.conf
@@ -449,11 +452,12 @@ fi
 
 echo "==> 17. Camera delay: SPECTRUM_CAMERA_DELAY_US=$CAMERA_DELAY_US"
 sudo tee "$PV_DELAY_CONF" >/dev/null <<CONF
-# SpectrumJetson: frame timestamps move this much earlier on top of half the exposure: the
-# camera's own delay from the end of exposure to sending the frame (USBFrameProvider).
-# 2500 = Team 100's rotating-disc measurement of the Thriftiest Cam in MJPEG (team100/all26,
-# raspberry_pi/app/camera/config/config_thrifty_mjpeg.py extra_delay_ms = 2.5), a starting
-# value until our own spin test (tests/field-replay/RESULTS.md "Camera delay from rotation").
+# SpectrumJetson: frame timestamps move this much earlier on top of half the exposure: from the
+# end of exposure to the frame's timestamp (USBFrameProvider). With uvcvideo hwtimestamps=1 the
+# timestamp is the camera's PTS converted by uvcvideo: PTS = end of exposure + 0.045 ms (LED test,
+# Thriftiest, 2026-11-05), conversion + 0.135 ms (SystemCore uvcvideo, tests/camera-timing
+# ts_vs_pts.py) = 180 us. Was 2500 (Team 100's figure) until 2026-11-06. Not LED-tested on a
+# Jetson yet (tests/camera-timing/README.md, "LED test on a Jetson").
 # Override: CAMERA_DELAY_US=N scripts/jetson/09-robot-tuning.sh. Applies at the next start.
 [Service]
 Environment=SPECTRUM_CAMERA_DELAY_US=$CAMERA_DELAY_US

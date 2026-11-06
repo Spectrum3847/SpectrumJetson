@@ -64,7 +64,7 @@ function journey(root) {
   // step: boxes lit, wires (in order) the token rides, slots filled, token label, clock, caption
   const STEPS = [
     { b: ['cam'], w: [], s: [], tok: '', t: '0 ms', note: 'mid-exposure: the timestamp', cap: 'global shutter: all pixels at once' },
-    { b: ['cam', 'usb'], w: ['camusb'], s: [], tok: 'JPEG', t: '≈ 10.6 ms + ?', note: '? = camera delay before sending, not measured yet', cap: 'streamed over 8.1 ms in 1280-byte slices' },
+    { b: ['cam', 'usb'], w: ['camusb'], s: [], tok: 'JPEG', t: '≈ 11.0 ms', note: 'includes the camera\'s 0.4 ms before sending (LED-measured)', cap: 'streamed over 8.1 ms in 1280-byte slices' },
     { b: ['usb', 'ram'], w: ['usbs1'], s: ['s1'], tok: 'JPEG', t: '≈ 10.6 ms + ?', note: 'ms: DMA, no CPU', cap: 'USB controller → RAM by DMA' },
     { b: ['cpu', 'ram'], w: ['cpus1'], s: ['s1'], tok: 'ready', t: '≈ 10.8 ms + ?', note: 'ms: uvcvideo marks it done', cap: 'the kernel driver runs on the CPU' },
     { b: ['cpu'], w: ['cpus1'], s: ['s1'], tok: 'grab', t: '≈ 10.8 ms + ?', note: 'ms: PhotonVision has it', cap: 'raw JPEG handed over, not decoded' },
@@ -110,7 +110,7 @@ function latency(root) {
   let usb = 'ours', sel = null;
   const SEG = () => [
     ['exp', 'half exposure', 2.5, 'calc', '#c4b5fd', '<b>Half the exposure, 2.5 ms (from our 5 ms setting).</b> The timestamp marks mid-exposure, so the second half of the exposure already counts as delay.'],
-    ['cam', 'camera', 1.2, 'unk', '', '<b>Camera delay before its first USB packet: not measured yet.</b> Any time between the end of the exposure and the camera starting to send. We plan to measure it on the robot by spinning in front of a tag (drawn here at an arbitrary width, and left out of the total).'],
+    ['cam', 'camera', 1.2, 'unk', '', '<b>Camera delay before its first USB packet: 0.4 ms, measured with an LED.</b> Any time between the end of the exposure and the camera starting to send. We plan to measure it on the robot by spinning in front of a tag (drawn here at an arbitrary width, and left out of the total).'],
     ['usb', 'camera sends', 8.1, usb === 'ours' ? '' : 'est', '#fbbf24', usb === 'ours' ? '<b>The camera sending the frame, 8.1 ms</b> (measured with the driver\'s own log, first packet to last, on every camera). The camera streams the JPEG out over about one frame period while its sensor reads out. At our 1280-byte cap a 34 KB frame could cross in 3.4 ms, so the cap costs no latency.' : '<b>The same ≈ 8.1 ms.</b> We first estimated the stock driver\'s bigger booking (3060 bytes per 125 µs) would save about 2 ms here. Measured with 4 capped cameras, the cap costs nothing: the camera, not USB, sets the pace. And with the stock driver only 2 cameras fit.'],
     ['wait', '', 0.15, '', '#86efac', '<b>Last packet to decode start, 0.15 ms</b> (measured, from the same kernel log).'],
     ['dec', 'decode', 2.8, '', '#a3e635', '<b>JPEG decode on NVJPG, ~2.8 ms</b> (measured, 5 cameras sharing the 2 engines). Almost no CPU. The decoder also leaves the gray frame in a GPU buffer, so the detector needs no upload.'],

@@ -12,7 +12,7 @@ Measured 2026-11-02 on the bench Jetson (Orin Nano Super, clocks `full`, stock c
 
 - Cameras: two Thriftiest Cams, mono sensor, MJPEG 1280x800 at 122 fps.
 - Exposure: 50, which is 5.0 ms.
-- `SPECTRUM_CAMERA_DELAY_US=2500`.
+- `SPECTRUM_CAMERA_DELAY_US=2500` (the assumption then; LED-measured since: 180 to the camera-clock timestamp, 0.41 ms to the first packet, tests/camera-timing).
 - uvcvideo: `hwtimestamps=1`.
 - PhotonVision: AprilTagCuda with the GPU detector, or with "Tags on CPU (NAPA)".
 - **There were no tags on the bench**, so detection and pose solve are no-tag times.
@@ -34,7 +34,9 @@ Frames are joined on the hardware timestamp: the dequeued buffer's timestamp equ
 raw time in PhotonVision, and NT time equals `CLOCK_MONOTONIC` on WPILib 2027 (offset < 1 us).
 "Mid-exposure" is the time PhotonVision publishes, which is what robot code fuses at. It equals
 the hardware timestamp minus half the exposure (2.5 ms) minus the camera delay (2.5 ms). The
-camera delay is Team 100's figure and we haven't measured it yet. The first packet's time is
+camera delay was Team 100's figure here. Since measured with an LED (tests/camera-timing,
+2026-11-05): end of exposure -> first packet 0.41 ms, so "mid-exposure -> first USB packet" below is ~2.1 ms
+high. The first packet's time is
 only known to within one URB.
 
 ## Results: p50 / p95 / p99 ms, 20 s per condition (~2,400 frames per camera), urb_packets=4
@@ -270,9 +272,9 @@ PhotonVision A/B, 2 cameras, NVJPG, 16 then 4, 2 rounds:
    tag-decode check first.
 3. **`urb_packets=4`** (done, the new default): -0.5 to -0.7 ms at DQBUF, about -0.3 ms of tail
    with the stream decoder.
-4. **Measure the camera delay.** It is the largest uncertainty in "mid-exposure to first packet".
-   This is about accuracy, not latency.
+4. **Measure the camera delay** (done 2026-11-05, LED test, tests/camera-timing: 0.41 ms to the
+   first packet, 0.18 ms to the camera-clock timestamp). This is about accuracy, not latency.
 5. Detection, pose and NT are already small: 1.0 ms or less together.
 
 With 1 to 3, the estimate is 14.0 - 2.25, about **11.8 ms**. Most of what's left is the sensor
-readout over USB (8.1 ms) and the assumed camera delay (2.5 ms).
+readout over USB (8.1 ms) and the camera delay (assumed 2.5 ms here; measured 0.41 ms since, so ~9.7 ms).

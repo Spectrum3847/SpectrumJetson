@@ -358,7 +358,7 @@ Site.chapter('photonvision', (root) => {
     s += `<line x1="${tFirst}" y1="${y - 18}" x2="${tFirst}" y2="${y + bh + 6}" stroke="#1f1b23" stroke-width="2"/><text x="${tFirst}" y="${y - 24}" font-size="12" font-weight="600" text-anchor="middle" fill="#1f1b23">driver stamps: first packet</text>`;
     s += `<line x1="${tMid}" y1="${y - 4}" x2="${tMid}" y2="${y + bh + 42}" stroke="#16a34a" stroke-width="3"/><text x="${tMid - 4}" y="${y + bh + 58}" font-size="13" font-weight="700" fill="#16a34a">new stamp: mid-exposure</text>`;
     s += `<path d="M${tFirst} ${y + bh + 20} H ${tMid + 8}" stroke="#dc2626" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#pv-ar3)"/><text x="${tMid + 14}" y="${y + bh + 15}" font-size="11.5" fill="#dc2626">subtract half the exposure</text>`;
-    s += `<text x="${x0}" y="190" font-size="11.5" fill="#635a72">The camera's own delay is still to be measured on the robot.</text>`;
+    s += `<text x="${x0}" y="190" font-size="11.5" fill="#635a72">The camera's own delay is about 0.4 ms (LED test).</text>`;
     const svg = $('#pv-c13'); svg.setAttribute('viewBox', '0 0 440 200'); svg.innerHTML = s;
   }
   // 29: recovery timeline
