@@ -278,3 +278,19 @@ in line with sc-vision's ~27% lit. That run started without the AOT cache: reins
 mtime (the cache stamp and the JVM's own check include it). The installer now leaves identical files untouched;
 the cache was rebuilt (28 s training) and its stamp matches. Pi left: our uvcvideo loaded, PV stopped (not enabled
 at boot, as before), limelight_visionserver stopped (it starts at boot), DB restored from the run's backup.
+
+## Frame policy and the two-camera Thriftiest offset (BUILDER2, next session)
+
+- Half scale: fixed (it no longer costs: NAPA's reduced min tag keeps the full-scale sampling stride, cheap upscale)
+  but live it saves at most ~1 point of a core, so the native backend ignores `scale` unless SPECTRUM_POLICY_SCALE
+  is set: the policy is skipping only. Details and numbers: docs/FRAME-POLICY.md (2026-11-07).
+- The +0.23 ms Thriftiest capture->publish (two cameras, dark) does not reproduce. Two cameras, LIT, 12 s each,
+  with an xhci trace (`xhci-trace.sh`) and tsresid.py (published capture vs the frame's first USB packet):
+
+| | Thriftiest capture->publish p50 | Thriftiest first packet - capture p50 | Swyft capture->publish p50 | Swyft first packet - capture p50 |
+|---|---|---|---|---|
+| fast path | 8.412 ms | 0.858 ms | 8.538 ms | 0.808 ms |
+| native | 8.436 ms | 0.895 ms | 8.542 ms | 0.806 ms |
+
+  Differences of 0.02-0.04 ms, inside the trace's +-0.125 ms URB uncertainty; both stamp mid-exposure the same way.
+  The dark-run 0.23 ms was most likely run-to-run variation; no change made.
