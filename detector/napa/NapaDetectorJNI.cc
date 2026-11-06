@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <deque>
 #include <cmath>
 #include <chrono>
 #include <cstdio>
@@ -216,6 +217,16 @@ struct StreamSink {
   int width = 0, height = 0;
   std::atomic<int64_t> seq{0};
   std::atomic<long> published{0};
+  // Rewind: the results published natively, until Java drains them (want_log: Java drained within the last second)
+  struct LogItem {
+    int64_t t_ns;                 // NT time it was published
+    std::vector<uint8_t> packet;  // the PhotonPipelineResult as sent
+    std::vector<double> quality;  // its tagQuality ([] without tags)
+  };
+  std::mutex log_mu;
+  std::deque<LogItem> log_q;
+  std::atomic<bool> want_log{false};
+  std::chrono::steady_clock::time_point log_last{};
   std::atomic<int64_t> lat_sum_ns{0}, lat_n{0};  // capture (mid-exposure) -> publish, since nativeLatencyMs
   spectrum_band_sink c{};
   // Frame policy (docs/FRAME-POLICY.md; setNativePolicy): process 1 frame in `every` (the others aren't decoded),
@@ -318,8 +329,8 @@ struct StreamSink {
     if (by_cam) cam_stamped++;
     const int64_t this_seq = ++seq;
     // photonvision-61's tagQuality for these tags, with this result's sequence ID, just before the result
-    if (p.quality_pub && nt->set_double_array && n > 0) {
-      std::vector<double> q;
+    std::vector<double> q;
+    if ((p.quality_pub && nt->set_double_array) || want_log.load()) {
       q.reserve(2 + 6 * n);
       q.push_back(static_cast<double>(this_seq));
       q.push_back(n);
@@ -332,13 +343,24 @@ struct StreamSink {
         if (p.have_cam) pose_tag_quality(&p.cam, c, p.tag_size, &best[i], &alt[i], tq);
         q.insert(q.end(), {static_cast<double>(ids[i]), tags[i].margin, edge, tq[0], tq[1], tq[2]});
       }
-      nt->set_double_array(p.quality_pub, 0, q.data(), q.size());
+      if (n > 0 && p.quality_pub && nt->set_double_array)
+        nt->set_double_array(p.quality_pub, 0, q.data(), q.size());
     }
     pvpack::pack_result(buf, this_seq, capture + p.nt_offset_ns, now + p.nt_offset_ns, p.since_pong,
                         p.have_cam ? &p.cam : nullptr, width, height, n, ids, corners, p.have_cam ? best : nullptr,
                         p.have_cam ? alt : nullptr, nullptr);
     nt->set_raw(p.pub, 0, buf.data(), buf.size());
     nt->flush(p.inst);
+    if (want_log.load()) {  // for Rewind's vision log (drainNativeResults), while Java asks for them
+      std::lock_guard<std::mutex> l(log_mu);
+      if (std::chrono::steady_clock::now() - log_last > std::chrono::seconds(1)) {
+        want_log = false;  // Java stopped asking (Rewind not recording)
+        log_q.clear();
+      } else {
+        if (log_q.size() >= 256) log_q.pop_front();
+        log_q.push_back(LogItem{now + p.nt_offset_ns, buf, n > 0 ? q : std::vector<double>{}});
+      }
+    }
     lat_sum_ns += MonoNs() - capture;
     lat_n++;
     published++;
@@ -615,6 +637,40 @@ JNIEXPORT void JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setNativeQualit
   if (!n || !n->sink) return;
   std::lock_guard<std::mutex> l(n->sink->cfg_mu);
   n->sink->pub.quality_pub = static_cast<unsigned>(pub);
+}
+
+// sc/mjpeg-napa: the results this camera's native publish sent since the last call, for Rewind's vision log. Each
+// element: [8 bytes publish time (NT ns, little-endian)][4 bytes quality count q][q doubles][the result packet].
+// Calling it turns the collection on; it stops 1 s after the last call. Null when there's nothing.
+JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_drainNativeResults(JNIEnv *env, jclass,
+                                                                                            jlong h) {
+  auto *n = Handle(h);
+  if (!n || !n->sink) return nullptr;
+  auto *s = n->sink.get();
+  std::deque<StreamSink::LogItem> items;
+  {
+    std::lock_guard<std::mutex> l(s->log_mu);
+    s->log_last = std::chrono::steady_clock::now();
+    s->want_log = true;
+    items.swap(s->log_q);
+  }
+  if (items.empty()) return nullptr;
+  jclass cls = env->FindClass("[B");
+  jobjectArray arr = env->NewObjectArray(static_cast<jsize>(items.size()), cls, nullptr);
+  jsize k = 0;
+  for (const auto &it : items) {
+    const uint32_t nq = static_cast<uint32_t>(it.quality.size());
+    std::vector<uint8_t> b(12 + 8 * nq + it.packet.size());
+    std::memcpy(b.data(), &it.t_ns, 8);
+    std::memcpy(b.data() + 8, &nq, 4);
+    if (nq) std::memcpy(b.data() + 12, it.quality.data(), 8 * nq);
+    std::memcpy(b.data() + 12 + 8 * nq, it.packet.data(), it.packet.size());
+    jbyteArray ba = env->NewByteArray(static_cast<jsize>(b.size()));
+    env->SetByteArrayRegion(ba, 0, static_cast<jsize>(b.size()), reinterpret_cast<const jbyte *>(b.data()));
+    env->SetObjectArrayElement(arr, k++, ba);
+    env->DeleteLocalRef(ba);
+  }
+  return arr;
 }
 
 // sc/mjpeg-napa frame policy for this camera's streamed frames (docs/FRAME-POLICY.md): decode scale 1, 2 or 4
