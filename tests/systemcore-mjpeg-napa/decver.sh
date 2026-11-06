@@ -5,7 +5,7 @@
 set -uo pipefail
 B=${SCMN_BIN:-$HOME/bench/bin}
 D=$HOME/bench
-SESS=${SESS:-"data/live2 data/synth422 data/synth420 data/synth444norst results/sweep1/sessions/e2_g128 results/sweep1/sessions/e50_g32 results/sweep1/sessions/e5_g32"}
+SESS=${SESS:-"data/live2 data/synth422 data/cd-ctrl data/sweep/e2_g128 data/sweep/e50_g32 data/sweep/e5_g32 data/txman1/Q24"}
 exec 9>/tmp/camera.lock
 flock -w 600 9 || { echo "camera lock busy" >&2; exit 1; }
 for s in $SESS; do
@@ -20,5 +20,5 @@ for s in $SESS; do
 done
 last=${*: -1}
 SCMN_BUILDER_LIB=$last "$B/scmn_bench" fuzz "$D/data/live2" --dec builder --max-frames 240 2>&1 | grep -E "FUZZ|CRASH|HANG"
-SCMN_BUILDER_LIB=$last "$B/scmn_bench" fused "$D/results/sweep1/sessions/e2_g128" --dec builder --chunk 3072 --cpu 3 2>&1 |
+SCMN_BUILDER_LIB=$last "$B/scmn_bench" fused "$D/data/sweep/e2_g128" --dec builder --chunk 3072 --cpu 3 2>&1 |
   grep -E "scvision|frames differ|FUSED" | sed 's/(mean.*n [0-9]*)//'
