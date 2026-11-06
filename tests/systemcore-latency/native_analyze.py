@@ -46,6 +46,7 @@ def main():
         ('pose -> published', d('t_pose', 't_pub')),
         ('TAIL last packet -> tags', d('t_eof_reap', 't_det')),
         ('TAIL last packet -> pose', d('t_eof_reap', 't_pose')),
+        ('first USB packet -> pose', d('t_first', 't_pose')),
         ('TOTAL mid-exposure -> pose (est.)', d('t_first', 't_pose', off)),
         ('TOTAL mid-exposure -> published (est.)', d('t_first', 't_pub', off)),
     ]

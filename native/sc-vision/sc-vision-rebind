@@ -1,0 +1,20 @@
+#!/bin/bash
+# Give the Thriftiest Cam (or VID:PID $1, default 1bcf:28c5) back to uvcvideo if sc-vision left it without a driver
+# (it was killed with SIGKILL or crashed before uvc_close()). sc-vision-native.service runs this at stop
+# (ExecStopPost). No USB reset: it only binds the interfaces. Safe to run any time.
+set -uo pipefail
+want=${1:-1bcf:28c5}
+for d in /sys/bus/usb/devices/*; do
+  [[ -f $d/idVendor && -f $d/idProduct ]] || continue
+  [[ "$(cat "$d/idVendor"):$(cat "$d/idProduct")" == "$want" ]] || continue
+  dev=$(basename "$d")
+  vc=$d/$dev:1.0
+  [[ -d $vc ]] || continue
+  if [[ -e $vc/driver && -d $vc/video4linux ]]; then
+    echo "$dev: uvcvideo has it"
+    continue
+  fi
+  # Bound without a video node (a failed probe) counts as unbound.
+  [[ -e $vc/driver ]] && echo "$dev:1.0" > /sys/bus/usb/drivers/uvcvideo/unbind
+  echo "$dev:1.0" > /sys/bus/usb/drivers/uvcvideo/bind && echo "$dev: given back to uvcvideo"
+done

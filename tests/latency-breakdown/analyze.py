@@ -27,6 +27,8 @@ STAGES = [  # (label, from, to)
     ('NT publish + flush', 'pipe', 'nt'),
     ('TAIL last packet -> tags detected', 'eof', 'det1'),
     ('TOTAL mid-exposure -> pose ready', 'mid', 'pose'),
+    ('first USB packet -> pose ready', 'first', 'pose'),
+    ('V4L2 timestamp -> pose ready (upstream PV latency)', 'hw', 'pose'),
     ('TOTAL mid-exposure -> NT flushed', 'mid', 'nt'),
     ('(hw timestamp -> first USB packet)', 'hw', 'first'),
 ]

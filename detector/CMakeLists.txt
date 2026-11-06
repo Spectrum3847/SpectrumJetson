@@ -91,7 +91,7 @@ find_package(JPEG REQUIRED)  # libjpeg-turbo (libjpeg-turbo8-dev), for decodeMjp
 # The streaming decoder (SPECTRUM_JPEG_DECODER=stream) is its own library, libspectrum-stream.so, shared
 # with the CPU-only NAPA library (streaming NAPA hands it band sinks; one set of watcher threads per
 # process). Only its spectrum_stream_* C API is exported. Installed next to the detector, in /usr/lib.
-add_library(spectrum_stream SHARED stream_decode.cc)
+add_library(spectrum_stream SHARED stream_decode.cc ../native/sc-vision/src/mjdec.c)
 set_target_properties(spectrum_stream PROPERTIES OUTPUT_NAME spectrum-stream CXX_VISIBILITY_PRESET hidden)
 target_link_libraries(spectrum_stream PRIVATE JPEG::JPEG Threads::Threads)
 target_link_options(spectrum_stream PRIVATE -Wl,--no-undefined)

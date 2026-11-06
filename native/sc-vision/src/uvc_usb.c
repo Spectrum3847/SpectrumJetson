@@ -94,6 +94,53 @@ int uvc_v4l2_set(int vid, int pid, uint32_t id, int value) {
   return rc;
 }
 
+// Whether any process has one of the camera's /dev/videoN nodes open (scans /proc/*/fd). who: "pid comm".
+static int video_node_in_use(const char *sys, char *who, size_t whon) {
+  char vdir[700], nodes[8][64];
+  int nn = 0;
+  snprintf(vdir, sizeof vdir, "%s/%s:1.0/video4linux", sys, strrchr(sys, '/') + 1);
+  DIR *d = opendir(vdir);
+  if (!d) return 0;
+  struct dirent *e;
+  while ((e = readdir(d)) && nn < 8)
+    if (!strncmp(e->d_name, "video", 5)) snprintf(nodes[nn++], sizeof nodes[0], "/dev/%.50s", e->d_name);
+  closedir(d);
+  if (!nn) return 0;
+  DIR *pd = opendir("/proc");
+  if (!pd) return 0;
+  int found = 0;
+  while (!found && (e = readdir(pd))) {
+    if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+    char fdd[300];
+    snprintf(fdd, sizeof fdd, "/proc/%.20s/fd", e->d_name);
+    DIR *fds = opendir(fdd);
+    if (!fds) continue;
+    struct dirent *f;
+    while (!found && (f = readdir(fds))) {
+      char l[600], tgt[128];
+      snprintf(l, sizeof l, "%s/%.200s", fdd, f->d_name);
+      ssize_t n = readlink(l, tgt, sizeof tgt - 1);
+      if (n <= 0) continue;
+      tgt[n] = 0;
+      for (int k = 0; k < nn; k++)
+        if (!strcmp(tgt, nodes[k])) found = 1;
+    }
+    closedir(fds);
+    if (found) {
+      char cp[300], comm[64] = "?";
+      snprintf(cp, sizeof cp, "/proc/%.20s/comm", e->d_name);
+      FILE *cf = fopen(cp, "r");
+      if (cf) {
+        if (fgets(comm, sizeof comm, cf)) comm[strcspn(comm, "\n")] = 0;
+        fclose(cf);
+      }
+      snprintf(who, whon, "pid %.20s (%.30s)", e->d_name, comm);
+    }
+  }
+  closedir(pd);
+  return found;
+}
+
 static int ctrl(int fd, uint8_t rt, uint8_t req, uint16_t val, uint16_t idx, void *data, uint16_t len) {
   struct usbdevfs_ctrltransfer c = {rt, req, val, idx, len, 1000, data};
   return ioctl(fd, USBDEVFS_CONTROL, &c);
@@ -172,6 +219,17 @@ uvc_usb *uvc_open(const uvc_config *cfg) {
     close(u->fd);
     free(u);
     return NULL;
+  }
+  // Refuse to take a camera another program is streaming (PhotonVision, Limelight's visionserver): detaching
+  // uvcvideo would pull it out from under them.
+  if (!cfg->force) {
+    char who[64] = "";
+    if (video_node_in_use(u->sys, who, sizeof who)) {
+      fprintf(stderr, "uvc: the camera's video node is open by %s; stop it first (or --force)\n", who);
+      close(u->fd);
+      free(u);
+      return NULL;
+    }
   }
   // Detach uvcvideo from both interfaces (it binds them together), then claim them.
   int ifs[2] = {u->vc_if, u->vs_if};

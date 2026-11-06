@@ -28,6 +28,8 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/file.h>
 
 #include <algorithm>
 #include <atomic>
@@ -240,8 +242,9 @@ static int selftest() {
 // ------------------------------------------------------------------------------------------- main
 int main(int argc, char **argv) {
   double secs = 0, tag_size = 0.1651, mid_offset_ms = 5.0;
+  const char *lock_path = nullptr;
   const char *csv = nullptr, *calib = nullptr, *save = nullptr, *nt_host = nullptr, *cam_name = "thrifty";
-  int cpu = -1, fifo = 0, exposure = -1, gain = -1, every = 1, check = 64, whole = 0, no_napa = 0;
+  int cpu = -1, fifo = 0, exposure = -1, gain = -1, gamma = -1, backlight = -1, every = 1, check = 64, whole = 0, no_napa = 0;
   uvc_config uc{};
   uc.width = 1280, uc.height = 800, uc.fps = 120, uc.alt = -1, uc.pkts_per_urb = 4, uc.nurbs = 32, uc.verbose = 1;
   napa_params np{16, 1, 20, 22, 25};
@@ -271,6 +274,11 @@ int main(int argc, char **argv) {
     else if (a == "--name") cam_name = nx();
     else if (a == "--mid-offset-ms") mid_offset_ms = atof(nx());  // first packet -> mid-exposure
     else if (a == "--no-refine") pose_refine = 0;
+    else if (a == "--force") uc.force = 1;     // take the camera even if its /dev/video node is open
+    else if (a == "--lock") lock_path = nx();  // hold this flock (e.g. /tmp/camera.lock) while running
+    else if (a == "--gamma") gamma = atoi(nx());
+    else if (a == "--backlight") backlight = atoi(nx());
+    else if (a == "--sharpen") np.sharpening_x100 = atoi(nx());  // NAPA's cell sharpening x100 (default 25)
     else if (a == "--selftest") return selftest();
     else {
       fprintf(stderr, "unknown option %s\n", a.c_str());
@@ -294,6 +302,9 @@ int main(int argc, char **argv) {
     if (uvc_v4l2_set(0, 0, V4L2_CID_EXPOSURE_ABSOLUTE, exposure)) fprintf(stderr, "exposure: not set\n");
   }
   if (gain > 0 && uvc_v4l2_set(0, 0, V4L2_CID_GAIN, gain)) fprintf(stderr, "gain: not set\n");
+  if (gamma > 0 && uvc_v4l2_set(0, 0, V4L2_CID_GAMMA, gamma)) fprintf(stderr, "gamma: not set\n");
+  if (backlight >= 0 && uvc_v4l2_set(0, 0, V4L2_CID_BACKLIGHT_COMPENSATION, backlight))
+    fprintf(stderr, "backlight compensation: not set\n");
   mlockall(MCL_CURRENT | MCL_FUTURE);
   if (cpu >= 0) {
     cpu_set_t s;
@@ -311,6 +322,15 @@ int main(int argc, char **argv) {
   }
   NtPub *pub = nt_host ? nt_pub_create(nt_host, cam_name) : nullptr;
   if (pub) nt_pub_config(pub, have_cam ? &cam : nullptr, tag_size, (int64_t)(mid_offset_ms * 1e6));
+  if (lock_path) {  // the bench's camera lock: wait up to 30 s, then give up
+    int lfd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+    int got = -1;
+    for (int k = 0; lfd >= 0 && k < 300 && (got = flock(lfd, LOCK_EX | LOCK_NB)) != 0 && !g_stop; k++) usleep(100000);
+    if (got != 0) {
+      fprintf(stderr, "camera lock %s is held by another program\n", lock_path);
+      return 1;
+    }
+  }
   uvc_usb *u = uvc_open(&uc);
   if (!u) return 1;
   const int W = uc.width, H = uc.height;
@@ -330,68 +350,35 @@ int main(int argc, char **argv) {
   int64_t t_start = mono_ns();
   // frame state
   size_t flen = 0;
-  int fid = -1, in_frame = 0, process = 0, rows_dec = 0, rows_fed = 0, bad = 0;
+  int fid = -1, done_fid = -1, in_frame = 0, process = 0, rows_dec = 0, rows_fed = 0, bad = 0;
   long seq = 0, nframes = 0, ndone = 0, nbad = 0, ndet = 0;
   int64_t t_first = 0, c_frame0 = 0, c_dec = 0, c_napa = 0;
   std::vector<double> lat;  // eof reap -> results, ms
-  while (!g_stop) {
-    int64_t tr;
-    int n = uvc_reap(u, ch, 256, &tr);
-    if (n < 0) {
-      fprintf(stderr, "uvc reap failed: %s\n", strerror(errno));
-      break;
+  FILE *save_f = nullptr;
+  // Decode the bytes in so far and feed NAPA the rows that became final.
+  auto feed = [&]() {
+    if (bad || rows_dec >= H) return;
+    int64_t c0 = cpu_ns();
+    int r = mjdec_feed(dec, flen);
+    int64_t c1 = cpu_ns();
+    c_dec += c1 - c0;
+    if (r < 0) {
+      bad = 1;
+      return;
     }
-    if (secs > 0 && tr - t_start > (int64_t)(secs * 1e9)) break;
-    bool eof = false;
-    for (int i = 0; i < n; i++) {
-      const uvc_chunk &c = ch[i];
-      int f = c.flags & 1;
-      if (!in_frame || f != fid) {  // a new frame starts (FID toggled)
-        if (in_frame) nbad++;     // the previous one never saw EOF
-        in_frame = 1, fid = f, flen = 0, bad = 0, rows_dec = rows_fed = 0;
-        t_first = tr - (int64_t)c.pkt_from_end * 125000;
-        seq++;
-        process = (seq % every) == 0;
-        if (process) {
-          c_frame0 = cpu_ns();
-          c_dec = c_napa = 0;
-          mjdec_begin(dec, fb.data(), FB, Y.data(), W, H, W);
-          if (!no_napa && !whole) napa_stream_begin(ns, Y.data(), W, H, W, &np);
-        }
-      }
-      if (c.flags & 0x40) bad = 1;
-      if (process && c.len > 0) {
-        if (flen + c.len > FB) bad = 1;
-        else memcpy(fb.data() + flen, c.data, c.len), flen += c.len;
-      }
-      if (c.flags & 2) {
-        eof = true;
-        break;  // (a following packet of the next frame in this URB is handled next round: rare)
-      }
+    rows_dec = r;
+    if (!no_napa && !whole && rows_dec > rows_fed) {
+      napa_stream_feed(ns, rows_dec);
+      rows_fed = rows_dec;
+      c_napa += cpu_ns() - c1;
     }
-    if (!in_frame || !process) {
-      if (eof) in_frame = 0;
-      continue;
-    }
-    if (!bad && rows_dec < H) {
-      int64_t c0 = cpu_ns();
-      int r = mjdec_feed(dec, flen);
-      int64_t c1 = cpu_ns();
-      c_dec += c1 - c0;
-      if (r < 0) bad = 1;
-      else rows_dec = r;
-      if (!bad && !no_napa && !whole && rows_dec > rows_fed) {
-        napa_stream_feed(ns, rows_dec);
-        rows_fed = rows_dec;
-        c_napa += cpu_ns() - c1;
-      }
-    }
-    if (!eof) continue;
-    in_frame = 0;
+  };
+  // The frame's last packet is in (reaped at tr): tags, pose, publish, log.
+  auto finish = [&](int64_t tr) {
     nframes++;
     if (bad || rows_dec < H) {
       nbad++;
-      continue;
+      return;
     }
     int64_t t_dec = mono_ns();
     int nt = 0;
@@ -441,12 +428,56 @@ int main(int argc, char **argv) {
       fprintf(out, "\n");
     }
     if (save && ndone <= 600) {
-      static FILE *sf = nullptr;
-      if (!sf) sf = fopen(save, "wb");
-      if (sf) fwrite(fb.data(), 1, flen, sf);
+      if (!save_f) save_f = fopen(save, "wb");
+      if (save_f) fwrite(fb.data(), 1, flen, save_f);
     }
     if (check > 0 && ndone % check == 0) chk.offer(fb.data(), flen, Y.data(), W, H, dets.data(), nt, np);
+  };
+  while (!g_stop) {
+    int64_t tr;
+    int n = uvc_reap(u, ch, 256, &tr);
+    if (n < 0) {
+      fprintf(stderr, "uvc reap failed: %s\n", strerror(errno));
+      break;
+    }
+    if (secs > 0 && tr - t_start > (int64_t)(secs * 1e9)) break;
+    for (int i = 0; i < n; i++) {
+      const uvc_chunk &c = ch[i];
+      const int f = c.flags & 1;
+      if (!in_frame && f == done_fid) continue;  // header-only packets of the frame just finished
+      if (!in_frame || f != fid) {               // a new frame starts (FID toggled)
+        if (in_frame) {                          // the previous one never saw EOF
+          nframes++;
+          nbad++;
+        }
+        in_frame = 1, fid = f, flen = 0, bad = 0, rows_dec = rows_fed = 0;
+        t_first = tr - (int64_t)c.pkt_from_end * 125000;
+        seq++;
+        process = (seq % every) == 0;
+        if (process) {
+          c_frame0 = cpu_ns();
+          c_dec = c_napa = 0;
+          mjdec_begin(dec, fb.data(), FB, Y.data(), W, H, W);
+          if (!no_napa && !whole) napa_stream_begin(ns, Y.data(), W, H, W, &np);
+        }
+      }
+      if (c.flags & 0x40) bad = 1;
+      if (process && c.len > 0) {
+        if (flen + c.len > FB) bad = 1;
+        else memcpy(fb.data() + flen, c.data, c.len), flen += c.len;
+      }
+      if (c.flags & 2) {  // EOF: finish this frame now; the URB's later packets belong to the next one
+        if (process) {
+          feed();
+          finish(tr);
+        }
+        in_frame = 0;
+        done_fid = f;
+      }
+    }
+    if (in_frame && process) feed();
   }
+  if (save_f) fclose(save_f);
   uvc_close(u);
   g_stop = true;
   if (chk.th.joinable()) chk.th.join();

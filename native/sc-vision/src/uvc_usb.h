@@ -33,6 +33,7 @@ typedef struct {
   int pkts_per_urb;      // default 4 (0.5 ms)
   int nurbs;             // URBs in flight, default 32
   int verbose;
+  int force;             // detach uvcvideo even when a process has the camera's /dev/video node open
 } uvc_config;
 
 // Opens and starts streaming. NULL on failure (message on stderr).

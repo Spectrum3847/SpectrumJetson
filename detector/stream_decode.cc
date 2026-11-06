@@ -29,6 +29,10 @@
 // fed. Built as libspectrum-stream.so (CMakeLists.txt, scripts/jetson/07-build-napa-detector.sh).
 #include "stream_decode.h"
 
+extern "C" {
+#include "../native/sc-vision/src/mjdec.h"  // SPECTRUM_STREAM_DECODER=mjdec: the luma-only decoder
+}
+
 #include <algorithm>
 #include <atomic>
 #include <dirent.h>
@@ -293,6 +297,15 @@ void WatchLoop(Watcher *w) {
   std::vector<uint8_t> out;
   void *fed_ctx = nullptr;  // the sink fed this frame (nullptr: none)
   Clock::time_point t_soi{};
+  // SPECTRUM_STREAM_DECODER=mjdec (sc/mjpeg-napa): native/sc-vision's luma-only decoder instead of libjpeg-turbo,
+  // the same pixels (bit-identical to JCS_GRAYSCALE + ISLOW), about half the CPU on the Thriftiest Cam's frames.
+  static const bool use_mj = [] {
+    const char *e = std::getenv("SPECTRUM_STREAM_DECODER");
+    return e && std::strcmp(e, "mjdec") == 0;
+  }();
+  std::unique_ptr<mjdec, void (*)(mjdec *)> mj(use_mj ? mjdec_create() : nullptr, mjdec_destroy);
+  bool mj_on = false;  // this frame is decoded by mjdec
+  int mj_rows = 0;
 
   // Start feeding the attached sink with this frame, if it's still taking results and wants it.
   auto sink_begin = [&]() {
@@ -345,8 +358,9 @@ void WatchLoop(Watcher *w) {
 
   auto abort_decode = [&]() {
     sink_finish(nullptr);
-    if (decoding) jpeg_destroy_decompress(&d);
+    if (decoding && !mj_on) jpeg_destroy_decompress(&d);
     decoding = false;
+    mj_on = false;
     std::lock_guard<std::mutex> l(w->mu);
     w->active = -1;
   };
@@ -376,11 +390,18 @@ void WatchLoop(Watcher *w) {
             last_frame = now;
             t_soi = now;
             // a new frame started in this buffer: decode it as it fills
+            src = Src();
+            out.resize(static_cast<size_t>(w->width) * w->height);
+            if (mj) {
+              mj_on = mjdec_begin(mj.get(), p, w->length, out.data(), w->width, w->height, w->width) == 0;
+              mj_rows = 0;
+            }
+            if (!mj_on) {
             d.err = jpeg_std_error(&err.mgr);
             err.mgr.error_exit = ErrExit;
             err.mgr.emit_message = NoMessage;
             jpeg_create_decompress(&d);
-            src = Src();
+            }
             src.pub.init_source = SrcInit;
             src.pub.fill_input_buffer = SrcFill;
             src.pub.skip_input_data = SrcSkip;
@@ -398,7 +419,6 @@ void WatchLoop(Watcher *w) {
               w->frontier = 0;
               ri = static_cast<int>((w->seq + 1) % kResults);
             }
-            out.resize(static_cast<size_t>(w->width) * w->height);
             sink_begin();
             st[i] = kFilling;
           }
@@ -427,12 +447,34 @@ void WatchLoop(Watcher *w) {
           }
           if (fill >= 2 && p[fill - 2] == 0xFF && p[fill - 1] == 0xD9 && eoi_seen == Clock::time_point{})
             eoi_seen = Clock::now();
-          if (hdr == 0 && jpeg_read_header(&d, TRUE) == JPEG_HEADER_OK) {
+          bool mj_done = false;
+          if (mj_on) {
+            const int r = mjdec_feed(mj.get(), fill);
+            if (r < 0) {  // corrupt, or a JPEG mjdec doesn't do (then libjpeg-turbo from the next frame on)
+              if (r == MJDEC_EUNSUP) {
+                std::printf("stream decode %s: frames mjdec doesn't decode; libjpeg-turbo from now on\n",
+                            w->dev.c_str());
+                mj.reset();
+              }
+              abort_decode();
+              w->aborted++;
+              st[i] = kBoot;
+              std::memcpy(snap[i], p + 1024, kSample);
+              break;
+            }
+            if (r > mj_rows) {
+              busy = true;
+              mj_rows = r;
+              sink_feed(r);
+            }
+            mj_done = r >= w->height;
+          }
+          if (!mj_on && hdr == 0 && jpeg_read_header(&d, TRUE) == JPEG_HEADER_OK) {
             d.out_color_space = JCS_GRAYSCALE;  // only Y is inverse-DCT'd; Cb/Cr just entropy-decoded
             d.dct_method = JDCT_ISLOW;          // as TurboDecodeGray: identical pixels
             hdr = 1;
           }
-          if (hdr == 1 && jpeg_start_decompress(&d)) {
+          if (!mj_on && hdr == 1 && jpeg_start_decompress(&d)) {
             if (static_cast<int>(d.output_width) != w->width ||
                 static_cast<int>(d.output_height) != w->height || d.output_components != 1) {
               abort_decode();
@@ -442,7 +484,7 @@ void WatchLoop(Watcher *w) {
             }
             hdr = 2;
           }
-          while (hdr == 2 && d.output_scanline < d.output_height) {
+          while (!mj_on && hdr == 2 && d.output_scanline < d.output_height) {
             JSAMPROW rows[16];
             for (int r = 0; r < 16; r++)
               rows[r] = out.data() + static_cast<size_t>(std::min<unsigned>(d.output_scanline + r, d.output_height - 1)) * w->width;
@@ -450,17 +492,22 @@ void WatchLoop(Watcher *w) {
             busy = true;
             sink_feed(static_cast<int>(d.output_scanline));
           }
-          if (hdr == 2 && d.output_scanline >= d.output_height) {
+          if (mj_done || (!mj_on && hdr == 2 && d.output_scanline >= d.output_height)) {
             // all rows decoded: the frame ends at its EOI, at or just after the bytes consumed
-            const size_t used = src.fed - src.pub.bytes_in_buffer;
             size_t len = 0;
-            for (size_t k = used >= 2 ? used - 2 : 0; k + 1 < src.fed && k < used + 64; k++)
-              if (p[k] == 0xFF && p[k + 1] == 0xD9) {
-                len = k + 2;
-                break;
-              }
+            if (mj_on) {
+              len = mjdec_end(mj.get());
+            } else {
+              const size_t used = src.fed - src.pub.bytes_in_buffer;
+              for (size_t k = used >= 2 ? used - 2 : 0; k + 1 < src.fed && k < used + 64; k++)
+                if (p[k] == 0xFF && p[k + 1] == 0xD9) {
+                  len = k + 2;
+                  break;
+                }
+            }
             if (!len) break;  // EOI not here yet
-            jpeg_destroy_decompress(&d);
+            if (!mj_on) jpeg_destroy_decompress(&d);
+            mj_on = false;
             decoding = false;
             {
               std::lock_guard<std::mutex> l(w->mu);
@@ -537,7 +584,7 @@ void WatchLoop(Watcher *w) {
       nanosleep(&ts, nullptr);
     }
   }
-  if (decoding) jpeg_destroy_decompress(&d);
+  if (decoding && !mj_on) jpeg_destroy_decompress(&d);
   sink_finish(nullptr);
   w->dead = true;
   w->cv.notify_all();

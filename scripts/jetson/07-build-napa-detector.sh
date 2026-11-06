@@ -42,8 +42,10 @@ $CXX -shared -Wl,-z,defs -o "$OUT/libspectrum-napa-apriltag.so" "$OUT/napa_core.
 #   sudo install -m 755 ~/build/napa-detector/libspectrum-stream.so /usr/lib/
 if echo '#include <stdio.h>
 #include <jpeglib.h>' | $CC -E -x c - >/dev/null 2>&1; then
+  # + native/sc-vision's luma-only decoder (SPECTRUM_STREAM_DECODER=mjdec)
+  timeout 300 $CC $CF -std=gnu11 -c "$REPO/native/sc-vision/src/mjdec.c" -o "$OUT/mjdec.o"
   timeout 300 $CXX $CF -std=c++17 -Wall -Wextra -Wno-clobbered -shared -Wl,-z,defs -Wl,-soname,libspectrum-stream.so "$REPO/detector/stream_decode.cc" \
-    -o "$OUT/libspectrum-stream.so" -ljpeg -lpthread
+    "$OUT/mjdec.o" -o "$OUT/libspectrum-stream.so" -ljpeg -lpthread
 else
   echo "no jpeglib.h for $ARCH (libjpeg-turbo dev package): skipping libspectrum-stream.so (streaming NAPA)"
 fi

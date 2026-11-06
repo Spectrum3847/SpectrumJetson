@@ -20,12 +20,13 @@ tar -C "$B" -cf - sc-vision nt_probe mjdec_bench | ssh "$HOST" 'tar -C ~/builder
 tar -C "$NTL" -cf - libntcore.so libdatalog.so libwpinet.so libwpiutil.so | ssh "$HOST" 'tar -C ~/builder/native-install -xf -'
 scp -q "$CAL" "$HOST:builder/native-install/calib.json"
 scp -q "$REPO/scripts/systemcore/sc-vision" "$HOST:builder/native-install/sc-vision-switch"
+scp -q "$REPO/native/sc-vision/sc-vision-rebind" "$HOST:builder/native-install/"
 ssh "$HOST" ENABLE="${ENABLE:-0}" 'bash -s' <<'REMOTE'
 set -euo pipefail
 S=~/builder/native-install
 sudo systemctl stop sc-vision-native 2>/dev/null || true
 sudo mkdir -p /opt/sc-vision/bin /opt/sc-vision/lib /opt/sc-vision/etc
-sudo install -m 755 "$S/sc-vision" "$S/nt_probe" "$S/mjdec_bench" /opt/sc-vision/bin/
+sudo install -m 755 "$S/sc-vision" "$S/nt_probe" "$S/mjdec_bench" "$S/sc-vision-rebind" /opt/sc-vision/bin/
 sudo install -m 644 "$S"/lib*.so /opt/sc-vision/lib/
 sudo install -m 644 "$S/calib.json" /opt/sc-vision/etc/calib.json
 sudo install -m 755 "$S/sc-vision-switch" /usr/local/bin/sc-vision
@@ -49,6 +50,8 @@ EnvironmentFile=/etc/default/sc-vision
 ExecStart=/opt/sc-vision/bin/sc-vision $SC_VISION_ARGS
 # SIGTERM: sc-vision stops its URBs and gives the camera back to uvcvideo
 KillSignal=SIGTERM
+# after a crash or SIGKILL the camera has no driver: give it back to uvcvideo (no USB reset)
+ExecStopPost=/opt/sc-vision/bin/sc-vision-rebind
 TimeoutStopSec=5
 Restart=on-failure
 RestartSec=2
