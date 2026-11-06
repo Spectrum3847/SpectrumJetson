@@ -1,0 +1,103 @@
+SpectrumJetson napa-04: streaming NAPA runs a final blob's candidate only once the frame rows it can read
+(3 cells + 8 px below the blob) have been fed; until then the blob waits in a per-level list. Found by the
+tester's probe (rows pre-filled with 0 or 255 until fed): candidates near the arrived edge read the previous
+frame's rows, so decision margins differed from napa_detect. Applies after napa-03.
+
+--- a/third_party/napa/napa_core.c
++++ b/third_party/napa/napa_core.c
+@@ -2210,6 +2210,8 @@
+     int nruns, run_cap, prev_y, prev_start, prev_end;
+     stream_cand *cands;
+     int ncand, cand_cap;
++    int32_t *pend;      /* final blobs whose candidate would read frame rows not fed yet (roots) */
++    int npend, pend_cap;
+ } stream_level;
+ 
+ typedef struct {
+@@ -2240,7 +2242,7 @@
+ static void stream_free_level(stream_level *L) {
+     free(L->buf), free(L->tmp), free(L->tail), free(L->tmin), free(L->tmax), free(L->hist1), free(L->hist2);
+     free(L->raw), free(L->eff), free(L->R), free(L->P), free(L->B), free(L->done), free(L->row_start);
+-    free(L->cands);
++    free(L->cands), free(L->pend);
+ }
+ 
+ void napa_stream_destroy(napa_stream *s) {
+@@ -2333,7 +2335,7 @@
+         L->rows = L->tiles = L->bands = L->fin_row = 0;
+         L->frows_done = 0;
+         L->nruns = 0, L->prev_y = -2, L->prev_start = L->prev_end = 0;
+-        L->ncand = 0;
++        L->ncand = 0, L->npend = 0;
+         if (stream_level_alloc(L)) return -2;
+         L->row_start[0] = 0;
+         n++;
+@@ -2765,6 +2767,20 @@
+     return 0;
+ }
+ 
++/* SpectrumJetson napa-04: whether every frame row a blob's candidate can read has been fed. The candidate
++ * (rough quad, border probe, edge fits, decode, refinement) samples around the black square: its white border
++ * one cell beyond, plus the fit/refine windows. Without this gate a blob finalized near the arrived edge read
++ * the previous frame's rows still in the buffer (a found tag's decision margin could differ from napa_detect).
++ * Bound: 3 cells (the square's height / W cells) + 8 px below the blob's last level row. */
++static int blob_rows_fed(const napa_stream *S, const stream_level *L, int r) {
++    if (S->fed >= S->h) return 1;
++    const blob_box *b = &L->B[r];
++    const int W = S->det->fam.width;
++    int bh = (b->maxy - b->miny + 1) * L->s;
++    int need = (b->maxy + 1) * L->s + (3 * bh + W - 1) / W + 8;
++    return S->fed >= need;
++}
++
+ /* Blobs whose last run is in a row before `upto` - 1 ... finished once row `upto` - 1 is labeled:
+  * a blob ending at row y is final when row y + 1 is done. */
+ static int finalize_rows(napa_stream *S, stream_level *L, int upto_done) {
+@@ -2775,6 +2791,16 @@
+             int r = find_root(L->P, i);
+             if (L->done[r] || L->B[r].maxy != y) continue;
+             L->done[r] = 1;
++            if (!blob_rows_fed(S, L, r)) { /* SpectrumJetson napa-04: later, when its rows are in */
++                if (L->npend == L->pend_cap) {
++                    int cap = L->pend_cap ? 2 * L->pend_cap : 64;
++                    int32_t *p = (int32_t *)realloc(L->pend, (size_t)cap * sizeof(int32_t));
++                    if (p == NULL) return -2;
++                    L->pend = p, L->pend_cap = cap;
++                }
++                L->pend[L->npend++] = r;
++                continue;
++            }
+             if (finalize_blob(S, L, r)) return -2;
+         }
+     }
+@@ -2782,6 +2808,22 @@
+     return 0;
+ }
+ 
++/* SpectrumJetson napa-04: run the pending blobs whose frame rows have now been fed (all of them once the
++ * frame is complete). */
++static int finalize_pending(napa_stream *S, stream_level *L) {
++    int k = 0;
++    for (int i = 0; i < L->npend; i++) {
++        int r = L->pend[i];
++        if (S->fed < S->h && !blob_rows_fed(S, L, r)) {
++            L->pend[k++] = r;
++            continue;
++        }
++        if (finalize_blob(S, L, r)) return -2;
++    }
++    L->npend = k;
++    return 0;
++}
++
+ static int process_band(napa_stream *S, stream_level *L, int ty) {
+     napa_detector *det = S->det;
+     const int lw = L->lw, lh = L->lh, tw = L->tw, th = L->th;
+@@ -2905,6 +2947,7 @@
+         }
+         while (L->bands < L->th && band_ready(S, L, L->bands))
+             if (process_band(S, L, L->bands)) return -2;
++        if (L->npend && finalize_pending(S, L)) return -2;
+     }
+     return 0;
+ }
