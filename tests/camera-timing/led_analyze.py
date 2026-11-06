@@ -55,7 +55,24 @@ def fit_window(x, y, w):
     return best
 
 
+def locate(d):
+    """led-test.sh with LOCATE=1: where the steadily-lit LED is (on.mjpeg vs off.mjpeg)."""
+    on = np.median(np.stack([f for f in frames(d + "/on.mjpeg", list(csv.DictReader(open(d + "/on.mjpeg.idx"))))[5:]
+                             if f is not None]), axis=0)
+    off = np.median(np.stack([f for f in frames(d + "/off.mjpeg", list(csv.DictReader(open(d + "/off.mjpeg.idx"))))[5:]
+                              if f is not None]), axis=0)
+    diff = on - off
+    y, x = np.unravel_index(np.argmax(diff), diff.shape)
+    print("LED on - off: max %.0f at full-res (%d, %d); pixels > 50: %d; next-best elsewhere %.0f" %
+          (diff.max(), x * 2, y * 2, int((diff > 50).sum()),
+           np.percentile(np.abs(diff), 99.9)))
+    print("visible" if diff.max() > 50 else "NOT visible: aim the camera at the green ACT LED, closer")
+
+
 def main():
+    if sys.argv[1] == "--locate":
+        locate(sys.argv[2])
+        return
     mjpeg, pulses = sys.argv[1], sys.argv[2]
     clock = 48e6
     if "--clock" in sys.argv:
