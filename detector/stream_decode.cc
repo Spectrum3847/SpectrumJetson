@@ -153,6 +153,7 @@ struct Watcher {
   double frame_ms = 8;                     // SOI -> EOI of the last frame (for the skip rule)
   std::vector<double> sink_tails;          // finish() ms
   long sink_fed = 0, sink_skipped = 0, plan_skipped = 0;
+  long identical_boots = 0;  // buffers wiped after 60 ms of identical refills (uniform scene)
   // the cores of the thread that takes this watcher's frames (SPECTRUM_STREAM_CPUS=camera)
   std::mutex cpu_mu;
   std::string consumer_cpus;
@@ -320,22 +321,15 @@ void WatchLoop(Watcher *w) {
   uint8_t snap[kMaxBuffers][kSample];
   size_t wipe_len = 128 * 1024;
   // A buffer rewritten with identical bytes (a black or perfectly uniform scene: every frame the same ~21 KB of
-  // DC-only blocks) never "changes" at the sampled offset. Its V4L2 sequence number does: checked when the bytes
-  // have been still for 20 ms, at most every 5 ms per buffer.
-  uint32_t vseq[kMaxBuffers] = {};
-  Clock::time_point still_since[kMaxBuffers], next_q[kMaxBuffers];
-  auto buf_seq = [&](int i, uint32_t *seq) {
-    v4l2_buffer b{};
-    b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    b.memory = V4L2_MEMORY_MMAP;
-    b.index = static_cast<unsigned>(i);
-    if (ioctl(w->fd, VIDIOC_QUERYBUF, &b)) return false;
-    *seq = b.sequence;
-    return true;
-  };
+  // DC-only blocks, the Thriftiest in a dark room) never "changes" at the sampled offset, so the watcher never
+  // booted and the camera stayed on the Java path. Its V4L2 sequence number would show the refill, but uvcvideo
+  // refuses VIDIOC_QUERYBUF on a descriptor that doesn't own the stream (-EBUSY), so: a buffer whose bytes stayed
+  // still for 60 ms (with 120 fps and 4 buffers each one is refilled every ~33 ms) is being refilled with the same
+  // bytes; wipe it now. Worst case, the frame being written into it right then (or read out by cscore) is lost
+  // once. From the next refill on the usual cycle (SOI after a wipe) runs; no frame is ever matched by content.
+  Clock::time_point still_since[kMaxBuffers];
   for (int i = 0; i < w->n; i++) {
-    still_since[i] = next_q[i] = Clock::now();
-    buf_seq(i, &vseq[i]);
+    still_since[i] = Clock::now();
     st[i] = kBoot;
     std::memcpy(snap[i], w->buf[i] + 1024, kSample);
   }
@@ -449,14 +443,10 @@ void WatchLoop(Watcher *w) {
           if (std::memcmp(snap[i], p + 1024, kSample) != 0) {
             st[i] = kBootChanging;
             due[i] = now + std::chrono::milliseconds(12);
-          } else if (now - still_since[i] > std::chrono::milliseconds(20) && now >= next_q[i]) {
-            next_q[i] = now + std::chrono::milliseconds(5);
-            uint32_t q;
-            if (buf_seq(i, &q) && q != vseq[i]) {  // refilled with the same bytes
-              vseq[i] = q;
-              st[i] = kBootChanging;
-              due[i] = now + std::chrono::milliseconds(12);
-            }
+          } else if (now - still_since[i] > std::chrono::milliseconds(60)) {  // refilled with identical bytes
+            w->identical_boots++;
+            st[i] = kBootChanging;
+            due[i] = now;
           }
           break;
         case kBootChanging:
