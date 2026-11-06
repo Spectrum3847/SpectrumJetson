@@ -62,3 +62,18 @@ first), and keep the hooks small; posted in PVPERF-LOG.
 - Live (single camera): results identical to the fast path on the same scene (Swyft at exposure 300 while dark,
   restored after), CPU per camera vs sc-vision and the fast path, latency on the same time reference
   (tsref-compare.sh), hot-unplug simulated only by stopping/starting the stream (no physical action).
+
+## First pieces, tested offline (2026-11-06)
+
+- `native/sc-vision/tools/stream_identity.cc` (fake camera): each recorded frame lands in 3200-byte pieces (one
+  2-packet URB) in a buffer, decoded as it arrives (mjdec) and fed to streaming NAPA band by band, compared with
+  libjpeg-turbo + whole-frame napa_detect. Thriftiest capture (300 frames, min tag 32): 300/300 identical (ids,
+  order, corners bit for bit), 1.90 ms CPU per frame; Swyft capture (240): 240/240 identical, 1.83 ms. At 1/2
+  scale: same tags on every frame, corners within 0.48 px of full scale, 1.54 ms per frame.
+- `native/sc-vision/src/rewind_writer.{h,cc}` + `tools/rewind_bench.cc`: per camera a ring (16 MB), the vision
+  thread's push is a reserve + memcpy + append (never waits on the writer; full ring = frame dropped and
+  counted), one SCHED_IDLE writer thread writes ~1 MB pieces and fdatasyncs every 2 s; files and CSV as
+  docs/REWIND.md. SystemCore SD card, two cameras x 120 fps of the Thriftiest capture (47 KB/frame), 10 s:
+  2402/2402 frames kept, 11.6 MB/s, push 9.5-10 us p50 / 15-21 us p99 / 64 us max on the vision thread, writer
+  0.6% of a core. The SD card's fdatasync stalled up to 1.9 s once; the 16 MB ring (~2.8 s per camera at this
+  rate) absorbed it. For matches: 32 MB rings, or a record fps below 120, gives margin.

@@ -24,6 +24,11 @@ CF=(-O3 -mcpu=cortex-a76 -fno-plt -Wall -Wextra -fPIC)
 "$SC_CC" "${CF[@]}" -std=gnu11 "$HERE/tools/mjdec_bench.c" "$OUT/mjdec.o" -o "$OUT/mjdec_bench" -ljpeg
 "$SC_CC" "${CF[@]}" -std=gnu11 -shared -Wl,-z,defs "$HERE/tools/scmn_adapter.c" "$OUT/mjdec.o" \
   -o "$OUT/libscvision-dec.so"
+# native backend pieces, tested offline: the Rewind writer and the fake-camera identity check
+"$SC_CXX" "${CF[@]}" -std=gnu++23 -I"$HERE/src" "$HERE/tools/rewind_bench.cc" "$HERE/src/rewind_writer.cc" \
+  -o "$OUT/rewind_bench" -lpthread
+"$SC_CXX" "${CF[@]}" -std=gnu++23 -I"$HERE/src" -I"$OUT/napa-src" "$HERE/tools/stream_identity.cc" "$OUT/mjdec.o" \
+  "$OUT/napa_core.o" -o "$OUT/stream_identity" -ljpeg -lpthread -lm
 PUB=("$HERE/src/nt_pub_stub.cc")
 LIBS=()
 if [[ ${NT:-0} == 1 ]]; then
