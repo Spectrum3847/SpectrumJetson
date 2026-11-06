@@ -97,6 +97,17 @@ static int idct_selftest(void) {
     if (memcmp(a, b, 64)) bad++;
   }
   printf("IDCT NEON vs scalar: %d of 200000 random blocks differ\n", bad);
+  {  // speed of the IDCT paths on one block (full 8x8, 4x4-sparse), stored into a 1280-wide image
+    static uint8_t img[1280 * 16];
+    int32_t full[64], sparse[64];
+    for (int i = 0; i < 64; i++) full[i] = (i * 37) % 21 - 10, sparse[i] = ((i & 4) || (i & 32)) ? 0 : full[i];
+    for (int pass = 0; pass < 2; pass++) {
+      const int32_t *blk = pass ? sparse : full;
+      double t0 = now_ns();
+      for (int it = 0; it < 1000000; it++) mjdec_idct_fast(blk, img + (it % 160) * 8, 1280);
+      printf("IDCT %s: %.1f ns/block (with the sparsity scan)\n", pass ? "4x4 sparse" : "full", (now_ns() - t0) / 1e6);
+    }
+  }
   return bad;
 }
 
