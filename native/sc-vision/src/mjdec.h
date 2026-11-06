@@ -47,6 +47,13 @@ int mjdec_decode(mjdec *d, const uint8_t *jpeg, size_t size, uint8_t *out, int w
 // Statistics since create: blocks decoded with only a DC term, and all luma blocks.
 void mjdec_stats(const mjdec *d, uint64_t *dc_only, uint64_t *blocks);
 
+// Output scale for the next frames (set before mjdec_begin; width/height stay the JPEG's, stride is the scaled
+// image's): 1 (default, full size, bit-identical to libjpeg-turbo
+// ISLOW), 2, 4 or 8: the image is width/scale x height/scale (out/stride describe that image), each 8x8 block
+// reconstructed at (8/scale)^2 pixels from its lowest coefficients. Huffman decoding is unchanged (all of it);
+// the IDCT gets cheaper. mjdec_feed() then returns scaled rows. -1 for another value.
+int mjdec_set_scale(mjdec *d, int scale);
+
 #ifdef __cplusplus
 }
 #endif

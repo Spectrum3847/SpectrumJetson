@@ -24,6 +24,10 @@ typedef struct spectrum_band_sink {
   void (*feed)(void *ctx, int rows);
   void *(*finish)(void *ctx);         // the frame's result (also called to reset after an abort)
   void (*free_result)(void *result);  // must not need ctx (the sink may be gone)
+  // Optional (may be null): at a frame's start, before any decoding: 0 skip the frame (not decoded at all), else
+  // the decode scale 1, 2 or 4 (begin() then gets a width/scale x height/scale image). Only honoured with the
+  // mjdec decoder and the image copy off (nobody watches the stream); otherwise frames are full size.
+  int (*plan)(void *ctx);
 } spectrum_band_sink;
 
 // The frame PhotonVision just got (cscore's copy of a dequeued V4L2 buffer): if a watcher decoded

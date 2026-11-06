@@ -214,16 +214,53 @@ struct StreamSink {
   std::atomic<long> published{0};
   std::atomic<int64_t> lat_sum_ns{0}, lat_n{0};  // capture (mid-exposure) -> publish, since nativeLatencyMs
   spectrum_band_sink c{};
+  // Frame policy (docs/FRAME-POLICY.md; setNativePolicy): process 1 frame in `every` (the others aren't decoded),
+  // decode processed ones at 1/scale (NAPA on that image with min tag / scale, corners back to full-res pixels),
+  // every full_every-th processed one at full scale. Defaults: every frame, full scale.
+  std::atomic<int> pol_scale{1}, pol_full_every{0}, pol_every{1};
+  long plan_n = 0, proc_n = 0;  // watcher thread
+  int planned = 0, cur_scale = 1, applied_scale = 1, full_w = 0;
+  std::atomic<long> n_scaled{0}, n_skipped{0};
   explicit StreamSink(const std::string &family) : det(family) {
     c.ctx = this;
+    c.plan = [](void *x) -> int {
+      auto *s = static_cast<StreamSink *>(x);
+      const int every = std::max(1, s->pol_every.load());
+      if (++s->plan_n % every != 0) {
+        s->n_skipped++;
+        return 0;
+      }
+      const int fe = s->pol_full_every.load(), sc = s->pol_scale.load();
+      s->proc_n++;
+      s->cur_scale = (fe > 0 && s->proc_n % fe == 0) || (sc != 2 && sc != 4) ? 1 : sc;
+      s->planned = 1;
+      return s->cur_scale;
+    };
     c.begin = [](void *x, const uint8_t *img, int w, int h, int stride) -> int {
       auto *s = static_cast<StreamSink *>(x);
       s->t_begin = MonoNs();
       s->t_cam = s->Predict(s->t_begin);
-      s->width = w, s->height = h;
+      // this frame's scale: the plan's, if the watcher honoured it (it decodes full size while the image is copied)
+      int sc = s->planned ? s->cur_scale : 1;
+      s->planned = 0;
+      if (sc > 1 && s->full_w && w * sc != s->full_w) sc = 1;
+      if (sc == 1) s->full_w = w;
+      s->cur_scale = sc;
+      if (sc > 1) s->n_scaled++;
+      s->width = w * sc, s->height = h * sc;
       {
         std::lock_guard<std::mutex> l(s->cfg_mu);
-        if (s->cfg_new) s->det.SetConfig(s->cfg);
+        if (s->cfg_new || sc != s->applied_scale) {
+          napa_far::Config cf = s->cfg;
+          if (sc > 1) {
+            cf.min_tag_px = std::max(4, cf.min_tag_px / sc);
+            cf.base_min_tag_px = std::max(4, cf.base_min_tag_px / sc);
+            cf.far_min_tag_px = std::max(4, cf.far_min_tag_px / sc);
+            cf.track_side_px /= sc;
+          }
+          s->det.SetConfig(cf);
+          s->applied_scale = sc;
+        }
         s->cfg_new = false;
       }
       return s->det.Begin(img, w, h, stride, NowUs()) ? 1 : 0;
@@ -232,6 +269,9 @@ struct StreamSink {
     c.finish = [](void *x) -> void * {
       auto *s = static_cast<StreamSink *>(x);
       auto *out = new SinkOut{s->det.Finish(), s->t_begin};
+      if (s->cur_scale > 1)  // a reduced frame's corners back to full-res pixels (centres at integers)
+        for (auto &t : out->tags)
+          for (double &v : t.p) v = v * s->cur_scale + (s->cur_scale - 1) * 0.5;
       s->Publish(out->tags);
       return out;
     };
@@ -541,6 +581,21 @@ JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setNativeCamSh
   const int64_t sight = n->sink->taken_sight.exchange(0);
   if (lastFrameCamNs > 0 && sight > 0) n->sink->Anchor(sight, lastFrameCamNs);
   return n->sink->cam_stamped.load();
+}
+
+// sc/mjpeg-napa frame policy for this camera's streamed frames (docs/FRAME-POLICY.md): decode scale 1, 2 or 4
+// (others: 1), every fullEvery-th processed frame at full scale (0: never forced), process 1 frame in processEvery
+// (>= 1; the others aren't decoded). Scale and skipping only apply while nobody watches the stream (image copy
+// off). Returns frames decoded reduced so far.
+JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setNativePolicy(JNIEnv *, jclass, jlong h,
+                                                                                  jint scale, jint fullEvery,
+                                                                                  jint processEvery) {
+  auto *n = Handle(h);
+  if (!n || !n->sink) return -1;
+  n->sink->pol_scale = scale == 2 || scale == 4 ? scale : 1;
+  n->sink->pol_full_every = std::max(0, static_cast<int>(fullEvery));
+  n->sink->pol_every = std::max(1, static_cast<int>(processEvery));
+  return n->sink->n_scaled.load();
 }
 
 // Mean capture (mid-exposure) -> publish of this camera's natively published results since the last call, ms;

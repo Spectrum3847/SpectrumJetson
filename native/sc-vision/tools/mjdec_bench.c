@@ -1,5 +1,7 @@
 // mjdec_bench: identity and speed of the sc-vision luma decoder against libjpeg-turbo (JCS_GRAYSCALE, ISLOW).
-//   mjdec_bench FILE.mjpeg [--iters N] [--chunk BYTES] [--cpu K] [--dump-diff]
+//   mjdec_bench FILE.mjpeg [--iters N] [--chunk BYTES] [--cpu K] [--dump-diff] [--scale S]
+// --scale 2|4|8: also the reduced-size output (mjdec_set_scale) against libjpeg-turbo's scaled decode
+// (scale_denom S): pixel differences and CPU per frame.
 // FILE: concatenated JPEG frames (v4l2-ctl --stream-to, or a Rewind .mjpeg). Prints per-frame identity (every
 // byte of Y), and decode CPU time p50/p95/p99 for libjpeg-turbo whole-frame, mjdec whole-frame, and mjdec fed in
 // CHUNK-byte pieces (the streaming path: the work left after the last chunk = the tail).
@@ -39,7 +41,11 @@ struct jerr {
 static void jerr_exit(j_common_ptr c) { longjmp(((struct jerr *)c->err)->j, 1); }
 static void jerr_msg(j_common_ptr c, int lvl) { (void)c; (void)lvl; }
 
+static int turbo_gray_s(const uint8_t *jpg, size_t n, uint8_t *out, int *w, int *h, int denom);
 static int turbo_gray(const uint8_t *jpg, size_t n, uint8_t *out, int *w, int *h) {
+  return turbo_gray_s(jpg, n, out, w, h, 1);
+}
+static int turbo_gray_s(const uint8_t *jpg, size_t n, uint8_t *out, int *w, int *h, int denom) {
   struct jpeg_decompress_struct c;
   struct jerr e;
   c.err = jpeg_std_error(&e.m);
@@ -54,6 +60,8 @@ static int turbo_gray(const uint8_t *jpg, size_t n, uint8_t *out, int *w, int *h
   jpeg_read_header(&c, TRUE);
   c.out_color_space = JCS_GRAYSCALE;
   c.dct_method = JDCT_ISLOW;
+  c.scale_num = 1;
+  c.scale_denom = (unsigned)denom;
   jpeg_start_decompress(&c);
   *w = c.output_width;
   *h = c.output_height;
@@ -112,6 +120,7 @@ static int idct_selftest(void) {
 }
 
 int main(int argc, char **argv) {
+  int scale = 1;
   if (argc < 2) {
     fprintf(stderr, "usage: mjdec_bench FILE.mjpeg [--iters N] [--chunk BYTES] [--cpu K] [--max N]\n");
     return 2;
@@ -123,6 +132,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--cpu")) cpu = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--max")) maxf = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--dump-diff")) dump = 1;
+    else if (!strcmp(argv[i], "--scale")) scale = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--no-idct")) mjdec_prof_no_idct = 1;  // profiling: Huffman only (output wrong)
   }
   if (cpu >= 0) {
@@ -225,6 +235,38 @@ int main(int argc, char **argv) {
   pr("mjdec (whole frame)", tm, ntm);
   pr("mjdec streamed, CPU total", ts, nts);
   pr("mjdec streamed, tail (last feed)", tail, nts);
+  if (scale > 1) {  // reduced output vs libjpeg-turbo's scaled ISLOW decode
+    mjdec_set_scale(d, scale);
+    const int sw = w / scale, sh = h / scale;
+    long maxd = 0, n1 = 0;
+    double sumd = 0;
+    int nt = 0, nm = 0;
+    for (int it = 0; it < iters; it++)
+      for (int i = 0; i < nf; i++) {
+        const uint8_t *j = all + off[i];
+        int tw, th;
+        double t0 = now_ns();
+        if (turbo_gray_s(j, len[i], ref, &tw, &th, scale) || tw != sw || th != sh) continue;
+        tt[nt++] = now_ns() - t0;
+        t0 = now_ns();
+        if (mjdec_decode(d, j, len[i], got, w, h, sw) < 0) {
+          if (it == 0) printf("frame %d: scaled mjdec error\n", i);
+          continue;
+        }
+        tm[nm++] = now_ns() - t0;
+        if (it == 0)
+          for (long k = 0; k < (long)sw * sh; k++) {
+            long dd = labs((long)ref[k] - got[k]);
+            sumd += dd;
+            n1 += dd > 1;
+            if (dd > maxd) maxd = dd;
+          }
+      }
+    printf("scale 1/%d (%dx%d) vs libjpeg-turbo scaled: mean |diff| %.4f, >1: %.4f%%, max %ld\n", scale, sw, sh,
+           sumd / ((double)nf * sw * sh), 100.0 * n1 / ((double)nf * sw * sh), maxd);
+    pr("libjpeg-turbo gray, scaled", tt, nt);
+    pr("mjdec scaled", tm, nm);
+  }
   mjdec_destroy(d);
   return (differ || bad_idct) ? 1 : 0;
 }

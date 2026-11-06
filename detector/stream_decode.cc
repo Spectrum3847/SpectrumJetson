@@ -109,6 +109,7 @@ void SrcTerm(j_decompress_ptr) {}
 
 struct Result {
   size_t len = 0;
+  int scale = 1;  // the decoded image is width/scale x height/scale (only ever served by tag, never copied)
   uint8_t tail[kSample], mid[kSample];
   std::vector<uint8_t> gray;
   long seq = 0;
@@ -151,7 +152,7 @@ struct Watcher {
   std::atomic<int64_t> want_after_ns{0};   // the consumer's next frame due (CLOCK_MONOTONIC)
   double frame_ms = 8;                     // SOI -> EOI of the last frame (for the skip rule)
   std::vector<double> sink_tails;          // finish() ms
-  long sink_fed = 0, sink_skipped = 0;
+  long sink_fed = 0, sink_skipped = 0, plan_skipped = 0;
   // the cores of the thread that takes this watcher's frames (SPECTRUM_STREAM_CPUS=camera)
   std::mutex cpu_mu;
   std::string consumer_cpus;
@@ -318,7 +319,23 @@ void WatchLoop(Watcher *w) {
   Clock::time_point due[kMaxBuffers];
   uint8_t snap[kMaxBuffers][kSample];
   size_t wipe_len = 128 * 1024;
+  // A buffer rewritten with identical bytes (a black or perfectly uniform scene: every frame the same ~21 KB of
+  // DC-only blocks) never "changes" at the sampled offset. Its V4L2 sequence number does: checked when the bytes
+  // have been still for 20 ms, at most every 5 ms per buffer.
+  uint32_t vseq[kMaxBuffers] = {};
+  Clock::time_point still_since[kMaxBuffers], next_q[kMaxBuffers];
+  auto buf_seq = [&](int i, uint32_t *seq) {
+    v4l2_buffer b{};
+    b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    b.memory = V4L2_MEMORY_MMAP;
+    b.index = static_cast<unsigned>(i);
+    if (ioctl(w->fd, VIDIOC_QUERYBUF, &b)) return false;
+    *seq = b.sequence;
+    return true;
+  };
   for (int i = 0; i < w->n; i++) {
+    still_since[i] = next_q[i] = Clock::now();
+    buf_seq(i, &vseq[i]);
     st[i] = kBoot;
     std::memcpy(snap[i], w->buf[i] + 1024, kSample);
   }
@@ -359,6 +376,7 @@ void WatchLoop(Watcher *w) {
   }();
   std::unique_ptr<mjdec, void (*)(mjdec *)> mj(use_mj ? mjdec_create() : nullptr, mjdec_destroy);
   bool mj_on = false;  // this frame is decoded by mjdec
+  int fscale = 1;      // this frame's decode scale (the sink's plan)
   int mj_rows = 0;
 
   // Start feeding the attached sink with this frame, if it's still taking results and wants it.
@@ -377,7 +395,8 @@ void WatchLoop(Watcher *w) {
       w->sink_skipped++;
       return;
     }
-    if (w->sink.begin(w->sink.ctx, out.data(), w->width, w->height, w->width)) fed_ctx = w->sink.ctx;
+    if (w->sink.begin(w->sink.ctx, out.data(), w->width / fscale, w->height / fscale, w->width / fscale))
+      fed_ctx = w->sink.ctx;
   };
   auto sink_feed = [&](int rows) {
     if (!fed_ctx) return;
@@ -430,6 +449,14 @@ void WatchLoop(Watcher *w) {
           if (std::memcmp(snap[i], p + 1024, kSample) != 0) {
             st[i] = kBootChanging;
             due[i] = now + std::chrono::milliseconds(12);
+          } else if (now - still_since[i] > std::chrono::milliseconds(20) && now >= next_q[i]) {
+            next_q[i] = now + std::chrono::milliseconds(5);
+            uint32_t q;
+            if (buf_seq(i, &q) && q != vseq[i]) {  // refilled with the same bytes
+              vseq[i] = q;
+              st[i] = kBootChanging;
+              due[i] = now + std::chrono::milliseconds(12);
+            }
           }
           break;
         case kBootChanging:
@@ -443,11 +470,28 @@ void WatchLoop(Watcher *w) {
           if (p[0] == 0xFF && p[1] == 0xD8 && w->active < 0) {
             last_frame = now;
             t_soi = now;
+            // the sink's plan for this frame (skip / scale), when it has one and the frame won't be copied
+            fscale = 1;
+            if (mj && !g_copy.load(std::memory_order_relaxed)) {
+              std::lock_guard<std::mutex> l(w->sink_mu);
+              if (w->sink.ctx && w->sink.plan && Clock::now() - w->sink_taken < std::chrono::seconds(1)) {
+                const int pl = w->sink.plan(w->sink.ctx);
+                if (pl == 0) {  // skipped: not decoded; its buffer is left to fill
+                  w->plan_skipped++;
+                  st[i] = kDone;
+                  due[i] = now + std::chrono::milliseconds(12);
+                  break;
+                }
+                if (pl == 2 || pl == 4) fscale = pl;
+              }
+            }
             // a new frame started in this buffer: decode it as it fills
             src = Src();
             out.resize(static_cast<size_t>(w->width) * w->height);
             if (mj) {
-              mj_on = mjdec_begin(mj.get(), p, w->length, out.data(), w->width, w->height, w->width) == 0;
+              mjdec_set_scale(mj.get(), fscale);
+              mj_on = mjdec_begin(mj.get(), p, w->length, out.data(), w->width, w->height, w->width / fscale) == 0;
+              if (!mj_on) fscale = 1;
               mj_rows = 0;
             }
             if (!mj_on) {
@@ -480,6 +524,7 @@ void WatchLoop(Watcher *w) {
         case kFilling: {
           if (!decoding || w->active != i) {
             st[i] = kBoot;
+            still_since[i] = now;
             std::memcpy(snap[i], p + 1024, kSample);
             break;
           }
@@ -487,6 +532,7 @@ void WatchLoop(Watcher *w) {
             abort_decode();
             w->aborted++;
             st[i] = kBoot;
+            still_since[i] = now;
             std::memcpy(snap[i], p + 1024, kSample);
             break;
           }
@@ -513,6 +559,7 @@ void WatchLoop(Watcher *w) {
               abort_decode();
               w->aborted++;
               st[i] = kBoot;
+              still_since[i] = now;
               std::memcpy(snap[i], p + 1024, kSample);
               break;
             }
@@ -521,7 +568,7 @@ void WatchLoop(Watcher *w) {
               mj_rows = r;
               sink_feed(r);
             }
-            mj_done = r >= w->height;
+            mj_done = r >= w->height / fscale;
           }
           if (!mj_on && hdr == 0 && jpeg_read_header(&d, TRUE) == JPEG_HEADER_OK) {
             d.out_color_space = JCS_GRAYSCALE;  // only Y is inverse-DCT'd; Cb/Cr just entropy-decoded
@@ -581,6 +628,7 @@ void WatchLoop(Watcher *w) {
               std::memcpy(r.tail, p + len - kSample, kSample);
               std::memcpy(r.mid, p + len / 2, kSample);
               r.gray.swap(out);
+              r.scale = fscale;
               r.seq = ++w->seq;
               w->active = -1;
             }
@@ -592,6 +640,7 @@ void WatchLoop(Watcher *w) {
             abort_decode();  // stuck: never finished (dropped frame, restart)
             w->aborted++;
             st[i] = kBoot;
+            still_since[i] = now;
             std::memcpy(snap[i], p + 1024, kSample);
           }
           break;
@@ -624,9 +673,9 @@ void WatchLoop(Watcher *w) {
         std::sort(s.begin(), s.end());
         auto ps = [&](double q) { return s.empty() ? -1.0 : s[std::min(s.size() - 1, static_cast<size_t>(s.size() * q))]; };
         std::printf("stream decode %s: band sink fed %ld frames (skipped %ld for the frame-rate cap), "
-                    "finish p50 %.3f p95 %.3f p99 %.3f ms\n",
-                    w->dev.c_str(), w->sink_fed, w->sink_skipped, ps(.5), ps(.95), ps(.99));
-        w->sink_fed = w->sink_skipped = 0;
+                    "finish p50 %.3f p95 %.3f p99 %.3f ms; skipped by its plan %ld\n",
+                    w->dev.c_str(), w->sink_fed, w->sink_skipped, ps(.5), ps(.95), ps(.99), w->plan_skipped);
+        w->sink_fed = w->sink_skipped = w->plan_skipped = 0;
       }
       std::fflush(stdout);
       w->frames = 0;
@@ -828,6 +877,11 @@ SPECTRUM_STREAM_API int spectrum_stream_decode_gray(const uint8_t *jpeg, size_t 
     }
     // copy unless asked not to, and always when no band-sink result came with this frame (the consumer then
     // detects on the pixels itself)
+    if (r->scale != 1 && (g_copy.load(std::memory_order_relaxed) || !r->sink_out ||
+                          width < static_cast<int>(sizeof(RefTag)))) {
+      g_miss++;  // decoded small for the sink only: the caller decodes this frame itself
+      return 1;
+    }
     if (g_copy.load(std::memory_order_relaxed) || !r->sink_out || width < static_cast<int>(sizeof(RefTag))) {
       for (int y = 0; y < height; y++)
         std::memcpy(out + static_cast<size_t>(y) * stride, r->gray.data() + static_cast<size_t>(y) * width, width);
@@ -840,7 +894,7 @@ SPECTRUM_STREAM_API int spectrum_stream_decode_gray(const uint8_t *jpeg, size_t 
       g_refs++;
     }
     const long hit = ++g_hit;
-    if (hit % 64 == 0)
+    if (hit % 64 == 0 && r->scale == 1)
       Check(std::vector<uint8_t>(jpeg, jpeg + size), r->gray, width, height);
     return 0;
   }

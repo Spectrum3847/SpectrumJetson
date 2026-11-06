@@ -80,7 +80,17 @@ struct NtPub {
   wpi::nt::IntegerPublisher h_beat, h_age, h_frames, h_fail, h_recov;
   int64_t h_next = 0, h_beats = 0, h_win_frames = 0, h_last_frame = 0;
   double h_sum_pipe = 0, h_max_pipe = 0, h_sum_lat = 0;
+  // the robot's frame policy (input/*)
+  wpi::nt::IntegerSubscriber in_scale, in_full_every, in_process_every;
 };
+
+void nt_pub_policy(NtPub *p, int *scale, int *full_every, int *process_every) {
+  if (!p) return;
+  const int64_t s = p->in_scale.Get(0), f = p->in_full_every.Get(0), e = p->in_process_every.Get(0);
+  if (s == 1 || s == 2 || s == 4) *scale = (int)s;
+  if (f > 0) *full_every = (int)f;
+  if (e > 0) *process_every = (int)e;
+}
 
 void nt_pub_health(NtPub *p, int64_t now, long frames_total, long failures, double pipeline_ms, int frame_done) {
   if (frame_done) {
@@ -129,6 +139,10 @@ NtPub *nt_pub_create(const char *host, const char *camera) {
   p->pitch = t->GetDoubleTopic("targetPitch").Publish();
   p->area = t->GetDoubleTopic("targetArea").Publish();
   p->has = t->GetBooleanTopic("hasTarget").Publish();
+  auto in = t->GetSubTable("input");
+  p->in_scale = in->GetIntegerTopic("scale").Subscribe(0);
+  p->in_full_every = in->GetIntegerTopic("fullEvery").Subscribe(0);
+  p->in_process_every = in->GetIntegerTopic("processEvery").Subscribe(0);
   auto h = t->GetSubTable("health");
   wpi::nt::PubSubOptions keep;
   keep.keepDuplicates = true;

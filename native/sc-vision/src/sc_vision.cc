@@ -250,6 +250,10 @@ int main(int argc, char **argv) {
   uvc_config uc{};
   uc.width = 1280, uc.height = 800, uc.fps = 120, uc.alt = -1, uc.pkts_per_urb = 4, uc.nurbs = 32, uc.verbose = 1;
   napa_params np{16, 1, 20, 22, 25};
+  // Frame policy (docs/FRAME-POLICY.md): process 1 frame in `every`, decode processed ones at 1/scale (NAPA on that
+  // image, min tag / scale, corners back to full-res pixels), every full_every-th processed frame at full scale.
+  // The robot can override each over NT (/photonvision/<name>/input/*); defaults: full scale, every frame.
+  int scale_def = 1, full_every_def = 0;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     auto nx = [&]() { return i + 1 < argc ? argv[++i] : (char *)"0"; };
@@ -266,6 +270,8 @@ int main(int argc, char **argv) {
     else if (a == "--hamming") np.max_hamming = atoi(nx());
     else if (a == "--min-contrast") np.min_contrast = atoi(nx());
     else if (a == "--every") every = std::max(1, atoi(nx()));
+    else if (a == "--scale") scale_def = atoi(nx());          // decode scale of processed frames: 1, 2 or 4
+    else if (a == "--full-every") full_every_def = atoi(nx());  // every Nth processed frame at full scale (0: off)
     else if (a == "--fps-max") fps_max = atof(nx());  // process at most this many frames/s, decided at a frame's start
     else if (a == "--check") check = atoi(nx());
     else if (a == "--calib") calib = nx();
@@ -402,6 +408,9 @@ int main(int argc, char **argv) {
   int fid = -1, done_fid = -1, in_frame = 0, process = 0, rows_dec = 0, rows_fed = 0, bad = 0;
   long seq = 0, nframes = 0, ndone = 0, nbad = 0, ndet = 0, nskip = 0;
   int64_t last_frame_cpu_ns = 0;
+  int fscale = 1, Hs = H;  // this frame's decode scale and its image height
+  long nproc = 0;          // frames processed (for full_every)
+  long n_by_scale[5] = {0, 0, 0, 0, 0};
   int64_t t_first = 0, t_fid = 0, c_frame0 = 0, c_dec = 0, c_napa = 0, last_proc_start = 0;
   std::vector<double> lat;  // eof reap -> results, ms
   FILE *save_f = nullptr;
@@ -410,7 +419,7 @@ int main(int argc, char **argv) {
   int64_t band_t[512];  // reap time of the URB that completed each 8-row band (rolling-shutter row times)
   int64_t cur_tr = 0;
   auto feed = [&]() {
-    if (bad || rows_dec >= H) return;
+    if (bad || rows_dec >= Hs) return;
     int64_t c0 = cpu_ns();
     int r = mjdec_feed(dec, flen);
     int64_t c1 = cpu_ns();
@@ -430,7 +439,7 @@ int main(int argc, char **argv) {
   // The frame's last packet is in (reaped at tr): tags, pose, publish, log.
   auto finish = [&](int64_t tr) {
     nframes++;
-    if (bad || rows_dec < H) {
+    if (bad || rows_dec < Hs) {
       nbad++;
       return;
     }
@@ -438,9 +447,15 @@ int main(int argc, char **argv) {
     int nt = 0;
     int64_t c2 = cpu_ns();
     if (!no_napa) {
-      nt = whole ? napa_detect(nd, Y.data(), W, H, W, &np, dets.data(), (int)dets.size())
+      napa_params nps = np;
+      if (fscale > 1) nps.min_tag_px = std::max(4, np.min_tag_px / fscale);
+      nt = whole ? napa_detect(nd, Y.data(), W / fscale, Hs, W / fscale, &nps, dets.data(), (int)dets.size())
                  : napa_stream_finish(ns, dets.data(), (int)dets.size());
       if (nt < 0) nt = 0;
+      // a reduced frame's corners back to full-res pixels (pixel centres at integers): x = s x' + (s - 1) / 2
+      if (fscale > 1)
+        for (int i = 0; i < nt; i++)
+          for (int k = 0; k < 8; k++) dets[i].corners[k] = dets[i].corners[k] * fscale + (fscale - 1) * 0.5;
     }
     int64_t t_det = mono_ns();
     c_napa += cpu_ns() - c2;
@@ -458,7 +473,7 @@ int main(int argc, char **argv) {
     int64_t tag_t[64];
     for (int i = 0; i < nt; i++) {
       double yc = (dets[i].corners[1] + dets[i].corners[3] + dets[i].corners[5] + dets[i].corners[7]) / 4;
-      int b = std::min(std::max((int)(yc / 8), 0), std::min(H / 8, 512) - 1);
+      int b = std::min(std::max((int)(yc / fscale / 8), 0), std::min(Hs / 8, 512) - 1);
       tag_t[i] = band_t[b];
     }
     int64_t t_pose = mono_ns();
@@ -497,7 +512,7 @@ int main(int argc, char **argv) {
       if (!save_f) save_f = fopen(save, "wb");
       if (save_f) fwrite(fb.data(), 1, flen, save_f);
     }
-    if (check > 0 && ndone % check == 0) chk.offer(fb.data(), flen, Y.data(), W, H, dets.data(), nt, np);
+    if (check > 0 && ndone % check == 0 && fscale == 1) chk.offer(fb.data(), flen, Y.data(), W, H, dets.data(), nt, np);
   };
   while (!g_stop) {
     int64_t tr;
@@ -524,7 +539,9 @@ int main(int argc, char **argv) {
         t_first = 0;
         f_flags = c.flags, f_pts = c.pts, f_stc = c.scr_stc, f_sof = c.scr_sof;
         seq++;
-        process = (seq % every) == 0;
+        int pol_every = every, pol_scale = scale_def, pol_full = full_every_def;
+        if (pub) nt_pub_policy(pub, &pol_scale, &pol_full, &pol_every);  // the robot's, when it publishes one
+        process = (seq % pol_every) == 0;
         // --fps-max: skip a frame (no decode, no NAPA) if it starts less than a period (less 2 ms of jitter
         // room) after the last processed one. Decided at its first packet, so a processed frame is not delayed.
         if (process && fps_max > 0 && last_proc_start &&
@@ -542,8 +559,16 @@ int main(int argc, char **argv) {
         if (process) {
           c_frame0 = cpu_ns();
           c_dec = c_napa = 0;
-          mjdec_begin(dec, fb.data(), FB, Y.data(), W, H, W);
-          if (!no_napa && !whole) napa_stream_begin(ns, Y.data(), W, H, W, &np);
+          nproc++;
+          fscale = (pol_full > 0 && nproc % pol_full == 0) ? 1 : pol_scale;
+          if (fscale != 2 && fscale != 4) fscale = 1;
+          Hs = H / fscale;
+          n_by_scale[fscale]++;
+          mjdec_set_scale(dec, fscale);
+          mjdec_begin(dec, fb.data(), FB, Y.data(), W, H, W / fscale);
+          napa_params nps = np;
+          if (fscale > 1) nps.min_tag_px = std::max(4, np.min_tag_px / fscale);
+          if (!no_napa && !whole) napa_stream_begin(ns, Y.data(), W / fscale, Hs, W / fscale, &nps);
         }
       }
       if (c.flags & 0x40) bad = 1;
@@ -583,6 +608,8 @@ int main(int argc, char **argv) {
           "DC-only %.1f%%\n",
           nframes, ndone, nskip, nbad, ndet, P(.5), P(.95), P(.99), chk.ok_dec.load(), chk.bad_dec.load(),
           chk.ok_det.load(), chk.bad_det.load(), blocks ? 100.0 * dco / blocks : 0.0);
+  fprintf(stderr, "sc-vision: processed at full scale %ld, 1/2 %ld, 1/4 %ld\n", n_by_scale[1], n_by_scale[2],
+          n_by_scale[4]);
   if (pub) nt_pub_destroy(pub);
   mjdec_destroy(dec);
   napa_stream_destroy(ns);

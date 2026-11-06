@@ -70,6 +70,8 @@ struct mjdec {
   size_t scr_n, scr_cap;
   // stats
   uint64_t st_dc, st_blocks;
+  // output scale: 1 (full), 2, 4 or 8 (each 8x8 block -> 8/scale square pixels; mjdec_set_scale)
+  int scale;
 };
 
 static const uint8_t kZigzag[64 + 16] = {
@@ -81,7 +83,14 @@ static const uint8_t kZigzag[64 + 16] = {
 
 mjdec *mjdec_create(void) {
   mjdec *d = (mjdec *)calloc(1, sizeof(mjdec));
+  if (d) d->scale = 1;
   return d;
+}
+
+int mjdec_set_scale(mjdec *d, int scale) {
+  if (scale != 1 && scale != 2 && scale != 4 && scale != 8) return -1;
+  d->scale = scale;
+  return 0;
 }
 
 void mjdec_destroy(mjdec *d) {
@@ -408,6 +417,60 @@ static inline void fill_dc(int32_t dq, uint8_t *out, int stride) {
 #endif
 }
 
+// Reduced-size IDCT (scale 2: 4x4 pixels, 4: 2x2, from the block's lowest N x N coefficients): the same
+// reconstruction as the 8x8 IDCT, sampled at the centres of each scale x scale pixel group, which is how
+// libjpeg's jidctred.c scales (not bit-identical to it: float here). blk: dequantized, natural order.
+// [N = 4, 2, 1][u][x] = C(u)/2 cos((2x+1) u pi / 2N): basis u sampled at the N group centres
+static const float red_b[3][4][4] = {
+    {{0.353553391f, 0.353553391f, 0.353553391f, 0.353553391f}, {0.461939766f, 0.191341716f, -0.191341716f, -0.461939766f},
+     {0.353553391f, -0.353553391f, -0.353553391f, 0.353553391f}, {0.191341716f, -0.461939766f, 0.461939766f, -0.191341716f}},
+    {{0.353553391f, 0.353553391f, 0.0f, 0.0f}, {0.353553391f, -0.353553391f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f},
+     {0.0f, 0.0f, 0.0f, 0.0f}},
+    {{0.353553391f, 0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}},
+};
+// out(y, x) = 128 + sum over the block's coefficients F(v, u) with u, v < N of F b[v][y] b[u][x]: one rank-1
+// update per nonzero low coefficient (nz: the natural indices of the AC coefficients written, blk[0] the DC).
+static void idct_reduced(const int32_t *blk, const uint8_t *nz, int cnt, uint8_t *out, int stride, int n) {
+  const float(*b)[4] = red_b[n == 4 ? 0 : 1];
+#if MJ_NEON
+  float32x4_t acc[4];
+  const float dc = (float)blk[0] * 0.125f + 128.5f;  // b[0][y] b[0][x] = 1/8
+  for (int y = 0; y < 4; y++) acc[y] = vdupq_n_f32(dc);
+  for (int i = 0; i < cnt; i++) {
+    const int z = nz[i], u = z & 7, v = z >> 3;
+    if (u >= n || v >= n) continue;
+    const float32x4_t col = vmulq_n_f32(vld1q_f32(b[u]), (float)blk[z]);
+    for (int y = 0; y < n; y++) acc[y] = vfmaq_n_f32(acc[y], col, b[v][y]);
+  }
+  for (int y = 0; y < n; y++) {
+    const uint16x4_t w = vqmovun_s32(vcvtmq_s32_f32(acc[y]));
+    const uint8x8_t p = vqmovn_u16(vcombine_u16(w, w));
+    if (n == 4) vst1_lane_u32((uint32_t *)(void *)(out + (size_t)y * stride), vreinterpret_u32_u8(p), 0);
+    else vst1_lane_u16((uint16_t *)(void *)(out + (size_t)y * stride), vreinterpret_u16_u8(p), 0);
+  }
+#else
+  float acc[4][4];
+  const float dc = (float)blk[0] * 0.125f + 128.5f;
+  for (int y = 0; y < 4; y++)
+    for (int x = 0; x < 4; x++) acc[y][x] = dc;
+  for (int i = 0; i < cnt; i++) {
+    const int z = nz[i], u = z & 7, v = z >> 3;
+    if (u >= n || v >= n) continue;
+    for (int y = 0; y < n; y++)
+      for (int x = 0; x < n; x++) acc[y][x] += (float)blk[z] * b[v][y] * b[u][x];
+  }
+  for (int y = 0; y < n; y++)
+    for (int x = 0; x < n; x++) {
+      const float a = acc[y][x];
+      out[(size_t)y * stride + x] = clamp8((int)a - (a < (float)(int)a));
+    }
+#endif
+}
+static inline void fill_dc_n(int32_t dq, uint8_t *out, int stride, int n) {
+  uint8_t p = clamp8((((dq * 4) + 16) >> 5) + 128);
+  for (int r = 0; r < n; r++) memset(out + (size_t)r * stride, p, (size_t)n);
+}
+
 // ---------------------------------------------------------------------------------------------- bit reader
 
 typedef struct {
@@ -574,8 +637,22 @@ static int decode_interval(mjdec *d, int end) {
             int n = dec_block(dct, act, d->qt[c->tq], &b, &pred[0], blk, nz);
             if (n < 0) return MJDEC_EBAD;
             int x = mx * d->mcuw + bx * 8, y = my * d->mcuh + by * 8;
-            uint8_t *o = d->out + (size_t)y * d->stride + x;
             d->st_blocks++;
+            if (d->scale > 1) {  // reduced output: (8 / scale)^2 pixels from the low coefficients
+              const int nn = 8 / d->scale;
+              uint8_t *o = d->out + (size_t)(y / d->scale) * d->stride + x / d->scale;
+              if (n == 0) {
+                fill_dc_n(blk[0], o, d->stride, nn);
+                d->st_dc++;
+              } else {
+                if (nn == 1) fill_dc_n(blk[0], o, d->stride, 1);  // 1/8: the block's mean
+                else idct_reduced(blk, nz, n, o, d->stride, nn);
+              }
+              for (int i = 0; i < n; i++) blk[nz[i]] = 0;
+              blk[0] = 0;
+              continue;
+            }
+            uint8_t *o = d->out + (size_t)y * d->stride + x;
             if (mjdec_prof_no_idct) {
               for (int i = 0; i < n; i++) blk[nz[i]] = 0;
             } else if (n == 0) {
@@ -792,9 +869,9 @@ static int scr_append(mjdec *d, const uint8_t *s, size_t n) {
   return 0;
 }
 
-static int rows_for(const mjdec *d) {
+static int rows_for(const mjdec *d) {  // output rows done (scaled)
   int r = (d->mcu / d->mcux) * d->mcuh;
-  return r > d->height ? d->height : r;
+  return (r > d->height ? d->height : r) / d->scale;
 }
 
 int mjdec_feed(mjdec *d, size_t avail) {
@@ -853,5 +930,5 @@ int mjdec_decode(mjdec *d, const uint8_t *jpeg, size_t size, uint8_t *out, int w
   if (r < 0) return r;
   r = mjdec_feed(d, size);
   if (r < 0) return r;
-  return r == height ? 0 : MJDEC_EBAD;
+  return r == height / d->scale ? 0 : MJDEC_EBAD;
 }

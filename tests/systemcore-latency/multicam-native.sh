@@ -46,7 +46,7 @@ trap cleanup EXIT
 # per-thread CPU ticks: "tid comm ticks" (comm without spaces)
 threads() { sudo -n sh -c "for t in /proc/$1/task/*; do echo \$(basename \$t) \$(tr ' ' _ < \$t/comm) \$(awk '{print \$14+\$15}' \$t/stat); done" 2>/dev/null; }
 "$L" urb 2
-S="SPECTRUM_IDLE_FPS=0 SPECTRUM_SYSTEMCORE_PROFILE=0 SPECTRUM_JPEG_DECODER=stream SPECTRUM_NAPA_STREAM=1 SPECTRUM_STREAM_DECODER=mjdec SPECTRUM_NATIVE_PUBLISH=1"
+S="SPECTRUM_IDLE_FPS=0 SPECTRUM_SYSTEMCORE_PROFILE=0 SPECTRUM_JPEG_DECODER=stream SPECTRUM_NAPA_STREAM=1 SPECTRUM_STREAM_DECODER=mjdec SPECTRUM_NATIVE_PUBLISH=1 ${MC_EXTRA:-}"  # MC_EXTRA: more VAR=value for PhotonVision
 for r in $runs; do
   pin=0; shared=0; others=0; spec=$r
   while [[ $spec == pin:* || $spec == shared:* || $spec == others:* ]]; do
