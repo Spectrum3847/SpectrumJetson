@@ -629,6 +629,53 @@ static int RunMintag(const Opt &o, const std::string &list, int ref_min, double 
   return 0;
 }
 
+// ---- pertag mode ----------------------------------------------------------------------------------------
+// Per fiducial id, for each min_tag (--mintags): % of frames detected, decision margin p5/p50, side px, and the
+// tag centre's frame-to-frame sd (px). For a static bench with tags of several printed sizes.
+static int RunPertag(const Opt &o, const std::string &list) {
+  auto items = LoadFrames(o);
+  std::vector<int> mins;
+  {
+    std::stringstream ss(list);
+    std::string t;
+    while (std::getline(ss, t, ',')) mins.push_back(std::atoi(t.c_str()));
+  }
+  std::vector<unsigned char> jpeg;
+  std::vector<uint8_t> g;
+  for (int m : mins) {
+    napa_far::Detector det("tag36h11");
+    napa_far::Config c = MakeConfig("min16");
+    c.min_tag_px = m;
+    det.SetConfig(c);
+    std::map<int, std::vector<double>> margin, side, cx, cy;
+    std::vector<double> cpu;
+    long frames = 0;
+    for (auto &it : items) {
+      if (!recording::ReadJpeg(it.f, jpeg) || !recording::DecodeGray(jpeg, g, it.f.width, it.f.height)) continue;
+      ++frames;
+      const double c0 = CpuMs();
+      auto tags = det.Detect(g.data(), it.f.width, it.f.height, it.f.width, it.f.jetson_us);
+      cpu.push_back(CpuMs() - c0);
+      for (auto &t : tags)
+        margin[t.id].push_back(t.margin), side[t.id].push_back(t.side()), cx[t.id].push_back(t.cx()), cy[t.id].push_back(t.cy());
+    }
+    std::printf("pertag: %s, %ld frames, min_tag %d, NAPA CPU ms %s\n", o.session.c_str(), frames, m, Stats(cpu).c_str());
+    for (auto &kv : margin) {
+      auto sd = [](const std::vector<double> &v) {
+        double a = 0, s = 0;
+        for (double x : v) a += x;
+        a /= v.size();
+        for (double x : v) s += (x - a) * (x - a);
+        return v.size() > 1 ? std::sqrt(s / (v.size() - 1)) : 0.0;
+      };
+      std::printf("  id %-3d seen %6.1f%%  side %6.1f px  margin p5/p50 %6.1f %6.1f  centre sd x %.3f y %.3f px\n",
+                  kv.first, 100.0 * kv.second.size() / std::max(1L, frames), Pct(side[kv.first], .5), Pct(kv.second, .05),
+                  Pct(kv.second, .5), sd(cx[kv.first]), sd(cy[kv.first]));
+    }
+  }
+  return 0;
+}
+
 // ---- split mode -----------------------------------------------------------------------------------------
 // Where libjpeg-turbo's gray decode spends its time, without perf: (a) entropy decode of all components only
 // (jpeg_read_coefficients: Huffman + restart handling, no IDCT), (b) the full gray decode (Huffman for all
@@ -871,6 +918,7 @@ int main(int argc, char **argv) {
   if (o.mode == "fuzz") return RunFuzz(o);
   if (o.mode == "probe") return RunProbe(o, o.band, o.fill);
   if (o.mode == "split") return RunSplit(o);
+  if (o.mode == "pertag") return RunPertag(o, o.mintags);
   if (o.mode == "mintag") return RunMintag(o, o.mintags, o.ref_min, o.scale);
   std::fprintf(stderr, "mode: decode|fused|fuzz\n");
   return 2;

@@ -158,6 +158,7 @@ int main(int argc, char **argv) {
   std::vector<double> rx_lat, pub_lat, pub_rx;
   std::map<std::string, std::vector<double>> fields;
   std::map<std::string, double> first;
+  std::map<int, std::map<std::string, std::vector<double>>> per_id;
   const int64_t end = MonoNs() + (int64_t)(secs * 1e9);
   while (MonoNs() < end) {
     if (g_schemas.empty() || g_schemas.size() < 6) {
@@ -197,6 +198,28 @@ int main(int argc, char **argv) {
         for (auto &kv : d)
           if (kv.first.rfind("targets[0].", 0) == 0) fields[kv.first].push_back(kv.second);
       }
+      // per fiducial id: range, translation, rotation (angle from the mean later), apparent size (px)
+      for (int i = 0; i < (int)d["targets#"]; i++) {
+        const std::string t = "targets[" + std::to_string(i) + "].";
+        const int id = (int)d[t + "fiducialId"];
+        auto &v = per_id[id];
+        const double x = d[t + "bestCameraToTarget.x"], y = d[t + "bestCameraToTarget.y"],
+                     z = d[t + "bestCameraToTarget.z"];
+        v["range"].push_back(std::sqrt(x * x + y * y + z * z));
+        v["x"].push_back(x), v["y"].push_back(y), v["z"].push_back(z);
+        double q[4] = {d[t + "bestCameraToTarget.qw"], d[t + "bestCameraToTarget.qx"], d[t + "bestCameraToTarget.qy"],
+                       d[t + "bestCameraToTarget.qz"]};
+        if (q[0] < 0) for (double &c : q) c = -c;  // one hemisphere
+        v["qw"].push_back(q[0]), v["qx"].push_back(q[1]), v["qy"].push_back(q[2]), v["qz"].push_back(q[3]);
+        double side = 0;
+        for (int k = 0; k < 4; k++) {
+          const std::string a = t + "detectedCorners[" + std::to_string(k) + "].",
+                            b = t + "detectedCorners[" + std::to_string((k + 1) % 4) + "].";
+          side += std::hypot(d[a + "x"] - d[b + "x"], d[a + "y"] - d[b + "y"]) / 4;
+        }
+        v["side"].push_back(side);
+        v["amb"].push_back(d[t + "poseAmbiguity"]);
+      }
     }
     usleep(1000);
   }
@@ -208,6 +231,34 @@ int main(int argc, char **argv) {
               "publish -> received %.3f / %.3f / %.3f\n",
               Pct(rx_lat, .5), Pct(rx_lat, .95), Pct(rx_lat, .99), Pct(pub_lat, .5), Pct(pub_lat, .95),
               Pct(pub_lat, .99), Pct(pub_rx, .5), Pct(pub_rx, .95), Pct(pub_rx, .99));
+  auto msd = [](const std::vector<double> &v, double &m, double &s) {
+    m = 0, s = 0;
+    for (double x : v) m += x;
+    m /= std::max<size_t>(1, v.size());
+    for (double x : v) s += (x - m) * (x - m);
+    s = v.size() > 1 ? std::sqrt(s / (v.size() - 1)) : 0;
+  };
+  if (!per_id.empty())
+    std::printf("per tag id (of %ld results): seen%%  side px  range m (sd mm)  rot sd deg  ambiguity p50\n", n);
+  for (auto &kv : per_id) {
+    auto &v = kv.second;
+    double side, sides, rm, rs, qm[4], qs;
+    msd(v["side"], side, sides);
+    msd(v["range"], rm, rs);
+    const char *qk[4] = {"qw", "qx", "qy", "qz"};
+    for (int k = 0; k < 4; k++) msd(v[qk[k]], qm[k], qs);
+    double qn = std::sqrt(qm[0] * qm[0] + qm[1] * qm[1] + qm[2] * qm[2] + qm[3] * qm[3]);
+    std::vector<double> ang;  // angle of each rotation from the mean rotation
+    for (size_t i = 0; i < v["qw"].size(); i++) {
+      double dot = std::fabs(v["qw"][i] * qm[0] + v["qx"][i] * qm[1] + v["qy"][i] * qm[2] + v["qz"][i] * qm[3]) / qn;
+      ang.push_back(2 * std::acos(std::min(1.0, dot)) * 180 / M_PI);
+    }
+    double am = 0;
+    for (double a : ang) am += a * a;
+    am = ang.empty() ? 0 : std::sqrt(am / ang.size());
+    std::printf("  id %-3d %6.1f%%  %6.1f  %7.4f (%6.2f)  %8.3f  %8.3f\n", kv.first, 100.0 * v["range"].size() / std::max(1L, n),
+                side, rm, 1000 * rs, am, Pct(v["amb"], .5));
+  }
   for (auto &kv : fields) {
     double m = 0, s = 0;
     for (double x : kv.second) m += x;
