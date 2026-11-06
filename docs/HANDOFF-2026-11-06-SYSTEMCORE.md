@@ -57,6 +57,13 @@ Published summary: https://claude.ai/artifact/2UXdwMdQXJ4XqfPSzuviP9 (private; s
   installer builds a Java AOT cache, PV starts via `/opt/photonvision/run.sh` (d6ed364). Status: `docs/PHOTONVISION-PERF.md`.
 - **Pi:** PV installed with native backend, AOT=0, PV stopped, limelight_visionserver stopped, DB restored (both cameras), Swyft exp 10.
 
+- **Native round 2** (fork 69646b4c, 70a41692, 38f8d479 = photonvision-131..133; SpectrumJetson dfbe80e, 6fbdbfc):
+  passthrough input stream (viewer cost +9.4 → ~0 points), installer writes `20-native-camera.conf`
+  (SPECTRUM_NATIVE_PUBLISH=1) and builds the AOT cache, both cameras native in one PV (39.2% vs fast path 42.4%,
+  dark), sequence IDs keep rising across handovers (fixes the 21 mismatches), calibration via the UI's API works.
+  Open: our small-URB uvcvideo isn't loaded at boot (stock driver: 46.4% CPU, 10.9 ms vs 39.2%, 8.4 ms);
+  0.23 ms Thriftiest offset with two cameras; lit CPU; UI controls pass. One more Pi reset (SD/undervoltage).
+
 ## In progress / next
 
 1. Native backend leftovers: real calibration from the UI, passthrough stream (camera JPEG, no re-encode), both
