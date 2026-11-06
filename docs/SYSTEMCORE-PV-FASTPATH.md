@@ -120,3 +120,42 @@ capture -> publish (on the SystemCore, no NT) p50/p95/p99 ms:
 - One unpinned two-camera run was discarded: both NT probes stalled together for ~2 s (received times jumped 2.3 s
   for both cameras at once while PhotonVision's health kept 120 fps) during bench under-voltage; the rerun
   matched the earlier one.
+
+## Capture time reference (photonvision-112, 2026-11-06)
+
+`tests/systemcore-latency/tsref-compare.sh` runs the fast path on the Thriftiest (urb_packets 2) under a kernel trace
+and logs every published result; `tsref.py` compares each time reference with the frame's first USB **data**
+packet, the LED test's reference (exposure end = first data packet - 0.41 ms). ms, mean / sd over ~1300-1900 frames:
+
+| Reference | minus first data packet | Frame-to-frame jitter (interval sd) | Notes |
+|---|---|---|---|
+| first data packet (trace estimate) | 0 | 0.027 | URB completion less the data packets after it |
+| uvcvideo stamp, hwtimestamps=0 | -0.746 / 0.088 | 0.037 | stamps the header-only packets that open each frame |
+| watcher first sight (fast path before) | +0.085 / 0.07 | 0.05-0.07 | bimodal: URB boundary + wake |
+| V4L2 stamp, hwtimestamps=1 (camera PTS via SCR) | -0.348 or -0.224 / 0.039 | 0.004-0.007 | the two values are one microframe apart, chosen per stream start (5 sessions) |
+| fast path, camera clock + first-sight bias (new) | +0.082..+0.090 / 0.040 | 0.004 | 3 sessions, both bias modes |
+| sc-vision, first data packet (fixed) | (its own reference) | 0.027 | it stamped the header-only start before, ~0.75 ms early |
+
+- The camera clock is the steadiest reference but uvcvideo's SCR recovery lands it on one of two offsets a
+  microframe apart per session. The fast path uses both: each frame's timing from the camera clock (Java hands
+  back the V4L2 stamps of the frames it detects; the native side carries the camera's period, 8.245 ms on the
+  Thriftiest, to the frames it publishes first) and the offset from the long-run mean of (first sight - stamp).
+  The sd 0.040 above is the trace's packet estimate; the stamps themselves move 0.004-0.007 ms frame to frame.
+- PhotonVision's Java path with hwtimestamps=1: stamp - 0.18 ms (firmware agent: stamp = PTS + 0.135 ms, PTS =
+  exposure end + 0.045 ms) - exposure/2; that keeps the session's microframe bias. Same-reference check here:
+  stamp - exposure end = +0.06 or +0.19 ms (0.41 - 0.348 / 0.224), so 0.18 matches one session mode.
+- Our uvcvideo now loads with hwtimestamps=1 by default (`uvcvideo-load.sh`, HWTS=0 for the old stamps).
+- The Thriftiest's exposure settings 1-4 are mis-mapped (1 ~0.5 ms, 2 ~1.1 ms, 3/4 ~0.3 ms; FINDINGS 2A): the fork
+  and sc-vision use the real exposure for the half-exposure shift. Avoid settings 1-2 on the Thriftiest.
+
+**PhotonVision vs sc-vision on the same reference** (first data packet -> received by a PhotonLib-style subscriber
+on the same SystemCore, Thriftiest, exposure setting 2, min tag 32, ondemand, ms p50 / p95):
+
+| | p50 | p95 |
+|---|---|---|
+| PhotonVision fast path (5 sessions) | 8.65-8.85 | 9.36-9.75 |
+| sc-vision | 8.62 | 9.46 |
+
+So the fast path is 0.05-0.25 ms behind sc-vision at the median, within session-to-session noise of ~0.2 ms: the
+earlier "0.3 ms" gap mostly came from the two programs stamping different packets (sc-vision the header-only
+start, 0.75 ms earlier) and from the watcher's first-sight jitter.

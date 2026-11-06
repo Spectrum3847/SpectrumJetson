@@ -2,7 +2,8 @@
 # Swap the SystemCore's camera driver at run time (no /lib/modules, modprobe.d or boot changes; a reboot always comes
 # back to the stock driver). Run ON THE SYSTEMCORE with the camera free (holds /tmp/camera.lock).
 #   uvcvideo-load.sh urb N [KO]   ours (scripts/systemcore/build-uvcvideo.sh): N packets per isochronous URB
-#                                  (N x 125 us; stock is 32 = 4 ms). KO default ~/builder/uvcvideo-sc.ko
+#                                  (N x 125 us; stock is 32 = 4 ms). KO default ~/builder/uvcvideo-sc.ko.
+#                                  hwtimestamps=1 (buffer stamps from the camera clock, PTS+SCR) unless HWTS=0
 #   uvcvideo-load.sh stock        back to the stock module (modprobe: Limelight's options from modprobe.d)
 #   uvcvideo-load.sh status
 # Ours gets the same options as the stock one (/etc/modprobe.d/uvcvideo.conf: quirks + Limelight's ll_compressed_*).
@@ -23,7 +24,7 @@ case $cmd in
     n=${2:?packets per URB}
     unload
     # shellcheck disable=SC2046
-    sudo insmod "$KO" $(opts) urb_packets="$n"
+    sudo insmod "$KO" $(opts) urb_packets="$n" hwtimestamps="${HWTS:-1}"
     ;;
   stock)
     unload
@@ -33,4 +34,4 @@ case $cmd in
   *) echo "usage: uvcvideo-load.sh urb N [KO] | stock | status" >&2; exit 2 ;;
 esac
 sleep 1
-echo "uvcvideo: srcversion $(cat /sys/module/uvcvideo/srcversion 2>/dev/null), urb_packets $(cat /sys/module/uvcvideo/parameters/urb_packets 2>/dev/null || echo stock), video0 $(ls /dev/video0 2>/dev/null || echo missing)"
+echo "uvcvideo: srcversion $(cat /sys/module/uvcvideo/srcversion 2>/dev/null), urb_packets $(cat /sys/module/uvcvideo/parameters/urb_packets 2>/dev/null || echo stock), hwtimestamps $(cat /sys/module/uvcvideo/parameters/hwtimestamps 2>/dev/null), video0 $(ls /dev/video0 2>/dev/null || echo missing)"

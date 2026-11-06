@@ -19,7 +19,7 @@ mkdir -p "$OUT"; chmod 777 "$OUT" 2>/dev/null
 T=/sys/kernel/tracing
 DROPIN=/etc/systemd/system/photonvision.service.d/zz-latency.conf
 exec 9>/tmp/camera.lock
-flock -w 120 9 || { echo "camera busy (/tmp/camera.lock)"; exit 1; }
+[[ ${SC_VISION_HAVE_LOCK:-0} == 1 ]] || flock -w 120 9 || { echo "camera busy (/tmp/camera.lock)"; exit 1; }
 was_pv=$(systemctl is-active photonvision)
 cleanup() {
   sudo -n sh -c "echo 0 > $T/tracing_on; echo 0 > $T/events/enable; echo > $T/trace; echo local > $T/trace_clock"

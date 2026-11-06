@@ -355,10 +355,13 @@ int main(int argc, char **argv) {
     sp.sched_priority = fifo;
     if (sched_setscheduler(0, SCHED_FIFO, &sp)) perror("SCHED_FIFO");
   }
-  // first packet -> mid-exposure: half the exposure (exposure_time_absolute is 0.1 ms steps) + the camera's delay
-  // from exposure end to its first packet (default 2.5 ms, Team 100's figure; the firmware analysis measured
-  // ~0.35 ms from the payload PTS, to be confirmed with an LED test before the default changes)
-  if (mid_offset_ms < 0) mid_offset_ms = (exposure > 0 ? exposure * 0.05 : 0) + camera_delay_ms;
+  // first data packet -> mid-exposure: half the exposure (exposure_time_absolute is 0.1 ms steps) + the camera's
+  // delay from exposure end to its first data packet (0.4 ms: LED test 0.41 +- 0.05 ms on the Thriftiest). The
+  // Thriftiest (usbrecov 5.13) mis-maps settings 1-4: 1 ~0.5 ms, 2 ~1.1 ms, 3 and 4 ~0.3 ms (FINDINGS 2A).
+  double exposure_ms = exposure > 0 ? exposure * 0.1 : 0;
+  const bool thriftiest = uc.vid == 0x1bcf || (uc.vid == 0 && !(cam_serial && strncmp(cam_serial, "SJ-SW", 5) == 0));
+  if (thriftiest && exposure >= 1 && exposure <= 4) exposure_ms = exposure == 1 ? 0.5 : exposure == 2 ? 1.1 : 0.3;
+  if (mid_offset_ms < 0) mid_offset_ms = exposure_ms / 2 + camera_delay_ms;
   if (pub) nt_pub_config(pub, have_cam ? &cam : nullptr, tag_size, (int64_t)(mid_offset_ms * 1e6));
   if (lock_path) {  // the bench's camera lock: wait up to 30 s, then give up
     int lfd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
@@ -399,7 +402,7 @@ int main(int argc, char **argv) {
   int fid = -1, done_fid = -1, in_frame = 0, process = 0, rows_dec = 0, rows_fed = 0, bad = 0;
   long seq = 0, nframes = 0, ndone = 0, nbad = 0, ndet = 0, nskip = 0;
   int64_t last_frame_cpu_ns = 0;
-  int64_t t_first = 0, c_frame0 = 0, c_dec = 0, c_napa = 0, last_proc_start = 0;
+  int64_t t_first = 0, t_fid = 0, c_frame0 = 0, c_dec = 0, c_napa = 0, last_proc_start = 0;
   std::vector<double> lat;  // eof reap -> results, ms
   FILE *save_f = nullptr;
   unsigned f_flags = 0, f_pts = 0, f_stc = 0, f_sof = 0;
@@ -514,14 +517,18 @@ int main(int argc, char **argv) {
           nbad++;
         }
         in_frame = 1, fid = f, flen = 0, bad = 0, rows_dec = rows_fed = 0;
-        t_first = tr - (int64_t)c.pkt_from_end * 125000;
+        // The frame's time reference is its first DATA packet (the LED test's: exposure end = first data packet -
+        // 0.41 ms). The camera starts a frame with ~0.75 ms of header-only packets carrying the new frame ID
+        // (kernel trace, tests/systemcore-latency/tsref-compare.sh); t_fid is the first of those (scheduling).
+        t_fid = tr - (int64_t)c.pkt_from_end * 125000;
+        t_first = 0;
         f_flags = c.flags, f_pts = c.pts, f_stc = c.scr_stc, f_sof = c.scr_sof;
         seq++;
         process = (seq % every) == 0;
         // --fps-max: skip a frame (no decode, no NAPA) if it starts less than a period (less 2 ms of jitter
         // room) after the last processed one. Decided at its first packet, so a processed frame is not delayed.
         if (process && fps_max > 0 && last_proc_start &&
-            t_first - last_proc_start < (int64_t)(1e9 / fps_max) - 2000000)
+            t_fid - last_proc_start < (int64_t)(1e9 / fps_max) - 2000000)
           process = 0;
         // Overload (e.g. min tag 16 on a busy frame costing more than a frame period): newest-frame semantics.
         // Skip this frame if we are working behind the USB stream (this URB was reaped > 2 ms after it completed) or
@@ -531,7 +538,7 @@ int main(int argc, char **argv) {
           nskip++;
           last_frame_cpu_ns = 0;  // try the next one
         }
-        if (process) last_proc_start = t_first;
+        if (process) last_proc_start = t_fid;
         if (process) {
           c_frame0 = cpu_ns();
           c_dec = c_napa = 0;
@@ -540,6 +547,7 @@ int main(int argc, char **argv) {
         }
       }
       if (c.flags & 0x40) bad = 1;
+      if (c.len > 0 && t_first == 0) t_first = tr - (int64_t)c.pkt_from_end * 125000;
       if (process && c.len > 0) {
         if (flen + c.len > FB) bad = 1;
         else memcpy(fb.data() + flen, c.data, c.len), flen += c.len;

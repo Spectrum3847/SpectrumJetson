@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -124,8 +125,15 @@ struct PublishCfg {
   bool have_cam = false;
   double tag_size = 0.1651;
   int64_t mid_shift_ns = 0;    // frame's first bytes -> mid-exposure
+  int64_t cam_shift_ns = 0;    // camera-clock stamp (PTS) -> mid-exposure; 0: don't use the camera clock
   int64_t nt_offset_ns = 0;    // PhotonVision's time-sync offset
   int64_t since_pong = 0;
+};
+
+// A streamed frame's result: its tags and when its bytes were first seen.
+struct SinkOut {
+  std::vector<napa_far::Tag> tags;
+  int64_t t_begin;
 };
 
 // The camera watcher's side of streaming NAPA: its own detector, fed band by band on the watcher thread.
@@ -136,6 +144,71 @@ struct StreamSink {
   bool cfg_new = true;
   PublishCfg pub;              // (cfg_mu)
   int64_t t_begin = 0;         // CLOCK_MONOTONIC when the frame's first bytes were seen
+  int64_t t_cam = 0;           // the frame's predicted camera-clock stamp (0: unknown)
+  std::atomic<long> cam_stamped{0};
+  std::atomic<int64_t> taken_sight{0};  // t_begin of the frame detectStreamed last handed to Java
+  // Camera clock (hwtimestamps=1). The first sight of a frame's bytes is noisy (sd ~0.07 ms: URB boundary and
+  // wake); the camera's PTS-derived V4L2 stamps are steady (interval sd 0.007 ms) but final only at DQBUF, after
+  // this publishes. Java hands back the stamps of the frames it detects (~30/s) as anchors; between them the
+  // camera's period carries the stamp: t_cam = anchor + round((sight - anchor's sight) / period) x period.
+  //
+  // The stamp's offset to the frame's first data packet isn't fixed: uvcvideo's SCR clock recovery lands it -0.348
+  // or -0.224 ms from the first data packet, a microframe apart, chosen at stream start (kernel trace, 5 sessions).
+  // The first sight has no such bias (+0.087 ms, sd 0.07). So the camera clock gives each frame's timing and the
+  // long-run mean of (first sight - camera stamp) puts it back on the first data packet:
+  //   capture = t_cam + mean(sight - cam) - (mid_shift: seen lag + camera delay + exposure / 2).
+  std::mutex cam_mu;
+  int64_t anc_sight = 0, anc_cam = 0, last_sight = 0;
+  double period = 0, sight_period = 0, sight_off = 0, sight_off_slow = 0;
+  double deltas[9] = {};
+  int ndeltas = 0, misses = 0;
+  void Anchor(int64_t sight, int64_t cam) {
+    std::lock_guard<std::mutex> l(cam_mu);
+    const double off = static_cast<double>(sight - cam);
+    if (off < -2e6 || off > 3e6) return;  // not this frame's stamp
+    if (anc_sight && sight > anc_sight && sight_period > 0) {
+      const double per = period > 0 ? period : sight_period;
+      const long k = std::lround(static_cast<double>(sight - anc_sight) / per);
+      if (k >= 1 && k <= 120) {
+        const double pm = static_cast<double>(cam - anc_cam) / static_cast<double>(k);
+        if (std::fabs(pm - sight_period) < 0.03 * sight_period &&
+            (period == 0 || std::fabs(pm - period) < 0.01 * period))
+          period = period == 0 ? pm : period + 0.2 * (pm - period);
+        else
+          period = 0;  // a mode change, or the count was off: start over
+      }
+    }
+    sight_off = sight_off == 0 ? off : sight_off + 0.1 * (off - sight_off);
+    // the bias: a slow mean (~3 s at Java's ~30 anchors/s; the sight's 0.07 ms noise averages to ~0.005 ms)
+    sight_off_slow = sight_off_slow == 0 ? off : sight_off_slow + 0.01 * (off - sight_off_slow);
+    if (sight > anc_sight) anc_sight = sight, anc_cam = cam;
+  }
+  int64_t Predict(int64_t sight) {
+    std::lock_guard<std::mutex> l(cam_mu);
+    if (last_sight) {  // the frame period from the sights: median of the last 9 intervals (robust to a late one)
+      const double d = static_cast<double>(sight - last_sight);
+      if (d > 1e6 && d < 100e6) {
+        deltas[ndeltas++ % 9] = d;
+        if (ndeltas >= 9) {
+          double t[9];
+          std::copy(deltas, deltas + 9, t);
+          std::nth_element(t, t + 4, t + 9);
+          sight_period = t[4];
+        }
+      }
+    }
+    last_sight = sight;
+    if (period <= 0 || !anc_sight) return 0;
+    const long k = std::lround(static_cast<double>(sight - anc_sight) / period);
+    if (k < 0 || k > 60) return 0;  // anchors stale (Java not detecting): don't extrapolate far
+    const int64_t pred = anc_cam + std::llround(static_cast<double>(k) * period);
+    if (std::fabs(static_cast<double>(sight - pred) - sight_off) < 0.3 * period) {
+      misses = 0;
+      return pred;
+    }
+    if (++misses >= 5) period = 0, misses = 0;  // locked onto a wrong period or count: start over
+    return 0;
+  }
   int width = 0, height = 0;
   std::atomic<int64_t> seq{0};
   std::atomic<long> published{0};
@@ -146,6 +219,7 @@ struct StreamSink {
     c.begin = [](void *x, const uint8_t *img, int w, int h, int stride) -> int {
       auto *s = static_cast<StreamSink *>(x);
       s->t_begin = MonoNs();
+      s->t_cam = s->Predict(s->t_begin);
       s->width = w, s->height = h;
       {
         std::lock_guard<std::mutex> l(s->cfg_mu);
@@ -157,11 +231,11 @@ struct StreamSink {
     c.feed = [](void *x, int rows) { static_cast<StreamSink *>(x)->det.Feed(rows); };
     c.finish = [](void *x) -> void * {
       auto *s = static_cast<StreamSink *>(x);
-      auto *tags = new std::vector<napa_far::Tag>(s->det.Finish());
-      s->Publish(*tags);
-      return tags;
+      auto *out = new SinkOut{s->det.Finish(), s->t_begin};
+      s->Publish(out->tags);
+      return out;
     };
-    c.free_result = [](void *r) { delete static_cast<std::vector<napa_far::Tag> *>(r); };
+    c.free_result = [](void *r) { delete static_cast<SinkOut *>(r); };
   }
   // On the watcher thread, the moment the tags are known: pose + PhotonPipelineResult + NT, as PhotonVision's
   // Java pipeline would (pv_pack.h), so the Java pipeline is off the per-frame path.
@@ -188,12 +262,22 @@ struct StreamSink {
     std::vector<uint8_t> buf;
     buf.reserve(1024);
     const int64_t now = MonoNs();
-    pvpack::pack_result(buf, ++seq, t_begin - p.mid_shift_ns + p.nt_offset_ns, now + p.nt_offset_ns, p.since_pong,
+    // capture (mid-exposure): from the camera's clock when known (steady to ~0.01 ms), else from the first sight
+    // of the frame's bytes (0-0.15 ms after its first data packet, with the URB boundary and the wake)
+    double bias = 0;
+    {
+      std::lock_guard<std::mutex> l(cam_mu);
+      bias = sight_off_slow;
+    }
+    const bool by_cam = t_cam > 0 && p.cam_shift_ns > 0 && bias != 0;
+    const int64_t capture = by_cam ? t_cam + std::llround(bias) - p.mid_shift_ns : t_begin - p.mid_shift_ns;
+    if (by_cam) cam_stamped++;
+    pvpack::pack_result(buf, ++seq, capture + p.nt_offset_ns, now + p.nt_offset_ns, p.since_pong,
                         p.have_cam ? &p.cam : nullptr, width, height, n, ids, corners, p.have_cam ? best : nullptr,
                         p.have_cam ? alt : nullptr, nullptr);
     nt->set_raw(p.pub, 0, buf.data(), buf.size());
     nt->flush(p.inst);
-    lat_sum_ns += MonoNs() - (t_begin - p.mid_shift_ns);
+    lat_sum_ns += MonoNs() - capture;
     lat_n++;
     published++;
   }
@@ -428,6 +512,10 @@ JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setNativePubli
   }
   p.tag_size = size;
   p.mid_shift_ns = midShiftNs;
+  {
+    std::lock_guard<std::mutex> l(n->sink->cfg_mu);
+    p.cam_shift_ns = n->sink->pub.cam_shift_ns;  // set by setNativeCamShift
+  }
   p.nt_offset_ns = ntOffsetNs;
   p.since_pong = sincePongNs;
   {
@@ -435,6 +523,24 @@ JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setNativePubli
     n->sink->pub = p;
   }
   return n->sink->published.load();
+}
+
+// sc/mjpeg-napa: camera-clock stamp (uvcvideo hwtimestamps=1: the PTS, which marks the end of exposure) ->
+// mid-exposure, ns (exposure/2 + the PTS's delay after exposure end); 0: stamp from the first sight of the bytes.
+// Returns how many published results were stamped from the camera clock so far.
+// lastFrameCamNs: the camera-clock stamp of the frame detectStreamed last returned (0: none), an anchor.
+JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setNativeCamShift(JNIEnv *, jclass, jlong h,
+                                                                                    jlong camShiftNs,
+                                                                                    jlong lastFrameCamNs) {
+  auto *n = Handle(h);
+  if (!n || !n->sink) return -1;
+  {
+    std::lock_guard<std::mutex> l(n->sink->cfg_mu);
+    n->sink->pub.cam_shift_ns = camShiftNs;
+  }
+  const int64_t sight = n->sink->taken_sight.exchange(0);
+  if (lastFrameCamNs > 0 && sight > 0) n->sink->Anchor(sight, lastFrameCamNs);
+  return n->sink->cam_stamped.load();
 }
 
 // Mean capture (mid-exposure) -> publish of this camera's natively published results since the last call, ms;
@@ -484,7 +590,8 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_detectS
     void *res = nullptr;
     rc = api->take(img, width, height, static_cast<size_t>(step), &n->sink->c, wantAfterNanos, &res);
     if (rc == 1) {
-      tags.swap(*static_cast<std::vector<napa_far::Tag> *>(res));
+      tags.swap(static_cast<SinkOut *>(res)->tags);
+      n->sink->taken_sight = static_cast<SinkOut *>(res)->t_begin;
       n->sink->c.free_result(res);
       n->streamed++;
       // (a frame handed over without its pixels (no stream viewer) can't be re-detected here)
@@ -503,6 +610,13 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_detectS
                   "identity checks ok %ld differ %ld skipped (far search) %ld\n",
                   n->streamed, n->fallback + n->not_streamed, n->fallback, n->not_streamed, n->check_ok.load(),
                   n->check_differ.load(), n->check_skipped.load());
+    if (n->sink && n->sink->pub.cam_shift_ns > 0) {
+      std::lock_guard<std::mutex> l(n->sink->cam_mu);
+      std::printf("NAPA native publish: %ld results stamped from the camera clock so far, period %.4f ms, "
+                  "first sight - camera stamp %.3f ms (slow mean %.3f)\n",
+                  n->sink->cam_stamped.load(), n->sink->period / 1e6, n->sink->sight_off / 1e6,
+                  n->sink->sight_off_slow / 1e6);
+    }
     std::fflush(stdout);
     n->next_log = now + std::chrono::seconds(10);
     n->streamed = n->fallback = n->not_streamed = 0;

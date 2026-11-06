@@ -33,10 +33,11 @@ exec 9>/tmp/camera.lock
 flock -w 120 9 || { echo "camera busy"; exit 1; }
 export SC_VISION_HAVE_LOCK=1   # uvcvideo-load.sh: we hold the lock
 sudo -n systemctl stop photonvision
-sudo -n cp "$DB" "$BACKUP"
+dbcopy() { sudo -n python3 -c 'import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); print(sys.argv[2], d.execute("pragma integrity_check").fetchone()[0])' "$1" "$2"; }
+dbcopy "$DB" "$BACKUP" || { echo "settings DB unreadable: not touching it"; exit 1; }
 cleanup() {
   sudo -n systemctl stop photonvision 2>/dev/null
-  sudo -n cp "$BACKUP" "$DB"
+  dbcopy "$BACKUP" "$DB"
   sudo -n rm -f "$DROPIN"; sudo -n systemctl daemon-reload
   "$L" stock >/dev/null
   echo "restored: settings DB, drop-in, stock uvcvideo"
