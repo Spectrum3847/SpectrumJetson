@@ -170,12 +170,12 @@ items: **32.7 / 32.6% -> 29.1-29.5% of a core, 6340 -> 4880-4965 wake-ups/s**, c
 
 | Item | Commit | Measured | Verdict |
 |---|---|---|---|
-| Identity checks every 1024th frame (stream re-decode, NAPA re-detect; `SPECTRUM_STREAM_CHECK_EVERY`, `SPECTRUM_NAPA_CHECK_EVERY`) | SpectrumJetson sc/pv-perf (`stream_decode.cc`, `NapaDetectorJNI.cc`) | 29.3 -> 29.5% (noise) in the dark, where a whole-frame decode is cheap | keep; ~1 point lit by the first round's estimate, unmeasured lit |
+| Identity checks every 1024th frame (stream re-decode, NAPA re-detect; `SPECTRUM_STREAM_CHECK_EVERY`, `SPECTRUM_NAPA_CHECK_EVERY`) | SpectrumJetson sc/pv-perf 9dd097e (`stream_decode.cc`, `NapaDetectorJNI.cc`) | 29.3 -> 29.5% (noise) in the dark, where a whole-frame decode is cheap | **waiting for the builder's OK** (its files; diff in BUILDER-LOG) |
 | Java pipeline at 10 fps while no UI and no stream viewer (`SPECTRUM_NATIVE_PUBLISH_IDLE_FPS`) | f9868494 | 29.5 -> 29.1% (noise; C2 alone moves 1-4 points) | small; merge only if the legacy NT entries at 10 Hz are fine |
 | Stream preview: a 1/2 or 1/4-size picture from the decoder for a watched stream instead of the 1 MB copy | 2bc0e468 + SpectrumJetson `spectrum_stream_preview` | two viewers: 33.8 / 34.3% without, 34.2 / 33.7% with; decoder 1.5 -> 1.2%, stream thread 1.25 -> 1.05% | **not worth it**: after 124 the copy happens 30 times a second (~0.3% of a core); most of a viewer's cost is cscore's MJPEG encode/serve (2.4%) and the stream thread. Leave unmerged |
-| Dashboard: back off failed stream retries (0.1 s doubling to 5 s) | bce4e514 | client lint/prettier clean | merge (client only) |
-| Rewind recorder: grab only around kept frames, fdatasync | 340af6cc | Rewind thread 1.2% / 155 wake-ups/s -> 1.0% / 113 (one run each) | small; merge with the native Rewind writer in mind |
-| Rewind defaults scaled to a small disk | 5509a54e | functional (below) | **merge**: without it Rewind never records on the SystemCore |
+| Dashboard: back off failed stream retries (0.1 s doubling to 5 s) | fork sc/mjpeg-napa 7b1ea248 = photonvision-125 | client lint/prettier clean | **merged** |
+| Rewind recorder: grab only around kept frames, fdatasync | e192f4cd = photonvision-126 | Rewind thread 1.2% / 155 wake-ups/s -> 1.0% / 113 (one run each) | **merged** |
+| Rewind defaults scaled to a small disk | dc840246 = photonvision-127 | functional (below) | **merged**: without it Rewind never records on the SystemCore |
 
 With a stream viewer the first round's +6-7 points (lit Thriftiest) are now ~+4.5 points (dark Swyft: 29.5 ->
 ~34%), most of it cscore's encode and serve; a cheaper picture doesn't change that much.
@@ -225,12 +225,29 @@ fail). Install: after copying a new jar, run the training run (or a short headle
 the cache next to the jar (`/opt/photonvision/photonvision.aot`, ~43 MB) and add `-XX:AOTCache=...` to ExecStart.
 Not measured: steady state after minutes (the JIT finishes either way).
 
+### AOT cache in the installer
+
+`scripts/systemcore/install-photonvision.sh` now builds the cache for the jar it installs (unless `AOT=0`): it runs
+PhotonVision for `AOT_TRAIN_S` seconds (default 45, with the cameras and drop-ins as configured) in record mode with
+the configuration in RAM, builds the cache (`-XX:AOTMode=create`, no camera), and puts it next to the jar as
+`/opt/photonvision/photonvision.aot` with `photonvision.aot.stamp` (the jar's size and time, the JVM's version).
+The service's ExecStart is now `/opt/photonvision/run.sh` (`scripts/systemcore/photonvision-run.sh`): it adds
+`-XX:AOTCache=` only when the stamp matches, and says in the journal which it did ("AOT cache: using ...", "none",
+"stale (built for another jar or JVM)", or "off" with `SPECTRUM_AOT_CACHE=0`). A cache the JVM itself finds stale
+is ignored with a warning; the start never fails. Rebuild: rerun the installer (it rebuilds for the new jar).
+`tests/pv-perf/aot-install-test.sh` runs the same path in RAM against the installed jar, without touching /opt.
+
+Steady state (that test: the installed jar, Swyft, 60 s warm-up then 20 s, one run each): 28.9% of a core
+without the cache, 28.1% with it (C2 1.1 -> 0.3%); latency the same (p99 10.81 / 10.82 ms). So the cache is a
+start-up win (above) and costs nothing later. The training run's cache was 42.7 MB; the stamp check caught a
+changed jar (LimelightOS has no stat(1): run.sh uses wc and date -r).
+
 ### Next
 
 - Builder: the native camera backend (owns `USBFrameProvider`, `VisionSourceManager`, `NativeCameraSource`), its
   Rewind writer, and a proper eMMC/partition plan for recordings.
-- Merge into `sc/mjpeg-napa` (with the builder's OK on the files it owns): bce4e514 (client), 5509a54e (Rewind
-  defaults), the identity-check interval; optionally 340af6cc and f9868494. Not 2bc0e468 (preview).
-- AOT cache in `install-photonvision.sh` (training + create per jar).
+- Merged: photonvision-125..127 (fork dc840246, SpectrumJetson 17e2caa). Waiting: the identity-check interval
+  (builder's OK). Optional after a lit A/B: the 10 fps idle Java pipeline (fork sc/pv-perf 65cddfbc). Not merging:
+  the stream preview (fork branch sc/pv-perf-preview).
 - Lights on: the lit A/B for the identity-check interval and the idle Java rate, and nt_check identity of the
   merged build.

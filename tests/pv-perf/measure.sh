@@ -80,7 +80,9 @@ sudo -n python3 "$HERE/tests/systemcore-latency/pv-camera-config.py" only "$CAM"
 LIB=${PVPERF_LIB:-/opt/photonvision/lib}
 { printf '[Service]\n'; for v in "$@"; do printf 'Environment=%s\n' "$v"; done
   printf 'Environment=LD_LIBRARY_PATH=%s\n' "$LIB"
-  if [[ -n ${PVPERF_JVM:-} || -n ${PVPERF_JAR:-} || -n ${PVPERF_LIB:-} ]]; then
+  if [[ -n ${PVPERF_EXEC:-} ]]; then  # a whole ExecStart (e.g. a run.sh wrapper under test)
+    printf 'ExecStart=\nExecStart=%s\n' "$PVPERF_EXEC"
+  elif [[ -n ${PVPERF_JVM:-} || -n ${PVPERF_JAR:-} || -n ${PVPERF_LIB:-} ]]; then
     printf 'ExecStart=\nExecStart=/usr/bin/java %s -XX:-CreateCoredumpOnCrash -Djava.library.path=%s -jar %s -n\n' \
       "${PVPERF_JVM:--Xmx512m}" "$LIB" "${PVPERF_JAR:-/opt/photonvision/photonvision.jar}"
   fi
