@@ -5,7 +5,8 @@
 // corners bit for bit). With
 // --scale 2 the streamed side decodes at half size and its corners are mapped back (x = 2x' + 0.5): then it
 // reports agreement (ids found by both, corner differences) instead of identity.
-//   stream_identity FILE.mjpeg [--min-tag 32] [--chunk 3200] [--scale 1|2] [--max N]
+//   stream_identity FILE.mjpeg [--min-tag 32] [--chunk 3200] [--scale 1|2] [--scaled-min N] [--max N]
+// --scaled-min: NAPA's min tag at the reduced scale (default min-tag / scale), for the frame-policy cost study.
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,11 +66,12 @@ static bool turbo(const uint8_t *j, size_t n, std::vector<uint8_t> &y, int w, in
 
 int main(int argc, char **argv) {
   if (argc < 2) return fprintf(stderr, "usage: stream_identity FILE.mjpeg [--min-tag N] [--chunk B] [--scale S] [--max N]\n"), 2;
-  int min_tag = 32, chunk = 3200, scale = 1, maxf = 100000;
+  int min_tag = 32, chunk = 3200, scale = 1, maxf = 100000, scaled_min = 0;
   for (int i = 2; i + 1 < argc; i += 2) {
     if (!strcmp(argv[i], "--min-tag")) min_tag = atoi(argv[i + 1]);
     else if (!strcmp(argv[i], "--chunk")) chunk = atoi(argv[i + 1]);
     else if (!strcmp(argv[i], "--scale")) scale = atoi(argv[i + 1]);
+    else if (!strcmp(argv[i], "--scaled-min")) scaled_min = atoi(argv[i + 1]);
     else if (!strcmp(argv[i], "--max")) maxf = atoi(argv[i + 1]);
   }
   FILE *f = fopen(argv[1], "rb");
@@ -95,7 +97,12 @@ int main(int argc, char **argv) {
   mjdec *dec = mjdec_create();
   mjdec_set_scale(dec, scale);
   napa_params pw{min_tag, 1, 20, 22, 25}, ps = pw;
-  ps.min_tag_px = std::max(4, min_tag / scale);
+  // default: the backend's rule (NapaDetectorJNI.cc ReducedMinTag): min_tag / scale, raised so the reduced frame
+  // is sampled no denser than the full one
+  auto base = [](int m) { return std::max(1, m * 3 / 32); };
+  int reduced = std::max(8, min_tag / scale);
+  while (base(reduced) < (base(min_tag) + scale - 1) / scale) reduced++;
+  ps.min_tag_px = scaled_min > 0 ? scaled_min : scale > 1 ? reduced : min_tag;
   napa_detection a[64], b[64];
   long same = 0, differ = 0, bad = 0, tags_a = 0, tags_b = 0;
   double max_corner = 0, cpu_stream = 0;

@@ -156,6 +156,21 @@ struct SinkOut {
 };
 
 // The camera watcher's side of streaming NAPA: its own detector, fed band by band on the watcher thread.
+// NAPA's min tag for a frame decoded at 1/scale (docs/FRAME-POLICY.md). NAPA samples its finest level every
+// base = min_tag * 3 / (4 * 8) pixels. Halving min_tag keeps the sampling density only when base is even: min 32
+// has base 3 (every 3rd full-res pixel), and min 16 at half scale samples every half-res pixel (= every 2nd
+// full-res one), 2.25x the samples of full scale, so "half scale" cost as much as full or more (FINDINGS 40 (3):
+// +0.4-0.5 ms a frame on the Swyft). The reduced min tag is min_tag / scale, raised just enough that the reduced
+// frame is sampled no denser than the full one (base_reduced x scale >= base_full): min 32 -> 22 at 1/2 (every
+// 4th full-res pixel: tags of 32-43 px may be missed at half scale), min 22 -> 11 and min 16 -> 8 unchanged.
+static int ReducedMinTag(int min_tag, int scale) {
+  auto base = [](int m) { return std::max(1, m * 3 / 32); };
+  int m = std::max(8, min_tag / scale);
+  const int want = (base(min_tag) + scale - 1) / scale;  // the reduced base that samples no denser than full
+  while (base(m) < want) m++;
+  return m;
+}
+
 struct StreamSink {
   napa_far::Detector det;
   std::mutex cfg_mu;
@@ -283,8 +298,8 @@ struct StreamSink {
         if (s->cfg_new || sc != s->applied_scale) {
           napa_far::Config cf = s->cfg;
           if (sc > 1) {
-            cf.min_tag_px = std::max(4, cf.min_tag_px / sc);
-            cf.base_min_tag_px = std::max(4, cf.base_min_tag_px / sc);
+            cf.min_tag_px = ReducedMinTag(cf.min_tag_px, sc);
+            cf.base_min_tag_px = ReducedMinTag(cf.base_min_tag_px, sc);
             cf.far_min_tag_px = std::max(4, cf.far_min_tag_px / sc);
             cf.track_side_px /= sc;
           }
@@ -589,13 +604,16 @@ struct NativeCam {
           std::lock_guard<std::mutex> l(gmu);
           if (scale == 1) {
             gray.assign(img.begin(), img.end());
-          } else {  // decoded at 1/scale (frame policy): nearest-neighbour back to full size for Java
+          } else {  // decoded at 1/scale (frame policy): pixel replication back to full size for Java
             gray.resize(static_cast<size_t>(w) * h);
             const int ws = w / scale;
-            for (int y = 0; y < h; y++) {
-              const uint8_t *src = img.data() + static_cast<size_t>(std::min(y / scale, hs - 1)) * ws;
-              uint8_t *dst = gray.data() + static_cast<size_t>(y) * w;
-              for (int x = 0; x < w; x++) dst[x] = src[std::min(x / scale, ws - 1)];
+            for (int ys = 0; ys < hs; ys++) {
+              const uint8_t *src = img.data() + static_cast<size_t>(ys) * ws;
+              uint8_t *dst = gray.data() + static_cast<size_t>(ys) * scale * w;
+              for (int x = 0; x < ws; x++)
+                for (int k = 0; k < scale; k++) dst[x * scale + k] = src[x];
+              for (int k = 1; k < scale && ys * scale + k < h; k++)
+                std::memcpy(dst + static_cast<size_t>(k) * w, dst, static_cast<size_t>(w));
             }
           }
           gray_capture_ns = stamp;
@@ -1116,7 +1134,13 @@ JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setNativePolic
                                                                                   jint processEvery) {
   auto *n = Handle(h);
   if (!n || !n->sink) return -1;
-  n->sink->pol_scale = scale == 2 || scale == 4 ? scale : 1;
+  // Reduced scale is off unless SPECTRUM_POLICY_SCALE is set (not 0) (docs/FRAME-POLICY.md): live it saved ~1 point of a core
+  // per camera at min 32 and nothing at min 22, so the policy is skipping only.
+  static const bool scale_ok = [] {
+    const char *e = std::getenv("SPECTRUM_POLICY_SCALE");
+    return e && *e && std::strcmp(e, "0") != 0;
+  }();
+  n->sink->pol_scale = scale_ok && (scale == 2 || scale == 4) ? scale : 1;
   n->sink->pol_full_every = std::max(0, static_cast<int>(fullEvery));
   n->sink->pol_every = std::max(1, static_cast<int>(processEvery));
   return n->sink->n_scaled.load();

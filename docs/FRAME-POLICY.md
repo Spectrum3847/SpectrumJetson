@@ -81,3 +81,25 @@ Not measured yet (the bench went dark at about 17:58; both cameras' frames are f
 - pose noise at 1/2 on tag 3;
 - the PhotonVision fast path's detection at 1/2. Only its CPU was seen: the Swyft's streaming thread went
   from about 21% to 11% of a core at 1/2, and `processEvery 2` gave 60 results/s.
+
+## 2026-11-07: half scale dropped from the policy (skipping only)
+
+FINDINGS 40 (3): input/scale=2 engaged but cost ~+0.5 ms a frame on the Swyft (thread 24.6 -> 30.4%). Two causes
+in the native backend, both fixed: (1) min_tag / 2 made NAPA sample every half-res pixel at min 32 (base stride
+min*3/32: 3 at full scale, 1 at 16 = 2.25x the samples); the reduced min tag is now raised until the half frame is
+sampled no denser than the full one (min 32 -> 22 at half scale, i.e. tags of 32-43 px may be missed; min 22 -> 11
+and 16 -> 8 unchanged; never below NAPA's 8); (2) the Java image's upscale was a per-pixel divide loop (now row
+replication). Offline (stream_identity, decode + NAPA per frame): min 32 1.82 -> 1.28 ms, min 22 2.50 -> 1.83 ms
+(Swyft capture). Live, lit, Swyft 120 fps, same PV session, 9 s each (`tests/systemcore-native-camera/scale-cpu.sh`):
+
+| min tag | SpectrumCamera thread, scale 1 -> 2 |
+|---|---|
+| 32 | 26.2 -> 25.3, 25.8 -> 24.6 (reverse order) |
+| 22 | 33.4 -> 33.1 |
+
+Latency equal. So half scale is no longer a cost, but it saves ~1 point of a core at best (and loses the 32-43 px
+band at min 32): the live per-frame cost is not the decode + NAPA share the offline numbers suggest. The native
+backend therefore ignores scale (policy = skipping, fullEvery irrelevant) unless `SPECTRUM_POLICY_SCALE` is set;
+the robot's `scale` input is accepted and reported in health/scale but has no effect. For less CPU per camera use
+skipping (`processEvery`) or a larger min tag.
+
