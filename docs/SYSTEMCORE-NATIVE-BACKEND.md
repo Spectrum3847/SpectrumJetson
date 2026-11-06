@@ -244,3 +244,37 @@ restored from the run's backup (integrity ok, both cameras active), limelight_vi
 
 Open items: polling cost with the stock uvcvideo (load ours at boot, or a cheaper wait without it); the 0.23 ms
 two-camera Thriftiest offset; lit-scene CPU vs sc-vision; a UI pass over every control.
+
+## Our uvcvideo at boot (sc-uvcvideo.service; user-approved), verified across one reboot
+
+`scripts/systemcore/uvcvideo-boot.sh` + `sc-uvcvideo.service`, installed and enabled by `install-photonvision.sh`
+(`UVC=0` skips; `UVC_KO` = the module, default `~/builder/uvcvideo-sc/uvcvideo.ko` from build-uvcvideo.sh):
+- the module lives in `/opt/sc-vision/modules/uvcvideo-sc.ko` (+ `.sha256`), outside /lib/modules; the stock
+  uvcvideo is never blacklisted, so a failed or disabled unit always leaves a working driver;
+- the unit runs early (after local-fs/udev, before photonvision, limelight_visionserver, multi-user): checks the
+  .ko's sha256 and that its vermagic kernel equals `uname -r` (a LimelightOS update -> stock), waits for the stock
+  driver's cameras to settle, rmmods stock, insmods ours with `/etc/sc-vision/uvcvideo.conf` (ENABLED=1,
+  URB_PACKETS=2, HWTIMESTAMPS=1, CAMERA_WAIT_S=10) plus Limelight's modprobe.d options, and waits for the same
+  number of cameras to come back; ANY failure (sha, vermagic, rmmod, insmod, cameras missing) loads stock and says
+  why (journal, `/run/sc-uvcvideo.status`). `ENABLED=0` opts out;
+- health: `/opt/sc-vision/uvcvideo-boot.sh status` -> e.g. `uvcvideo: ours (urb_packets 2, hwtimestamps 1);
+  cameras: 2; boot: ... ours: loaded, 2 camera(s) (stock had 2)`.
+
+Tested without a reboot (swap; forced sha mismatch -> stock; ENABLED=0 -> stock; via systemd -> ours), then one
+controlled `systemctl reboot`: the SystemCore was back in ~1.5 min, the unit had loaded ours at boot ("ours:
+loaded, 2 camera(s) (stock had 2)"). PhotonVision started plainly (10-spectrum.conf + 20-native-camera.conf only):
+both cameras native ("driver wake per URB"), PV the only owner of video0/video2. The room was LIT by then (tags on
+both cameras), 120 fps each, 4 s per camera with nt_check:
+
+| | Thriftiest | Swyft |
+|---|---|---|
+| results/s, with targets | 121.2, all | 120.0, all |
+| tag quality matched by sequence ID | 485/485 | 480/480 |
+| capture->publish p50/p95/p99 ms | 8.437 / 8.673 / 9.112 | 8.686 / 8.852 / 9.058 |
+| SpectrumCamera thread, % of one core | 29.8 | 25.3 |
+
+PV in all 67.3% of a core for both cameras LIT (the ~39% earlier was DARK: not comparable); per camera ~25-30%,
+in line with sc-vision's ~27% lit. That run started without the AOT cache: reinstalling the same jar had renewed its
+mtime (the cache stamp and the JVM's own check include it). The installer now leaves identical files untouched;
+the cache was rebuilt (28 s training) and its stamp matches. Pi left: our uvcvideo loaded, PV stopped (not enabled
+at boot, as before), limelight_visionserver stopped (it starts at boot), DB restored from the run's backup.

@@ -56,6 +56,11 @@ TRAIN_DROPIN=/etc/systemd/system/photonvision.service.d/zz-aot-train.conf
 trap 'sudo rm -f "$TRAIN_DROPIN"; sudo systemctl daemon-reload; rm -rf /dev/shm/pv-install' EXIT
 # put SRC at DST: a temporary name next to it, synced, renamed, then checked against the staged copy
 put() {
+  # an identical file is left as it is (no SD write; the jar keeps its time, so its AOT cache stays valid)
+  if sudo test -f "$2" && [[ $(sha256sum < "$1") == $(sudo sha256sum < "$2") ]]; then
+    sudo chmod "$3" "$2"
+    return 0
+  fi
   sudo install -m "$3" "$1" "$2.new"
   sync -f "$2.new" 2>/dev/null || sync
   sudo mv -f "$2.new" "$2"
