@@ -1,0 +1,70 @@
+SpectrumJetson: UVCIOC_SJ_WAIT, a blocking 'more bytes arrived' wait for readers of the mmap'd V4L2 buffer
+(PhotonVision's stream watcher), woken after each URB's payload copy. Apply after uvcvideo-urb-packets.patch.
+
+--- a/drivers/media/usb/uvc/uvc_driver.c
++++ b/drivers/media/usb/uvc/uvc_driver.c
+@@ -216,6 +216,8 @@
+ 		return NULL;
+ 
+ 	mutex_init(&stream->mutex);
++	atomic_set(&stream->sj_seq, 0);
++	init_waitqueue_head(&stream->sj_wq);
+ 
+ 	stream->dev = dev;
+ 	stream->intf = usb_get_intf(intf);
+--- a/drivers/media/usb/uvc/uvc_v4l2.c
++++ b/drivers/media/usb/uvc/uvc_v4l2.c
+@@ -1379,6 +1379,16 @@
+ 	case UVCIOC_CTRL_QUERY:
+ 		return uvc_xu_ctrl_query(chain, arg);
+ 
++	case UVCIOC_SJ_WAIT: {	/* SpectrumJetson: wait for more bytes of the frame in flight */
++		struct uvc_sj_wait *w = arg;
++		struct uvc_streaming *stream = handle->stream;
++		long left = wait_event_interruptible_timeout(stream->sj_wq,
++			(u32)atomic_read(&stream->sj_seq) != w->seq,
++			usecs_to_jiffies(w->timeout_us));
++		w->seq = (u32)atomic_read(&stream->sj_seq);
++		return left < 0 ? left : 0;
++	}
++
+ 	default:
+ 		return -ENOTTY;
+ 	}
+--- a/drivers/media/usb/uvc/uvc_video.c
++++ b/drivers/media/usb/uvc/uvc_video.c
+@@ -1396,6 +1396,10 @@
+ 		uvc_queue_buffer_release(op->buf);
+ 	}
+ 
++	/* SpectrumJetson: more of the frame is in the buffer; wake UVCIOC_SJ_WAIT. */
++	atomic_inc(&uvc_urb->stream->sj_seq);
++	wake_up_interruptible(&uvc_urb->stream->sj_wq);
++
+ 	ret = uvc_submit_urb(uvc_urb, GFP_KERNEL);
+ 	if (ret < 0)
+ 		dev_err(&uvc_urb->stream->intf->dev,
+--- a/drivers/media/usb/uvc/uvcvideo.h
++++ b/drivers/media/usb/uvc/uvcvideo.h
+@@ -439,8 +439,21 @@
+ 	struct work_struct work;
+ };
+ 
++/*
++ * SpectrumJetson: UVCIOC_SJ_WAIT blocks until the driver has copied more bytes of a frame into its V4L2 buffer
++ * (after each URB whose payload was copied) or the timeout passes, so a reader that decodes a frame while it
++ * arrives (the stream watcher reading the mmap'd buffer) needs no polling. seq counts those copies.
++ */
++struct uvc_sj_wait {
++	__u32 seq;		/* in: the last seq seen; out: the current seq */
++	__u32 timeout_us;	/* in */
++};
++#define UVCIOC_SJ_WAIT		_IOWR('u', 0x40, struct uvc_sj_wait)
++
+ struct uvc_streaming {
+ 	struct list_head list;
++	atomic_t sj_seq;		/* SpectrumJetson: payload copies completed (UVCIOC_SJ_WAIT) */
++	wait_queue_head_t sj_wq;
+ 	struct uvc_device *dev;
+ 	struct video_device vdev;
+ 	struct uvc_video_chain *chain;

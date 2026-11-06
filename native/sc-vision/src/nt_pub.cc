@@ -131,7 +131,39 @@ struct NtPub {
   int64_t mid_offset_ns = 5000000;  // first packet -> mid-exposure (exposure/2 + camera delay)
   int64_t seq = 0, last_ns = 0;
   double fps_ema = 0;
+  // PhotonVision's /photonvision/<camera>/health/* (CameraHealthPublisher), once a second
+  wpi::nt::DoublePublisher h_fps, h_pipe, h_pipe_max, h_lat;
+  wpi::nt::StringPublisher h_state, h_problem;
+  wpi::nt::IntegerPublisher h_beat, h_age, h_frames, h_fail, h_recov;
+  int64_t h_next = 0, h_beats = 0, h_win_frames = 0, h_last_frame = 0;
+  double h_sum_pipe = 0, h_max_pipe = 0, h_sum_lat = 0;
 };
+
+void nt_pub_health(NtPub *p, int64_t now, long frames_total, long failures, double pipeline_ms, int frame_done) {
+  if (frame_done) {
+    p->h_win_frames++;
+    p->h_sum_pipe += pipeline_ms;
+    if (pipeline_ms > p->h_max_pipe) p->h_max_pipe = pipeline_ms;
+    p->h_last_frame = now;
+  }
+  if (now < p->h_next) return;
+  double win = p->h_next ? 1.0 + (now - p->h_next) / 1e9 : 1.0;
+  p->h_next = now + 1000000000LL;
+  int64_t age = p->h_last_frame ? (now - p->h_last_frame) / 1000000 : -1;
+  p->h_fps.Set(p->h_win_frames / win);
+  p->h_pipe.Set(p->h_win_frames ? p->h_sum_pipe / p->h_win_frames : 0);
+  p->h_pipe_max.Set(p->h_max_pipe);
+  p->h_lat.Set(p->h_win_frames ? p->h_sum_lat / p->h_win_frames : 0);
+  p->h_frames.Set(frames_total);
+  p->h_fail.Set(failures);
+  p->h_recov.Set(0);
+  p->h_age.Set(age);
+  bool stale = age < 0 || age > 500;
+  p->h_state.Set(stale ? "no frames" : "running");
+  p->h_problem.Set(stale ? "sc-vision: no complete frames from the camera" : "");
+  p->h_beat.Set(++p->h_beats);
+  p->h_win_frames = 0, p->h_sum_pipe = 0, p->h_max_pipe = 0, p->h_sum_lat = 0;
+}
 
 NtPub *nt_pub_create(const char *host, const char *camera) {
   auto *p = new NtPub;
@@ -154,6 +186,20 @@ NtPub *nt_pub_create(const char *host, const char *camera) {
   p->pitch = t->GetDoubleTopic("targetPitch").Publish();
   p->area = t->GetDoubleTopic("targetArea").Publish();
   p->has = t->GetBooleanTopic("hasTarget").Publish();
+  auto h = t->GetSubTable("health");
+  wpi::nt::PubSubOptions keep;
+  keep.keepDuplicates = true;
+  p->h_fps = h->GetDoubleTopic("fps").Publish(keep);
+  p->h_state = h->GetStringTopic("state").Publish(keep);
+  p->h_beat = h->GetIntegerTopic("heartbeat").Publish();
+  p->h_age = h->GetIntegerTopic("lastFrameAgeMs").Publish();
+  p->h_pipe = h->GetDoubleTopic("pipelineMs").Publish();
+  p->h_pipe_max = h->GetDoubleTopic("pipelineMsMax").Publish();
+  p->h_lat = h->GetDoubleTopic("latencyMs").Publish();
+  p->h_frames = h->GetIntegerTopic("frames").Publish();
+  p->h_fail = h->GetIntegerTopic("decodeFailures").Publish();
+  p->h_recov = h->GetIntegerTopic("recoveries").Publish();
+  p->h_problem = h->GetStringTopic("problem").Publish();
   p->version = root->GetStringTopic("version").Publish();
   p->version.Set("sc-vision (Spectrum fork serde fd353b11)");
   p->inst.StartClient("sc-vision");
@@ -251,6 +297,7 @@ void nt_pub_result(NtPub *p, int64_t t_first_ns, const napa_detection *d, const 
   }
   p->last_ns = now;
   p->latency.Set((now - capture) / 1e6);
+  p->h_sum_lat += (now - capture) / 1e6;
   p->fps.Set(p->fps_ema);
   p->has.Set(n > 0);
   p->yaw.Set(yaw0);

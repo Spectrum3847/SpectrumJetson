@@ -106,7 +106,13 @@ int uvc_v4l2_set(int vid, int pid, uint32_t id, int value) {
     int fd = open(dev, O_RDWR);
     if (fd < 0) continue;
     struct v4l2_control c = {id, value};
-    if (ioctl(fd, VIDIOC_S_CTRL, &c) == 0) rc = 0;
+    if (ioctl(fd, VIDIOC_S_CTRL, &c) == 0) {
+      // read it back: power-up defaults that silently stay (sharpness 5, gamma 150, backlight 1 on the Thriftiest)
+      // cost ~46% more decode CPU, so a control that didn't take is reported
+      struct v4l2_control g = {id, 0};
+      rc = (ioctl(fd, VIDIOC_G_CTRL, &g) == 0 && g.value == value) ? 0 : -2;
+      if (rc) fprintf(stderr, "uvc: control 0x%x set to %d reads back %d\n", id, value, g.value);
+    }
     close(fd);
     if (rc == 0) break;
   }

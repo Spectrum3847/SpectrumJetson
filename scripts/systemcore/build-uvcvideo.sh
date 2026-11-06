@@ -23,6 +23,9 @@ cp "$OUT"/src/systemcorebetalinux/drivers/media/usb/uvc/*.[ch] "$OUT"/src/system
 if [[ ${STOCK:-0} != 1 ]]; then
   tr -d '\r' < "$REPO/kernel/uvcvideo-urb-packets.patch" | patch -d "$OUT/uvc" -p5 --no-backup-if-mismatch
   grep -q uvc_urb_packets "$OUT/uvc/uvc_video.c"
+  # UVCIOC_SJ_WAIT: readers of the mmap'd buffer (PhotonVision's stream watcher) block until more bytes arrive
+  tr -d '\r' < "$REPO/kernel/uvcvideo-progress-wait.patch" | patch -d "$OUT/uvc" -p5 --no-backup-if-mismatch
+  grep -q UVCIOC_SJ_WAIT "$OUT/uvc/uvc_v4l2.c"
 fi
 # Docker paths: on Windows Git Bash, /c/... -> C:/...
 dpath() { if command -v cygpath >/dev/null; then cygpath -m "$1"; else echo "$1"; fi; }

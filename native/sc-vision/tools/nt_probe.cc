@@ -12,6 +12,8 @@
 #include <vector>
 
 #include <wpi/nt/NetworkTableInstance.hpp>
+#include <wpi/nt/NetworkTable.hpp>
+#include <wpi/nt/NetworkTableEntry.hpp>
 #include <wpi/nt/RawTopic.hpp>
 #include <wpi/nt/ntcore_cpp.hpp>
 
@@ -32,6 +34,9 @@ int main(int argc, char **argv) {
   o.sendAll = true;
   o.pollStorage = 200;
   auto sub = inst.GetRawTopic("/photonvision/" + cam + "/rawBytes").Subscribe("photonstruct:PhotonPipelineResult:fd353b11f3a818e9c5b457c7dc5a8f5c", {}, o);
+  auto ht = inst.GetTable("/photonvision/" + cam + "/health");
+  auto e_fps = ht->GetEntry("fps"), e_state = ht->GetEntry("state"), e_age = ht->GetEntry("lastFrameAgeMs"),
+       e_frames = ht->GetEntry("frames"), e_fail = ht->GetEntry("decodeFailures"), e_lat = ht->GetEntry("latencyMs");
   std::vector<double> lat;
   double csum[8] = {0}, csq[8] = {0};
   long ncorn = 0;
@@ -86,6 +91,12 @@ int main(int argc, char **argv) {
     usleep(2000);
   }
   type = sub.GetTopic().GetTypeString();
+  {  // PhotonVision's health topics (robot "no frames / stuck / slow camera" alerts read these)
+    printf("health: fps %.1f state '%s' lastFrameAgeMs %lld frames %lld decodeFailures %lld latencyMs %.2f\n",
+           e_fps.GetDouble(-1), e_state.GetString("?").c_str(),
+           (long long)e_age.GetInteger(-1), (long long)e_frames.GetInteger(-1),
+           (long long)e_fail.GetInteger(-1), e_lat.GetDouble(-1));
+  }
   std::sort(lat.begin(), lat.end());
   auto P = [&](double q) { return lat.empty() ? 0.0 : lat[std::min(lat.size() - 1, (size_t)(lat.size() * q))]; };
   printf("rawBytes type '%s': %ld results (%ld with tags) in %d s; capture -> received here p50 %.3f p95 %.3f p99 %.3f ms\n",

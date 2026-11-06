@@ -244,7 +244,7 @@ int main(int argc, char **argv) {
   double secs = 0, tag_size = 0.1651, mid_offset_ms = 5.0, fps_max = 0;
   const char *lock_path = nullptr, *cam_serial = nullptr, *cam_port = nullptr;
   const char *csv = nullptr, *calib = nullptr, *save = nullptr, *nt_host = nullptr, *cam_name = "thrifty";
-  int cpu = -1, fifo = 0, exposure = -1, gain = -1, gamma = -1, backlight = -1, every = 1, check = 64, whole = 0, no_napa = 0;
+  int cpu = -1, fifo = 0, exposure = -1, gain = -1, gamma = -1, backlight = -1, sharpness = -1, brightness = -1000, every = 1, check = 64, whole = 0, no_napa = 0;
   uvc_config uc{};
   uc.width = 1280, uc.height = 800, uc.fps = 120, uc.alt = -1, uc.pkts_per_urb = 4, uc.nurbs = 32, uc.verbose = 1;
   napa_params np{16, 1, 20, 22, 25};
@@ -284,6 +284,8 @@ int main(int argc, char **argv) {
     else if (a == "--lock") lock_path = nx();  // hold this flock (e.g. /tmp/camera.lock) while running
     else if (a == "--gamma") gamma = atoi(nx());
     else if (a == "--backlight") backlight = atoi(nx());
+    else if (a == "--sharpness") sharpness = atoi(nx());
+    else if (a == "--brightness") brightness = atoi(nx());
     else if (a == "--sharpen") np.sharpening_x100 = atoi(nx());  // NAPA's cell sharpening x100 (default 25)
     else if (a == "--selftest") return selftest();
     else {
@@ -312,6 +314,10 @@ int main(int argc, char **argv) {
   if (gamma > 0 && uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_GAMMA, gamma)) fprintf(stderr, "gamma: not set\n");
   if (backlight >= 0 && uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_BACKLIGHT_COMPENSATION, backlight))
     fprintf(stderr, "backlight compensation: not set\n");
+  if (sharpness >= 0 && uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_SHARPNESS, sharpness))
+    fprintf(stderr, "sharpness: not set\n");
+  if (brightness > -1000 && uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_BRIGHTNESS, brightness))
+    fprintf(stderr, "brightness: not set\n");
   mlockall(MCL_CURRENT | MCL_FUTURE);
   if (cpu >= 0) {
     cpu_set_t s;
@@ -436,6 +442,7 @@ int main(int argc, char **argv) {
     }
     int64_t frame_cpu = cpu_ns() - c_frame0;
     ndone++;
+    if (pub) nt_pub_health(pub, t_pub, ndone, nbad, frame_cpu / 1e6, 1);
     lat.push_back((t_det - tr) / 1e6);
     if (out) {
       const napa_detection *d = nt ? &dets[0] : nullptr;
@@ -516,6 +523,7 @@ int main(int argc, char **argv) {
       cur_tr = tr;
       feed();
     }
+    if (pub) nt_pub_health(pub, tr, ndone, nbad, 0, 0);  // keeps the once-a-second health going with no frames
   }
   if (save_f) fclose(save_f);
   uvc_close(u);

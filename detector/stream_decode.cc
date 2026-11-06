@@ -29,6 +29,13 @@
 // fed. Built as libspectrum-stream.so (CMakeLists.txt, scripts/jetson/07-build-napa-detector.sh).
 #include "stream_decode.h"
 
+// SpectrumJetson's uvcvideo (kernel/uvcvideo-progress-wait.patch): block until more bytes of a frame arrived.
+struct uvc_sj_wait {
+  uint32_t seq;
+  uint32_t timeout_us;
+};
+#define UVCIOC_SJ_WAIT _IOWR('u', 0x40, struct uvc_sj_wait)
+
 extern "C" {
 #include "../native/sc-vision/src/mjdec.h"  // SPECTRUM_STREAM_DECODER=mjdec: the luma-only decoder
 }
@@ -281,6 +288,20 @@ void WatchLoop(Watcher *w) {
   for (int i = 0; i < w->n; i++) {
     st[i] = kBoot;
     std::memcpy(snap[i], w->buf[i] + 1024, kSample);
+  }
+  // Blocking wait for new bytes instead of 0.1 ms polling, when the driver has UVCIOC_SJ_WAIT (our uvcvideo) and
+  // SPECTRUM_STREAM_WAIT isn't "poll".
+  uint32_t sj_seq = 0;
+  bool sj_wait = false;
+  {
+    const char *e = std::getenv("SPECTRUM_STREAM_WAIT");
+    uvc_sj_wait sw{0, 0};
+    if (!(e && std::strcmp(e, "poll") == 0) && ioctl(w->fd, UVCIOC_SJ_WAIT, &sw) == 0) {
+      sj_wait = true;
+      sj_seq = sw.seq;
+    }
+    std::cout << "stream decode " << w->dev << ": waiting for bytes by "
+              << (sj_wait ? "UVCIOC_SJ_WAIT (driver wake per URB)" : "polling every 0.1 ms") << std::endl;
   }
   auto last_frame = Clock::now();
   auto next_log = Clock::now() + std::chrono::seconds(10);
@@ -580,8 +601,16 @@ void WatchLoop(Watcher *w) {
       w->aborted = 0;
     }
     if (!busy) {
-      timespec ts = {0, 100000};  // 0.1 ms: the tail is at most this plus the last rows
-      nanosleep(&ts, nullptr);
+      if (sj_wait) {
+        // our uvcvideo (kernel/uvcvideo-progress-wait.patch): sleep until the driver copied more bytes of a frame
+        // (one wake per URB, 0.25-0.5 ms with urb_packets 2-4), or 2 ms for the wipe timers
+        uvc_sj_wait sw{sj_seq, 2000};
+        if (ioctl(w->fd, UVCIOC_SJ_WAIT, &sw) == 0) sj_seq = sw.seq;
+        else sj_wait = false;
+      } else {
+        timespec ts = {0, 100000};  // 0.1 ms: the tail is at most this plus the last rows
+        nanosleep(&ts, nullptr);
+      }
     }
   }
   if (decoding && !mj_on) jpeg_destroy_decompress(&d);

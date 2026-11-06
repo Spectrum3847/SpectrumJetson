@@ -13,6 +13,9 @@ void nt_pub_result(NtPub *p, int64_t t_first_ns, const napa_detection *d, const 
 // Camera model (yaw/pitch), tag size, and first packet -> mid-exposure offset for the capture timestamp.
 void nt_pub_config(NtPub *p, const cam_model *cam, double tag_size_m, int64_t mid_offset_ns);
 void nt_pub_destroy(NtPub *p);
+// PhotonVision's /photonvision/<camera>/health/* (fps, state, lastFrameAgeMs, pipelineMs, latencyMs, frames,
+// decodeFailures, ...): call on every loop pass (publishes once a second; frame_done: a frame finished now).
+void nt_pub_health(NtPub *p, int64_t now_ns, long frames_total, long failures, double pipeline_ms, int frame_done);
 // NAPA's corners (OpenCV order) -> AprilTag's order, which PhotonVision's pose and corners use.
 inline void napa_to_apriltag_order(const double *in, double *out) {
   static const int perm[4] = {1, 0, 3, 2};
