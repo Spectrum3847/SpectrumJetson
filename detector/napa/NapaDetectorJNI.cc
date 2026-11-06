@@ -50,6 +50,7 @@
 #include <cmath>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -1101,7 +1102,13 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_detectS
       n->sink->c.free_result(res);
       n->streamed++;
       // (a frame handed over without its pixels (no stream viewer) can't be re-detected here)
-      if (++n->check_due % 64 == 0 && !(width >= 8 && std::memcmp(img, "SJREFv1", 8) == 0))
+      // pv-perf: every SPECTRUM_NAPA_CHECK_EVERY-th (default 1024, 0 = never; was 64)
+      static const long check_every = [] {
+        const char *e = std::getenv("SPECTRUM_NAPA_CHECK_EVERY");
+        return e && *e ? std::max(0L, std::strtol(e, nullptr, 10)) : 1024L;
+      }();
+      if (check_every > 0 && ++n->check_due % check_every == 0 &&
+          !(width >= 8 && std::memcmp(img, "SJREFv1", 8) == 0))
         IdentityCheck(n, img, width, height, step, tags, now_us);
     }
   }

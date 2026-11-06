@@ -903,7 +903,13 @@ SPECTRUM_STREAM_API int spectrum_stream_decode_gray(const uint8_t *jpeg, size_t 
       g_refs++;
     }
     const long hit = ++g_hit;
-    if (hit % 64 == 0 && r->scale == 1)
+    // pv-perf: the whole-frame re-decode check on every SPECTRUM_STREAM_CHECK_EVERY-th matched frame (default 1024,
+    // 0 = never; was every 64th: a JPEG + 1 MB copy, a thread and a libjpeg-turbo decode ~2 times a second)
+    static const long check_every = [] {
+      const char *e = std::getenv("SPECTRUM_STREAM_CHECK_EVERY");
+      return e && *e ? std::max(0L, std::strtol(e, nullptr, 10)) : 1024L;
+    }();
+    if (check_every > 0 && hit % check_every == 0 && r->scale == 1)
       Check(std::vector<uint8_t>(jpeg, jpeg + size), r->gray, width, height);
     return 0;
   }
