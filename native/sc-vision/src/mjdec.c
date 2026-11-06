@@ -23,7 +23,7 @@
 #define MJ_NEON 0
 #endif
 
-#define LB 9  // lookahead bits
+#define LB 11  // lookahead bits (11: more AC symbols decode in one lookup; 2 KB tables)
 #define PAD 64
 
 typedef struct {

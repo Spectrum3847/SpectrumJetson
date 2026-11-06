@@ -241,7 +241,7 @@ static int selftest() {
 
 // ------------------------------------------------------------------------------------------- main
 int main(int argc, char **argv) {
-  double secs = 0, tag_size = 0.1651, mid_offset_ms = 5.0;
+  double secs = 0, tag_size = 0.1651, mid_offset_ms = 5.0, fps_max = 0;
   const char *lock_path = nullptr;
   const char *csv = nullptr, *calib = nullptr, *save = nullptr, *nt_host = nullptr, *cam_name = "thrifty";
   int cpu = -1, fifo = 0, exposure = -1, gain = -1, gamma = -1, backlight = -1, every = 1, check = 64, whole = 0, no_napa = 0;
@@ -264,6 +264,7 @@ int main(int argc, char **argv) {
     else if (a == "--hamming") np.max_hamming = atoi(nx());
     else if (a == "--min-contrast") np.min_contrast = atoi(nx());
     else if (a == "--every") every = std::max(1, atoi(nx()));
+    else if (a == "--fps-max") fps_max = atof(nx());  // process at most this many frames/s, decided at a frame's start
     else if (a == "--check") check = atoi(nx());
     else if (a == "--calib") calib = nx();
     else if (a == "--tag-size") tag_size = atof(nx());
@@ -345,16 +346,17 @@ int main(int argc, char **argv) {
   if (out)
     fprintf(out,
             "seq,t_first,t_eof_reap,t_dec,t_det,t_pose,t_pub,bytes,dec_cpu_us,napa_cpu_us,pose_us,frame_cpu_us,"
-            "ntags,id,margin,hamming,c0x,c0y,c1x,c1y,c2x,c2y,c3x,c3y,tx,ty,tz,err,alt_err\n");
+            "ntags,id,margin,hamming,c0x,c0y,c1x,c1y,c2x,c2y,c3x,c3y,tx,ty,tz,err,alt_err,uvc_flags,pts,scr_stc,scr_sof\n");
   uvc_chunk ch[256];
   int64_t t_start = mono_ns();
   // frame state
   size_t flen = 0;
   int fid = -1, done_fid = -1, in_frame = 0, process = 0, rows_dec = 0, rows_fed = 0, bad = 0;
   long seq = 0, nframes = 0, ndone = 0, nbad = 0, ndet = 0;
-  int64_t t_first = 0, c_frame0 = 0, c_dec = 0, c_napa = 0;
+  int64_t t_first = 0, c_frame0 = 0, c_dec = 0, c_napa = 0, last_proc_start = 0;
   std::vector<double> lat;  // eof reap -> results, ms
   FILE *save_f = nullptr;
+  unsigned f_flags = 0, f_pts = 0, f_stc = 0, f_sof = 0;
   // Decode the bytes in so far and feed NAPA the rows that became final.
   auto feed = [&]() {
     if (bad || rows_dec >= H) return;
@@ -425,7 +427,8 @@ int main(int argc, char **argv) {
       } else {
         fprintf(out, ",,,,,,,,,,,,,,,,");
       }
-      fprintf(out, "\n");
+      // the frame's first UVC payload header: PTS / SCR (camera clock), for timestamp work
+      fprintf(out, ",%u,%u,%u,%u\n", f_flags, f_pts, f_stc, f_sof);
     }
     if (save && ndone <= 600) {
       if (!save_f) save_f = fopen(save, "wb");
@@ -452,8 +455,15 @@ int main(int argc, char **argv) {
         }
         in_frame = 1, fid = f, flen = 0, bad = 0, rows_dec = rows_fed = 0;
         t_first = tr - (int64_t)c.pkt_from_end * 125000;
+        f_flags = c.flags, f_pts = c.pts, f_stc = c.scr_stc, f_sof = c.scr_sof;
         seq++;
         process = (seq % every) == 0;
+        // --fps-max: skip a frame (no decode, no NAPA) if it starts less than a period (less 2 ms of jitter
+        // room) after the last processed one. Decided at its first packet, so a processed frame is not delayed.
+        if (process && fps_max > 0 && last_proc_start &&
+            t_first - last_proc_start < (int64_t)(1e9 / fps_max) - 2000000)
+          process = 0;
+        if (process) last_proc_start = t_first;
         if (process) {
           c_frame0 = cpu_ns();
           c_dec = c_napa = 0;

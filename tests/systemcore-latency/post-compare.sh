@@ -17,7 +17,7 @@ mkdir -p "$OUT"
 sudo -n systemctl stop photonvision
 sudo -n cp "$DB" "$OUT/photon.sqlite.post-compare.bak"
 trap 'sudo -n systemctl stop photonvision; sudo -n cp "$OUT/photon.sqlite.post-compare.bak" "$DB"' EXIT
-CAM="cameraAutoExposure=false cameraExposureRaw=2 cameraGain=128 cameraGamma=100 cameraBacklightCompensation=0"
+CAM="cameraAutoExposure=false cameraExposureRaw=2 cameraGain=128 cameraGamma=100 cameraBacklightCompensation=0 cameraSharpness=1"
 NAT="--exposure 2 --gain 128 --gamma 100 --backlight 0"
 CAL=${CAL:-$HOME/builder/sc-vision/cal.json}
 export EXPOSURE_MS=0.2

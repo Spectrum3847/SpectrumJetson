@@ -1,6 +1,7 @@
 // nt_probe: subscribe to /photonvision/<camera>/rawBytes as PhotonLib does and print what arrives (count, type
 // string, decoded first target, receive latency against the capture timestamp). Checks sc-vision's output.
 //   nt_probe [HOST] [CAMERA] [SECS]
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -32,6 +33,8 @@ int main(int argc, char **argv) {
   o.pollStorage = 200;
   auto sub = inst.GetRawTopic("/photonvision/" + cam + "/rawBytes").Subscribe("photonstruct:PhotonPipelineResult:fd353b11f3a818e9c5b457c7dc5a8f5c", {}, o);
   std::vector<double> lat;
+  double csum[8] = {0}, csq[8] = {0};
+  long ncorn = 0;
   long n = 0, tagged = 0;
   int64_t end = mono_ns() + (int64_t)secs * 1000000000LL;
   std::string type;
@@ -49,6 +52,20 @@ int main(int argc, char **argv) {
       lat.push_back((now - cap) / 1e6);
       if (ntg > 0) {
         tagged++;
+        // first target's detectedCorners: after 2 TargetCorner lists' headers; minAreaRect list at q + 108
+        const uint8_t *q0 = b.data() + 33;
+        size_t off = 164;  // yaw..skew 32, ids+conf 12, two Transform3d 112, poseAmbiguity 8
+        int nmin = (int8_t)q0[off];
+        off += 1 + 16 * (size_t)nmin;
+        int ndc = (int8_t)q0[off];
+        if (ndc == 4 && 33 + off + 1 + 64 <= b.size()) {
+          for (int k = 0; k < 8; k++) {
+            double v;
+            memcpy(&v, q0 + off + 1 + 8 * k, 8);
+            csum[k] += v, csq[k] += v * v;
+          }
+          ncorn++;
+        }
         if (tagged == 1) {
           double yaw, pitch, area, tx, ty, tz, qw, qx, qy, qz;
           int32_t id;
@@ -69,5 +86,13 @@ int main(int argc, char **argv) {
   auto P = [&](double q) { return lat.empty() ? 0.0 : lat[std::min(lat.size() - 1, (size_t)(lat.size() * q))]; };
   printf("rawBytes type '%s': %ld results (%ld with tags) in %d s; capture -> received here p50 %.3f p95 %.3f p99 %.3f ms\n",
          type.c_str(), n, tagged, secs, P(.5), P(.95), P(.99));
+  if (ncorn) {
+    printf("detectedCorners mean (sd) over %ld results:", ncorn);
+    for (int k = 0; k < 8; k++) {
+      double m = csum[k] / ncorn;
+      printf(" %.3f(%.3f)", m, sqrt(std::max(0.0, csq[k] / ncorn - m * m)));
+    }
+    printf("\n");
+  }
   return 0;
 }
