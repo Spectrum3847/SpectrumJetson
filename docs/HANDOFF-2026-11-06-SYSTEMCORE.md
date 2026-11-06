@@ -68,6 +68,11 @@ Published summary: https://claude.ai/artifact/2UXdwMdQXJ4XqfPSzuviP9 (private; s
   9f8e903, 7ee3a5e). Survived a controlled reboot. Lit, both cameras native: 121/120 fps, tag quality 100% matched,
   capture → publish 8.44 / 8.69 ms p50, PV 67.3% of one core for both (~25-30% per camera).
 
+- **Lit A/B, both cameras in one PV, min 32** (tester FINDINGS 40): native cameras 9.29/9.53 ms p50, PV 64.1% of a
+  core; fast path 9.27/9.39 ms, 68.2%; old Java path 13.8/15.9 ms, 87.8%. min_tag with two cameras: 32 → 64%,
+  22 → 75% (sees the 40 px tag 96% vs 5%), 16 → 118% with p99 30 ms and gaps (overload). **Use min 22.**
+  Half scale engages but costs +0.5 ms/frame (builder to fix or drop). Swyft image near saturation at gain 128.
+
 ## In progress / next
 
 1. Native backend leftovers: real calibration from the UI, passthrough stream (camera JPEG, no re-encode), both
