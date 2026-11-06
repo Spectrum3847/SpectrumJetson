@@ -350,7 +350,7 @@ int main(int argc, char **argv) {
     for (auto &kv : first)
       if (kv.first.rfind("targets[0]", 0) != 0) std::printf("  %s = %.6f\n", kv.first.c_str(), kv.second);
   }
-  for (const char *t : {"health/scale", "health/fullEvery", "health/processEvery", "health/scaledFrames", "health/fps",
+  for (const char *t : {"health/processEvery", "health/fps",
                         "heartbeat", "latencyMillis", "hasTarget", "targetYaw", "targetPitch", "targetArea",
                         "version", "photonVersion", "remoteVersion"}) {
     auto e = inst.GetEntry(base + t).GetValue();
