@@ -29,4 +29,4 @@ sudo /opt/sc-vision/bin/sc-vision $SCV_ARGS --min-tag "$MIN" --secs $((SECS + 8)
 sleep 4
 measure scv
 wait
-ls /dev/video0 >/dev/null 2>&1 || sudo /opt/sc-vision/bin/sc-vision-rebind
+ls ${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0} >/dev/null 2>&1 || sudo /opt/sc-vision/bin/sc-vision-rebind

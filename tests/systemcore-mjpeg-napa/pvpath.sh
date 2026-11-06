@@ -26,7 +26,7 @@ R=$OUT/$NAME
 } >"$R.env"
 sudo systemctl start photonvision
 sleep 45
-v4l2-ctl -d /dev/video0 -C exposure_time_absolute,gain,gamma,sharpness,backlight_compensation,brightness >"$R.camera" 2>&1
+v4l2-ctl -d ${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0} -C exposure_time_absolute,gain,gamma,sharpness,backlight_compensation,brightness >"$R.camera" 2>&1
 sudo sh -c "echo 0 > $T/tracing_on; echo > $T/trace; echo mono > $T/trace_clock; echo 32768 > $T/buffer_size_kb;
   echo 0 > $T/events/enable; echo 1 > $T/events/xhci-hcd/xhci_urb_giveback/enable; echo 1 > $T/tracing_on"
 sudo python3 "$HERE/sysmon.py" "$R.sysmon.csv" --secs "$SECS" >/dev/null &

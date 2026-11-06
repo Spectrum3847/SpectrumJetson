@@ -2,7 +2,7 @@
 # Soak a vision program under /tmp/camera.lock: CPU, RSS, fds, threads, temperature, throttle flags per second
 # (sysmon.py), plus the program's own per-frame CSV. Run ON THE PI.
 #   soak.sh OUT_DIR MINUTES CMD...      e.g. soak.sh ~/bench/results/soak1 30 sudo ~/builder/sc-vision/sc-vision --cpu 3
-# The command gets --secs and --csv OUT_DIR/frames.csv appended. Afterwards, if /dev/video0 is missing
+# The command gets --secs and --csv OUT_DIR/frames.csv appended. Afterwards, if ${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0} is missing
 # (a usbfs app that didn't give the camera back), uvcvideo is re-bound through sysfs (no USB reset).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -21,8 +21,8 @@ echo "app pid $pid" | tee "$OUT/summary.txt"
 sudo python3 "$HERE/sysmon.py" "$OUT/sysmon.csv" --secs "$((secs - 5))" --pid "$pid" | tee -a "$OUT/summary.txt"
 wait
 tail -3 "$OUT/app.log" | tee -a "$OUT/summary.txt"
-if [[ ! -e /dev/video0 ]]; then
-  echo "/dev/video0 missing after the run: re-binding uvcvideo" | tee -a "$OUT/summary.txt"
+if [[ ! -e ${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0} ]]; then
+  echo "${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0} missing after the run: re-binding uvcvideo" | tee -a "$OUT/summary.txt"
   for d in /sys/bus/usb/devices/*:1.0; do
     [[ $(cat "${d%:*}/idVendor" 2>/dev/null) == 1bcf ]] && basename "$d" | sudo tee /sys/bus/usb/drivers/uvcvideo/bind
   done

@@ -12,7 +12,7 @@ GAINS=${4:-"32 64 96 128"}
 MC=${5:-20}
 B=${SCMN_BIN:-$HOME/bench/bin}
 HERE=$(cd "$(dirname "$0")" && pwd)
-DEV=/dev/video0
+DEV=${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0}
 mkdir -p "$OUT"
 exec 9>/tmp/camera.lock
 flock -w 120 9 || { echo "camera lock busy" >&2; exit 1; }

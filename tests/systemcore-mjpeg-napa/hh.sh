@@ -20,10 +20,10 @@ SCV=${SCV:-$HOME/builder/sc-vision/sc-vision}
 CAL=${SCV_CAL:-$HOME/builder/sc-vision/cal.json}
 T=/sys/kernel/tracing
 setcam() {
-  [[ -e /dev/video0 ]] || return 0
-  v4l2-ctl -d /dev/video0 -c auto_exposure=1 -c exposure_time_absolute="$EXP" -c gain="$GAIN" -c sharpness=1 \
+  [[ -e ${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0} ]] || return 0
+  v4l2-ctl -d ${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0} -c auto_exposure=1 -c exposure_time_absolute="$EXP" -c gain="$GAIN" -c sharpness=1 \
     -c gamma=100 -c backlight_compensation=0 2>&1 | grep -v '^$'
-  v4l2-ctl -d /dev/video0 -C exposure_time_absolute,gain,sharpness,gamma,backlight_compensation,brightness |
+  v4l2-ctl -d ${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0} -C exposure_time_absolute,gain,sharpness,gamma,backlight_compensation,brightness |
     tr '\n' ' ' >"$OUT/camera.txt"
 }
 if [[ $MODE == native ]]; then
@@ -42,7 +42,7 @@ if [[ $MODE == native ]]; then
   wait
   sudo sh -c "echo 0 > $T/tracing_on; cat $T/trace > /tmp/hh.trace; echo 0 > $T/events/enable; echo > $T/trace; echo local > $T/trace_clock"
   mv /tmp/hh.trace "$OUT/$name.trace"
-  [[ -e /dev/video0 ]] || for d in /sys/bus/usb/devices/*:1.0; do
+  [[ -e ${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0} ]] || for d in /sys/bus/usb/devices/*:1.0; do
     [[ $(cat "${d%:*}/idVendor" 2>/dev/null) == 1bcf ]] && basename "$d" | sudo tee /sys/bus/usb/drivers/uvcvideo/bind >/dev/null
   done
   {

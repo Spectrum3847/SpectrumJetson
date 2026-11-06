@@ -15,7 +15,7 @@ exec 9>/tmp/camera.lock
 flock -w 300 9 || { echo "camera lock busy" >&2; exit 1; }
 orig=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
 trap 'echo "$orig" | sudo tee /sys/devices/system/cpu/cpufreq/policy*/scaling_governor >/dev/null; echo "governor restored: $orig"' EXIT
-v4l2-ctl -d /dev/video0 -c sharpness=1 -c gamma=100 -c backlight_compensation=0 2>/dev/null
+v4l2-ctl -d ${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0} -c sharpness=1 -c gamma=100 -c backlight_compensation=0 2>/dev/null
 for g in $GOVS; do
   echo "$g" | sudo tee /sys/devices/system/cpu/cpufreq/policy*/scaling_governor >/dev/null
   uv0=$(sudo dmesg | grep -c "Undervoltage detected")

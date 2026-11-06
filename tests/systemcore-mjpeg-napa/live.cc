@@ -2,7 +2,7 @@
 // UVC MJPEG camera, as the bench's live reference (what the stock building blocks give without PhotonVision) and
 // as a per-frame timing probe. Run it under the camera lock: flock /tmp/camera.lock scmn_live ...
 //
-//   scmn_live [--dev /dev/video0] [--secs 20] [--mode whole|stream|fused] [--cpu N] [--fifo PRIO]
+//   scmn_live [--dev /dev/v4l/by-id/...Thrifty_SJ-05-video-index0] [--secs 20] [--mode whole|stream|fused] [--cpu N] [--fifo PRIO]
 //             [--poll-us 50] [--min-contrast 20] [--config min16|far] [--tag-m 0.1651]
 //             [--calib fx,fy,cx,cy,k1,k2,p1,p2[,k3,k4,k5,k6]] [--exposure-ms 1.2] [--cam-delay-ms 2.5]
 //             [--csv OUT.csv] [--width 1280 --height 800]
@@ -295,7 +295,7 @@ static size_t FindFill(const uint8_t *p, size_t from, size_t len) {
 }
 
 int main(int argc, char **argv) {
-  std::string dev = "/dev/video0", mode = "fused", csv, config = "min16";
+  std::string dev = "/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0", mode = "fused", csv, config = "min16";
   double secs = 20, tag_m = 0.1651, exposure_ms = 1.2, cam_delay_ms = 2.5;
   int cpu = -1, fifo = 0, poll_us = 50, min_contrast = 20, W = 1280, H = 800;
   Calib cal;

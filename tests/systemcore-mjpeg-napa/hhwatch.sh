@@ -24,7 +24,7 @@ while [[ $(date +%s) -lt $end && ! -e $HOME/shared/HH-DONE ]]; do
     "$HOME/bench/bin/nt_check" --camera "$CAM" --secs "$m" >"$OUT/$name.nt" 2>&1 &
     sudo python3 "$HERE/topcpu.py" "$m" 15 >"$OUT/$name.cpu" 2>&1 &
     sudo python3 "$HERE/pvconfig.py" >"$OUT/$name.pvconfig" 2>&1
-    v4l2-ctl -d /dev/video0 -C exposure_time_absolute,gain,sharpness,gamma,backlight_compensation,brightness \
+    v4l2-ctl -d ${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0} -C exposure_time_absolute,gain,sharpness,gamma,backlight_compensation,brightness \
       >"$OUT/$name.camera" 2>&1
     wait
     { echo "== $name"; grep -E "results in|capture ->|bestCameraToTarget\.(x|y|z) |targets\[0\]\.(yaw|pitch|area|fiducialId) " "$OUT/$name.nt"; head -3 "$OUT/$name.cpu"; } >>"$OUT/summary.txt"
