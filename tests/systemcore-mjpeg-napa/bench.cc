@@ -290,7 +290,9 @@ struct Opt {
   double frame_ms = 8;
   size_t chunk = 16384;
   long max_frames = -1;
-  int every = 1, cpu = -1, fifo = 0, band = 8, fill = 0, repeat = 1;
+  int every = 1, cpu = -1, fifo = 0, band = 8, fill = 0, repeat = 1, ref_min = 8;
+  std::string mintags = "16,22,32";
+  double scale = 1.0;
   unsigned seed = 1;
 };
 
@@ -537,6 +539,96 @@ static int RunFused(const Opt &o) {
   return rc;
 }
 
+// ---- mintag mode ----------------------------------------------------------------------------------------
+// NAPA min_tag_px trade-off: every frame is detected at a reference min_tag (--ref, default 8 = every pixel) and at
+// each candidate (--mintags 16,22,32). Per tag-size bin (mean side px of the reference detection): how many of the
+// reference sightings each candidate finds (same id, centre within 2 px), its decision margin, plus CPU per frame.
+// --scale S (<1) downsamples frames first (area average) to emulate the same tags farther away.
+static int RunMintag(const Opt &o, const std::string &list, int ref_min, double scale) {
+  auto items = LoadFrames(o);
+  std::vector<int> mins;
+  {
+    std::stringstream ss(list);
+    std::string t;
+    while (std::getline(ss, t, ',')) mins.push_back(std::atoi(t.c_str()));
+  }
+  auto make = [&](int m) {
+    auto *d = new napa_far::Detector("tag36h11");
+    napa_far::Config c = MakeConfig("min16");
+    c.min_tag_px = m;
+    d->SetConfig(c);
+    return std::unique_ptr<napa_far::Detector>(d);
+  };
+  auto refd = make(ref_min);
+  std::vector<std::unique_ptr<napa_far::Detector>> dets;
+  for (int m : mins) dets.push_back(make(m));
+  const int edges[] = {0, 12, 16, 20, 24, 28, 32, 40, 48, 64, 96, 100000};
+  const int nb = 11;
+  std::vector<std::vector<long>> hit(mins.size(), std::vector<long>(nb, 0));
+  std::vector<long> total(nb, 0);
+  std::vector<std::vector<double>> cpu(mins.size()), margin(mins.size());
+  std::vector<double> refcpu;
+  std::vector<unsigned char> jpeg;
+  std::vector<uint8_t> g, s;
+  long frames = 0;
+  for (auto &it : items) {
+    if (!recording::ReadJpeg(it.f, jpeg) || !recording::DecodeGray(jpeg, g, it.f.width, it.f.height)) continue;
+    int w = it.f.width, h = it.f.height;
+    const uint8_t *img = g.data();
+    if (scale < 0.999) {
+      const int W = std::max(16, static_cast<int>(w * scale)), H = std::max(16, static_cast<int>(h * scale));
+      s.assign(static_cast<size_t>(W) * H, 0);
+      for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+          const int x0 = x * w / W, x1 = std::max(x0 + 1, (x + 1) * w / W), y0 = y * h / H, y1 = std::max(y0 + 1, (y + 1) * h / H);
+          int sum = 0, n = 0;
+          for (int yy = y0; yy < y1; yy++)
+            for (int xx = x0; xx < x1; xx++) sum += g[static_cast<size_t>(yy) * w + xx], n++;
+          s[static_cast<size_t>(y) * W + x] = static_cast<uint8_t>((sum + n / 2) / n);
+        }
+      img = s.data(), w = W, h = H;
+    }
+    ++frames;
+    double c0 = CpuMs();
+    auto ref = refd->Detect(img, w, h, w, it.f.jetson_us);
+    refcpu.push_back(CpuMs() - c0);
+    std::vector<std::vector<napa_far::Tag>> got(mins.size());
+    for (size_t k = 0; k < mins.size(); k++) {
+      c0 = CpuMs();
+      got[k] = dets[k]->Detect(img, w, h, w, it.f.jetson_us);
+      cpu[k].push_back(CpuMs() - c0);
+    }
+    for (auto &t : ref) {
+      if (t.margin < 15) continue;
+      const double side = t.side();
+      int b = 0;
+      while (b + 1 < nb && side >= edges[b + 1]) b++;
+      total[b]++;
+      for (size_t k = 0; k < mins.size(); k++)
+        for (auto &u : got[k])
+          if (u.id == t.id && std::hypot(u.cx() - t.cx(), u.cy() - t.cy()) < 2) {
+            hit[k][b]++;
+            margin[k].push_back(u.margin);
+            break;
+          }
+    }
+  }
+  std::printf("mintag: %s, %ld frames, scale %.2f, reference min_tag %d (CPU %s ms)\n", o.session.c_str(), frames, scale,
+              ref_min, Stats(refcpu).c_str());
+  std::printf("  side px bin   ref sightings");
+  for (int m : mins) std::printf("   min%-3d found", m);
+  std::printf("\n");
+  for (int b = 0; b < nb; b++) {
+    if (!total[b]) continue;
+    std::printf("  [%3d,%5d)  %8ld", edges[b], edges[b + 1], total[b]);
+    for (size_t k = 0; k < mins.size(); k++) std::printf("   %6.1f%%   ", 100.0 * hit[k][b] / total[b]);
+    std::printf("\n");
+  }
+  for (size_t k = 0; k < mins.size(); k++)
+    std::printf("  min %-3d CPU ms p50/p95/p99 %s; margin p50 %.1f\n", mins[k], Stats(cpu[k]).c_str(), Pct(margin[k], .5));
+  return 0;
+}
+
 // ---- split mode -----------------------------------------------------------------------------------------
 // Where libjpeg-turbo's gray decode spends its time, without perf: (a) entropy decode of all components only
 // (jpeg_read_coefficients: Huffman + restart handling, no IDCT), (b) the full gray decode (Huffman for all
@@ -760,6 +852,9 @@ int main(int argc, char **argv) {
     else if (a == "--cpu") o.cpu = std::atoi(v), ++i;
     else if (a == "--fifo") o.fifo = std::atoi(v), ++i;
     else if (a == "--times") o.times = v, ++i;
+    else if (a == "--mintags") o.mintags = v, ++i;
+    else if (a == "--ref") o.ref_min = std::atoi(v), ++i;
+    else if (a == "--scale") o.scale = std::atof(v), ++i;
     else if (a == "--repeat") o.repeat = std::max(1, std::atoi(v)), ++i;
     else if (a == "--band") o.band = std::max(1, std::atoi(v)), ++i;
     else if (a == "--fill") o.fill = std::atoi(v), ++i;
@@ -776,6 +871,7 @@ int main(int argc, char **argv) {
   if (o.mode == "fuzz") return RunFuzz(o);
   if (o.mode == "probe") return RunProbe(o, o.band, o.fill);
   if (o.mode == "split") return RunSplit(o);
+  if (o.mode == "mintag") return RunMintag(o, o.mintags, o.ref_min, o.scale);
   std::fprintf(stderr, "mode: decode|fused|fuzz\n");
   return 2;
 }
