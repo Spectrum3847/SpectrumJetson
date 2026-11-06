@@ -1,0 +1,58 @@
+From 1ae05f4b2743b1b9729db8f3dcef0343d1288643 Mon Sep 17 00:00:00 2001
+From: Allen Gregory <allengregoryiv@gmail.com>
+Date: Fri, 6 Nov 2026 14:29:35 -0600
+Subject: [PATCH 2/3] photon-client: prettier on two test files (the pre-push
+ format check)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ photon-client/tests/input.spec.ts  |  4 +++-
+ photon-client/tests/quirks.spec.ts | 10 ++++++++--
+ 2 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/photon-client/tests/input.spec.ts b/photon-client/tests/input.spec.ts
+index 73300e62..2f99457b 100644
+--- a/photon-client/tests/input.spec.ts
++++ b/photon-client/tests/input.spec.ts
+@@ -4,7 +4,9 @@ import { test } from "./fixtures.ts";
+ test("Camera Gain Slider won't go past max or min", async ({ page }) => {
+   await page.goto("http://localhost:5800/#/dashboard");
+ 
+-  const cameraGainInput = page.locator("div.d-flex", { has: page.locator("span", { hasText: "Camera Gain" }) }).locator("input[type=\"number\"]");
++  const cameraGainInput = page
++    .locator("div.d-flex", { has: page.locator("span", { hasText: "Camera Gain" }) })
++    .locator("input[type=\"number\"]");
+ 
+   // Fill in Camera Gain text field with 1000
+   await cameraGainInput.fill("1000");
+diff --git a/photon-client/tests/quirks.spec.ts b/photon-client/tests/quirks.spec.ts
+index 07d9b0f2..e1022096 100644
+--- a/photon-client/tests/quirks.spec.ts
++++ b/photon-client/tests/quirks.spec.ts
+@@ -4,7 +4,10 @@ import { test } from "./fixtures.ts";
+ test("Quirks should be able to be changed", async ({ page }) => {
+   await page.goto("http://localhost:5800/#/cameras");
+ 
+-  await page.locator("div.d-flex", { has: page.locator("span", { hasText: "Arducam Model" }) }).locator("div.v-field").click();
++  await page
++    .locator("div.d-flex", { has: page.locator("span", { hasText: "Arducam Model" }) })
++    .locator("div.v-field")
++    .click();
+ 
+   await page.locator(".v-overlay .v-list .v-list-item", { hasText: "OV9281" }).click();
+ 
+@@ -12,7 +15,10 @@ test("Quirks should be able to be changed", async ({ page }) => {
+ 
+   await expect(page.locator(".v-overlay p").last()).toHaveText("Camera settings updated successfully");
+ 
+-  await page.locator("div.d-flex", { has: page.locator("span", { hasText: "Arducam Model" }) }).locator("div.v-field").click();
++  await page
++    .locator("div.d-flex", { has: page.locator("span", { hasText: "Arducam Model" }) })
++    .locator("div.v-field")
++    .click();
+ 
+   await page.locator(".v-overlay .v-list .v-list-item", { hasText: "None" }).click();
+ 
+-- 
+2.55.0.windows.2
+

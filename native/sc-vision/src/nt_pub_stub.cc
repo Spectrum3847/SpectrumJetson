@@ -6,4 +6,4 @@ void nt_pub_result(NtPub *, int64_t, const napa_detection *, const tag_pose *, c
 void nt_pub_config(NtPub *, const cam_model *, double, int64_t) {}
 void nt_pub_destroy(NtPub *) {}
 void nt_pub_health(NtPub *, int64_t, long, long, double, int) {}
-void nt_pub_policy(NtPub *, int *, int *, int *) {}
+void nt_pub_policy(NtPub *, int *) {}

@@ -250,10 +250,8 @@ int main(int argc, char **argv) {
   uvc_config uc{};
   uc.width = 1280, uc.height = 800, uc.fps = 120, uc.alt = -1, uc.pkts_per_urb = 4, uc.nurbs = 32, uc.verbose = 1;
   napa_params np{22, 1, 20, 22, 25};
-  // Frame policy (docs/FRAME-POLICY.md): process 1 frame in `every`, decode processed ones at 1/scale (NAPA on that
-  // image, min tag / scale, corners back to full-res pixels), every full_every-th processed frame at full scale.
-  // The robot can override each over NT (/photonvision/<name>/input/*); defaults: full scale, every frame.
-  int scale_def = 1, full_every_def = 0;
+  // Frame policy (docs/FRAME-POLICY.md): frame skipping only, process 1 frame in `every`; the robot can override it
+  // over NT (/photonvision/<name>/input/processEvery). Processed frames are full scale (fscale stays 1).
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     auto nx = [&]() { return i + 1 < argc ? argv[++i] : (char *)"0"; };
@@ -270,8 +268,6 @@ int main(int argc, char **argv) {
     else if (a == "--hamming") np.max_hamming = atoi(nx());
     else if (a == "--min-contrast") np.min_contrast = atoi(nx());
     else if (a == "--every") every = std::max(1, atoi(nx()));
-    else if (a == "--scale") scale_def = atoi(nx());          // decode scale of processed frames: 1 or 2 (4: tests only)
-    else if (a == "--full-every") full_every_def = atoi(nx());  // every Nth processed frame at full scale (0: off)
     else if (a == "--fps-max") fps_max = atof(nx());  // process at most this many frames/s, decided at a frame's start
     else if (a == "--check") check = atoi(nx());
     else if (a == "--calib") calib = nx();
@@ -539,8 +535,8 @@ int main(int argc, char **argv) {
         t_first = 0;
         f_flags = c.flags, f_pts = c.pts, f_stc = c.scr_stc, f_sof = c.scr_sof;
         seq++;
-        int pol_every = every, pol_scale = scale_def, pol_full = full_every_def;
-        if (pub) nt_pub_policy(pub, &pol_scale, &pol_full, &pol_every);  // the robot's, when it publishes one
+        int pol_every = every;
+        if (pub) nt_pub_policy(pub, &pol_every);  // the robot's, when it publishes one
         process = (seq % pol_every) == 0;
         // --fps-max: skip a frame (no decode, no NAPA) if it starts less than a period (less 2 ms of jitter
         // room) after the last processed one. Decided at its first packet, so a processed frame is not delayed.
@@ -560,9 +556,6 @@ int main(int argc, char **argv) {
           c_frame0 = cpu_ns();
           c_dec = c_napa = 0;
           nproc++;
-          fscale = (pol_full > 0 && nproc % pol_full == 0) ? 1 : pol_scale;
-          if (fscale != 2 && fscale != 4) fscale = 1;
-          Hs = H / fscale;
           n_by_scale[fscale]++;
           mjdec_set_scale(dec, fscale);
           mjdec_begin(dec, fb.data(), FB, Y.data(), W, H, W / fscale);

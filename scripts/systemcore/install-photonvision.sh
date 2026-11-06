@@ -5,7 +5,7 @@
 #     JAR       photonvision-*-linuxarm64.jar (fork: ./gradlew photon-server:shadowJar -PArchOverride=linuxarm64)
 #     NAPA_OUT  scripts/systemcore/build-napa.sh's output (default ~/builder/sc-napa)
 #     HOST      default systemcore@172.26.0.1 (USB link; or robot.local)
-#   NATIVE=0 skips the 20-native-camera.conf drop-in (native publish + native cameras are on by default)
+#   NATIVE=0 writes 20-native-camera.conf with SPECTRUM_NATIVE_CAMERA=0 (native cameras are on by default)
 #   UVC_KO=path  our uvcvideo (build-uvcvideo.sh; default ~/builder/uvcvideo-sc/uvcvideo.ko): installed to
 #            /opt/sc-vision/modules with sc-uvcvideo.service, which loads it at boot (stock on any failure;
 #            /etc/sc-vision/uvcvideo.conf ENABLED=0 opts out). UVC=0 skips it.
@@ -138,12 +138,12 @@ Environment=SPECTRUM_NAPA_STREAM=1
 Environment=SPECTRUM_CAMERA_DELAY_US=400
 EOF
 fi
-# Native cameras (docs/SYSTEMCORE-NATIVE-BACKEND.md): with native publish on, verified cameras (Thriftiest, Swyft)
-# run with no cscore UsbCamera. Its own drop-in so 10-spectrum.conf (whatever the bench set there) is left alone;
-# NATIVE=0 removes it (cscore fast path / Java path only). A later drop-in (zz-*) can still override it.
-if [[ ${NATIVE:-1} == 1 ]]; then
-  printf '[Service]\n# native publish; verified cameras get the native camera backend (SPECTRUM_NATIVE_CAMERA=0 opts out)\nEnvironment=SPECTRUM_NATIVE_PUBLISH=1\n' |
-    sudo tee /etc/systemd/system/photonvision.service.d/20-native-camera.conf >/dev/null
+# Native cameras (docs/SYSTEMCORE-NATIVE-BACKEND.md) are on by default for verified cameras; NATIVE=0 turns them off
+# with its own drop-in (20-native-camera.conf: SPECTRUM_NATIVE_CAMERA=0). Older installs' 20-native-camera.conf
+# (SPECTRUM_NATIVE_PUBLISH=1, no longer read) is replaced or removed.
+if [[ ${NATIVE:-1} == 0 ]]; then
+  printf '%s\n' '[Service]' '# native cameras off (cscore fast path for every camera)' \
+    'Environment=SPECTRUM_NATIVE_CAMERA=0' | sudo tee /etc/systemd/system/photonvision.service.d/20-native-camera.conf >/dev/null
 else
   sudo rm -f /etc/systemd/system/photonvision.service.d/20-native-camera.conf
 fi

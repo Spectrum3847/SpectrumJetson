@@ -156,21 +156,6 @@ struct SinkOut {
 };
 
 // The camera watcher's side of streaming NAPA: its own detector, fed band by band on the watcher thread.
-// NAPA's min tag for a frame decoded at 1/scale (docs/FRAME-POLICY.md). NAPA samples its finest level every
-// base = min_tag * 3 / (4 * 8) pixels. Halving min_tag keeps the sampling density only when base is even: min 32
-// has base 3 (every 3rd full-res pixel), and min 16 at half scale samples every half-res pixel (= every 2nd
-// full-res one), 2.25x the samples of full scale, so "half scale" cost as much as full or more (FINDINGS 40 (3):
-// +0.4-0.5 ms a frame on the Swyft). The reduced min tag is min_tag / scale, raised just enough that the reduced
-// frame is sampled no denser than the full one (base_reduced x scale >= base_full): min 32 -> 22 at 1/2 (every
-// 4th full-res pixel: tags of 32-43 px may be missed at half scale), min 22 -> 11 and min 16 -> 8 unchanged.
-static int ReducedMinTag(int min_tag, int scale) {
-  auto base = [](int m) { return std::max(1, m * 3 / 32); };
-  int m = std::max(8, min_tag / scale);
-  const int want = (base(min_tag) + scale - 1) / scale;  // the reduced base that samples no denser than full
-  while (base(m) < want) m++;
-  return m;
-}
-
 struct StreamSink {
   napa_far::Detector det;
   std::mutex cfg_mu;
@@ -262,10 +247,9 @@ struct StreamSink {
   // Frame policy (docs/FRAME-POLICY.md; setNativePolicy): process 1 frame in `every` (the others aren't decoded),
   // decode processed ones at 1/scale (NAPA on that image with min tag / scale, corners back to full-res pixels),
   // every full_every-th processed one at full scale. Defaults: every frame, full scale.
-  std::atomic<int> pol_scale{1}, pol_full_every{0}, pol_every{1};
+  std::atomic<int> pol_every{1};
   long plan_n = 0, proc_n = 0;  // watcher thread
-  int planned = 0, cur_scale = 1, applied_scale = 1, full_w = 0;
-  std::atomic<long> n_scaled{0}, n_skipped{0};
+  std::atomic<long> n_skipped{0};
   explicit StreamSink(const std::string &family) : det(family) {
     c.ctx = this;
     c.plan = [](void *x) -> int {
@@ -275,37 +259,17 @@ struct StreamSink {
         s->n_skipped++;
         return 0;
       }
-      const int fe = s->pol_full_every.load(), sc = s->pol_scale.load();
       s->proc_n++;
-      s->cur_scale = (fe > 0 && s->proc_n % fe == 0) || (sc != 2 && sc != 4) ? 1 : sc;
-      s->planned = 1;
-      return s->cur_scale;
+      return 1;  // full scale: the policy is frame skipping only (docs/FRAME-POLICY.md)
     };
     c.begin = [](void *x, const uint8_t *img, int w, int h, int stride) -> int {
       auto *s = static_cast<StreamSink *>(x);
       s->t_begin = MonoNs();
       s->t_cam = s->Predict(s->t_begin);
-      // this frame's scale: the plan's, if the watcher honoured it (it decodes full size while the image is copied)
-      int sc = s->planned ? s->cur_scale : 1;
-      s->planned = 0;
-      if (sc > 1 && s->full_w && w * sc != s->full_w) sc = 1;
-      if (sc == 1) s->full_w = w;
-      s->cur_scale = sc;
-      if (sc > 1) s->n_scaled++;
-      s->width = w * sc, s->height = h * sc;
+      s->width = w, s->height = h;
       {
         std::lock_guard<std::mutex> l(s->cfg_mu);
-        if (s->cfg_new || sc != s->applied_scale) {
-          napa_far::Config cf = s->cfg;
-          if (sc > 1) {
-            cf.min_tag_px = ReducedMinTag(cf.min_tag_px, sc);
-            cf.base_min_tag_px = ReducedMinTag(cf.base_min_tag_px, sc);
-            cf.far_min_tag_px = std::max(4, cf.far_min_tag_px / sc);
-            cf.track_side_px /= sc;
-          }
-          s->det.SetConfig(cf);
-          s->applied_scale = sc;
-        }
+        if (s->cfg_new) s->det.SetConfig(s->cfg);
         s->cfg_new = false;
       }
       return s->det.Begin(img, w, h, stride, NowUs()) ? 1 : 0;
@@ -314,9 +278,6 @@ struct StreamSink {
     c.finish = [](void *x) -> void * {
       auto *s = static_cast<StreamSink *>(x);
       auto *out = new SinkOut{s->det.Finish(), s->t_begin};
-      if (s->cur_scale > 1)  // a reduced frame's corners back to full-res pixels (centres at integers)
-        for (auto &t : out->tags)
-          for (double &v : t.p) v = v * s->cur_scale + (s->cur_scale - 1) * 0.5;
       s->Publish(out->tags);
       return out;
     };
@@ -602,20 +563,7 @@ struct NativeCam {
         last_frame_ns = mono();
         if (want_gray.load()) {  // Java's UI / pipeline: the latest image, when it asks
           std::lock_guard<std::mutex> l(gmu);
-          if (scale == 1) {
-            gray.assign(img.begin(), img.end());
-          } else {  // decoded at 1/scale (frame policy): pixel replication back to full size for Java
-            gray.resize(static_cast<size_t>(w) * h);
-            const int ws = w / scale;
-            for (int ys = 0; ys < hs; ys++) {
-              const uint8_t *src = img.data() + static_cast<size_t>(ys) * ws;
-              uint8_t *dst = gray.data() + static_cast<size_t>(ys) * scale * w;
-              for (int x = 0; x < ws; x++)
-                for (int k = 0; k < scale; k++) dst[x * scale + k] = src[x];
-              for (int k = 1; k < scale && ys * scale + k < h; k++)
-                std::memcpy(dst + static_cast<size_t>(k) * w, dst, static_cast<size_t>(w));
-            }
-          }
+          gray.assign(img.begin(), img.end());  // processed frames are full scale (plan: 1 or skip)
           gray_capture_ns = stamp;
           want_gray = false;
         }
@@ -1125,25 +1073,17 @@ JNIEXPORT jboolean JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraRecor
   return nw ? JNI_TRUE : JNI_FALSE;
 }
 
-// sc/mjpeg-napa frame policy for this camera's streamed frames (docs/FRAME-POLICY.md): decode scale 1, 2 or 4
-// (others: 1), every fullEvery-th processed frame at full scale (0: never forced), process 1 frame in processEvery
-// (>= 1; the others aren't decoded). Scale and skipping only apply while nobody watches the stream (image copy
-// off). Returns frames decoded reduced so far.
+// sc/mjpeg-napa frame policy for this camera's streamed frames (docs/FRAME-POLICY.md): frame skipping only, process
+// 1 frame in processEvery (>= 1; the others aren't decoded); applies only while nobody watches the stream. scale and
+// fullEvery are ignored (the decode-scale option was removed). Returns 0.
 JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setNativePolicy(JNIEnv *, jclass, jlong h,
                                                                                   jint scale, jint fullEvery,
                                                                                   jint processEvery) {
   auto *n = Handle(h);
   if (!n || !n->sink) return -1;
-  // Reduced scale is off unless SPECTRUM_POLICY_SCALE is set (not 0) (docs/FRAME-POLICY.md): live it saved ~1 point of a core
-  // per camera at min 32 and nothing at min 22, so the policy is skipping only.
-  static const bool scale_ok = [] {
-    const char *e = std::getenv("SPECTRUM_POLICY_SCALE");
-    return e && *e && std::strcmp(e, "0") != 0;
-  }();
-  n->sink->pol_scale = scale_ok && (scale == 2 || scale == 4) ? scale : 1;
-  n->sink->pol_full_every = std::max(0, static_cast<int>(fullEvery));
   n->sink->pol_every = std::max(1, static_cast<int>(processEvery));
-  return n->sink->n_scaled.load();
+  (void)scale, (void)fullEvery;
+  return 0;
 }
 
 // Mean capture (mid-exposure) -> publish of this camera's natively published results since the last call, ms;

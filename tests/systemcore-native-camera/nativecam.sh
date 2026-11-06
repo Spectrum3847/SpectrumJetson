@@ -4,9 +4,9 @@
 #                                       swyft,thrifty for both in one PV); SECS default 12
 # Holds /tmp/camera.lock for the whole run. Stops PV and limelight_visionserver, backs up photon.sqlite (SQLite
 # backup API + integrity_check, ~/bench/scmn/pvdb.py), leaves only CAMERA active, loads the small-URB uvcvideo
-# (urb 2), adds a TEMPORARY drop-in (stream decoder, mjdec, streaming NAPA, native publish + EXTRA_ENV), starts PV,
+# (urb 2), adds a TEMPORARY drop-in (stream decoder, mjdec, streaming NAPA + EXTRA_ENV), starts PV,
 # waits WARM s (default 10), then for SECS: device ownership (who has /dev/video* open), nt_check, per-thread CPU.
-# Afterwards: PV stopped, drop-in removed, DB restored exactly, stock uvcvideo, the Swyft's exposure written back
+# Afterwards: PV stopped, drop-in removed, DB restored exactly, the driver as it was, the Swyft's exposure written back
 # only if the run changed it, PV back to its previous state. PV runs WARM + SECS + ~3 s in all (keep it <= 30).
 #   SET="cameraExposureRaw=300"   pipeline settings for CAMERA in the run's DB (dark room: Swyft 300 sees tags)
 #   EXTRA_ENV="K=V K=V"           more environment for PV (e.g. SPECTRUM_NATIVE_CAMERA=0 for the fast path)
@@ -15,6 +15,7 @@ set -uo pipefail
 OUT=${1:?OUT}
 CAM=${2:?CAMERA}
 SECS=${3:-12}
+MINTAG=${MINTAG:-22}  # every camera's NAPA min tag for the run (tests default to 22: the measured sweet spot)
 WARM=${WARM:-10}
 B=$HOME/bench/scmn
 DB=/opt/photonvision/photonvision_config/photon.sqlite
@@ -28,6 +29,7 @@ flock -w 600 9 || { echo "camera lock busy" >&2; exit 1; }
 was=$(systemctl is-active photonvision)
 sw0=$(v4l2-ctl -d "$SW" -C exposure_time_absolute 2>/dev/null | awk '{print $2}')
 backed=0
+swapped=0
 cleanup() {
   sudo systemctl stop photonvision
   sudo rm -f "$DROP"
@@ -35,7 +37,7 @@ cleanup() {
   if ((backed)); then
     sudo python3 "$B/pvdb.py" restore "$BK" "$DB" && echo "DB restored from $BK" || echo "DB RESTORE FAILED ($BK)" >&2
   fi
-  SC_VISION_HAVE_LOCK=1 bash "$LOAD" stock >/dev/null
+  ((swapped)) && SC_VISION_HAVE_LOCK=1 bash "$LOAD" stock >/dev/null
   local now=""
   for _ in $(seq 20); do
     now=$(v4l2-ctl -d "$SW" -C exposure_time_absolute 2>/dev/null | awk '{print $2}')
@@ -65,14 +67,19 @@ for uniq, contents in db.execute("select unique_name, contents from cameras").fe
 db.commit()
 print(db.execute("pragma integrity_check").fetchone()[0])
 PY
+sudo python3 "$B/pvdb.py" mintag "$DB" "$MINTAG" >/dev/null
 # SET applies to the first camera named (e.g. the Swyft's exposure in the dark)
 # shellcheck disable=SC2086
 [[ -n ${SET:-} ]] && sudo python3 "$B/pvdb.py" set "$DB" "${CAM%%,*}" $SET
-SC_VISION_HAVE_LOCK=1 bash "$LOAD" urb 2 >/dev/null
+# our uvcvideo (urb 2, camera clock): loaded at boot by sc-uvcvideo.service; swapped in (and back) only if not
+if [[ ! -f /sys/module/uvcvideo/parameters/urb_packets ]]; then
+  SC_VISION_HAVE_LOCK=1 bash "$LOAD" urb 2 >/dev/null
+  swapped=1
+fi
 {
   printf '[Service]\n'
   for kv in SPECTRUM_JPEG_DECODER=stream SPECTRUM_NAPA_STREAM=1 SPECTRUM_STREAM_DECODER=mjdec \
-    SPECTRUM_NATIVE_PUBLISH=1 ${EXTRA_ENV:-}; do
+    ${EXTRA_ENV:-}; do
     printf 'Environment=%s\n' "$kv"
   done
 } | sudo tee "$DROP" >/dev/null

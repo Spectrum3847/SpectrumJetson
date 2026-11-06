@@ -1,62 +1,43 @@
-# Per-camera frame policy: decode scale and frame skipping
+# Per-camera frame policy: frame skipping
 
-Status 2026-11-06: implemented in sc-vision and in the PhotonVision fork's fast path (photonvision-113). CPU was
-measured on the bench for sc-vision. Detection and pose quality at 1/2 and 1/4 were only partly measured, on the
-Thriftiest, before the bench went dark (see "Measured").
+Status 2026-11-07: **frame skipping only.** The decode-scale option (half resolution) was removed from
+NetworkTables, the robot-facing API, PhotonVision (fork: `input/scale`, `input/fullEvery`, `health/scale`,
+`health/fullEvery`, `health/scaledFrames`, `SPECTRUM_POLICY_SCALE`, `SPECTRUM_POLICY_FULL_EVERY`, the "Low-CPU
+Decode" pipeline switch) and the native code (NAPA sink and native camera: no reduced scale; sc-vision: no `--scale`
+/ `--full-every`, no NT scale inputs). Why: live it saved at most ~1 point of a core per camera (see the 2026-11-07
+section below). The offline tools keep their test options (`stream_identity --scale/--scaled-min`,
+`mjdec_bench --scale`); they don't touch a robot.
 
 ## What it does
 
 The camera always streams 1280x800 MJPEG; the UVC mode never changes. For each frame, at its start (before any
-decoding), each camera decides:
+decoding), each camera decides to **process** it (full decode, NAPA, pose, publish) or **skip** it (not decoded at
+all, which costs almost nothing).
 
-- **skip**: the frame is not decoded at all, which costs almost nothing;
-- **full** (1/1) or **half** (640x400): mjdec still decodes all of the Huffman data, but at half scale it
-  reconstructs each 8x8 block at 4x4 pixels from its lowest coefficients (a reduced IDCT). NAPA runs on that smaller
-  image with min tag / 2. Corners go back to full-res pixels (x = 2 x' + 0.5, pixel centres at integers), and the
-  pose uses the full-res calibration.
-
-**The policy is full or 1/2 scale plus skipping; never 1/4 or 1/8** (user decision, 2026-11-06). At 1/4 the decode
-is no faster than at 1/2 (1.21 vs 1.22 ms: the Huffman decoding is the floor). It saves only about 0.6 ms of NAPA
-and loses the smallest tag. Skipping saves far more without losing range. The 1/4 and 1/8 code paths stay as
-internal test options only (`mjdec_set_scale`, sc-vision `--scale 4`, PhotonVision `SPECTRUM_POLICY_SCALE=4`). The
-robot's `scale` input accepts only 1 or 2; any other value is ignored.
-
-Full scale is bit-identical to before: same decoder path, same results.
-
-## NetworkTables inputs (the robot publishes; all optional)
-
-Under `/photonvision/<camera>/input/`, integers. A value that is missing or <= 0 means "use the default".
+## NetworkTables input (the robot publishes; optional)
 
 | Topic | Values | Default | Meaning |
 |---|---|---|---|
-| `scale` | 1, 2 | 1 | Decode scale of processed frames (anything else is ignored) |
-| `fullEvery` | N >= 0 | 0 | Every Nth processed frame at full scale anyway (0: never forced) |
-| `processEvery` | N >= 1 | 1 | Process 1 frame in N; the others are skipped at their start |
+| `/photonvision/<camera>/input/processEvery` | N >= 1 | 1 | Process 1 frame in N; the others are skipped at their start |
 
-With nothing published, every frame is processed at full resolution, exactly as before. Defaults when the robot
-publishes nothing can also be set per process:
-
-- sc-vision: `--scale`, `--full-every`, `--every`.
-- PhotonVision: `SPECTRUM_POLICY_SCALE`, `SPECTRUM_POLICY_FULL_EVERY`, `SPECTRUM_POLICY_PROCESS_EVERY`.
-
-In PhotonVision, scale and skipping apply only while nobody watches that camera's stream (the image copy is off).
-A frame the Java pipeline asks for that was skipped or decoded small is decoded by Java itself. The health topic
-`fps` reports the processed rate.
+Missing or <= 0: the default. Defaults when the robot publishes nothing: sc-vision `--every`, PhotonVision
+`SPECTRUM_POLICY_PROCESS_EVERY`. In PhotonVision skipping applies only while nobody watches that camera's stream.
+Health: `/photonvision/<camera>/health/processEvery` (the value in force) and `health/fps` (the processed rate).
 
 ## Proposal for the robot code (2026-FM-SystemCore, not committed there)
 
-One small subsystem publishes the three knobs for each camera from what the robot knows:
+One small subsystem publishes `processEvery` for each camera from what the robot knows:
 
-- **Tags predicted close** (odometry + field map + the camera's pose and field of view; closer than about 2 m,
-  where a tag is at least 2 x min tag at half scale): `processEvery 1`, `scale 2`.
-- **Far tags predicted, or the robot fast or turning hard** (small tags, motion; the pose matters most):
-  `processEvery 1`, `scale 1`.
-- **No tag predicted for this camera**: `processEvery 4` at `scale 1`, or `scale 2` if only close tags could appear,
-  so a surprise tag is still seen within about 33 ms.
-- **Disabled, or the code doesn't know**: publish nothing (or 1/0/1), which gives the defaults.
+- **Tags predicted in this camera's view, or the robot fast or turning hard** (the pose matters most):
+  `processEvery 1`.
+- **No tag predicted for this camera**: `processEvery 2` to `4`, so a surprise tag is still seen within about
+  17-33 ms at 120 fps.
+- **Disabled, or the code doesn't know**: publish nothing (every frame).
 
-Each camera reads only its own topics, so a role can differ by camera, for example a far-looking camera at full
-scale and a near one at half.
+Each camera reads only its own topic, so cameras can differ (a camera facing the scoring tags at 1, one facing a
+wall at 4). For less CPU at a fixed rate use a larger min tag (min 22 is the measured sweet spot, FINDINGS 40).
+
+## History: decode scale (removed)
 
 ## Measured (sc-vision, Thriftiest, exposure setting 2, min tag 32 at full scale; `tests/systemcore-latency/scale-compare.sh 15`)
 
@@ -82,7 +63,7 @@ Not measured yet (the bench went dark at about 17:58; both cameras' frames are f
 - the PhotonVision fast path's detection at 1/2. Only its CPU was seen: the Swyft's streaming thread went
   from about 21% to 11% of a core at 1/2, and `processEvery 2` gave 60 results/s.
 
-## 2026-11-07: half scale dropped from the policy (skipping only)
+## 2026-11-07: half scale dropped (then removed)
 
 FINDINGS 40 (3): input/scale=2 engaged but cost ~+0.5 ms a frame on the Swyft (thread 24.6 -> 30.4%). Two causes
 in the native backend, both fixed: (1) min_tag / 2 made NAPA sample every half-res pixel at min 32 (base stride
@@ -98,8 +79,6 @@ replication). Offline (stream_identity, decode + NAPA per frame): min 32 1.82 ->
 | 22 | 33.4 -> 33.1 |
 
 Latency equal. So half scale is no longer a cost, but it saves ~1 point of a core at best (and loses the 32-43 px
-band at min 32): the live per-frame cost is not the decode + NAPA share the offline numbers suggest. The native
-backend therefore ignores scale (policy = skipping, fullEvery irrelevant) unless `SPECTRUM_POLICY_SCALE` is set;
-the robot's `scale` input is accepted and reported in health/scale but has no effect. For less CPU per camera use
-skipping (`processEvery`) or a larger min tag.
+band at min 32): the live per-frame cost is not the decode + NAPA share the offline numbers suggest. Removed
+entirely the same day (Allen): no scale input, health topic, environment option or native code path remains.
 

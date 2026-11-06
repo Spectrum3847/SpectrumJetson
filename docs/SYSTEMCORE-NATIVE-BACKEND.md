@@ -294,3 +294,33 @@ at boot, as before), limelight_visionserver stopped (it starts at boot), DB rest
 
   Differences of 0.02-0.04 ms, inside the trace's +-0.125 ms URB uncertainty; both stamp mid-exposure the same way.
   The dark-run 0.23 ms was most likely run-to-run variation; no change made.
+
+**2026-11-07: decode scale removed** (Allen): no `input/scale`, `input/fullEvery`, `health/scale`, `health/fullEvery`,
+`health/scaledFrames`, `SPECTRUM_POLICY_SCALE`/`_FULL_EVERY`, Low-CPU Decode switch, or native half-scale path any more;
+the frame policy is `processEvery` only (docs/FRAME-POLICY.md). Tests now default to min tag 22.
+
+## Flag cleanup 2026-11-07 (Allen-approved; fork 0fc4b12e, 1ae05f4b, f6e5f329 = photonvision-134..136)
+
+- **Decode scale removed** everywhere robot-facing: `input/scale`, `input/fullEvery`, `health/scale`,
+  `health/fullEvery`, `health/scaledFrames`, `SPECTRUM_POLICY_SCALE`, `SPECTRUM_POLICY_FULL_EVERY`, the AprilTag
+  tab's "Low-CPU Decode" switch (the saved setting is ignored), the native sink's reduced-scale path, sc-vision's
+  `--scale`/`--full-every` and NT scale inputs. Policy = `processEvery` only (docs/FRAME-POLICY.md). Offline
+  tools keep test options (stream_identity `--scale/--scaled-min`, mjdec_bench `--scale`).
+- **SPECTRUM_NATIVE_PUBLISH gate removed**: native publish is always on (it engages per camera when its frames are
+  streamed/captured natively); verified cameras are native by default; `SPECTRUM_NATIVE_CAMERA=0` is the only
+  opt-out (installer `NATIVE=0` writes it in 20-native-camera.conf; otherwise that drop-in is removed).
+- **One Java-rate flag**: `SPECTRUM_NATIVE_JAVA_FPS` (default 5) replaces SPECTRUM_NATIVE_PUBLISH_JAVA_FPS (30) and
+  SPECTRUM_NATIVE_CAMERA_JAVA_FPS (5), for the fast path and native cameras; `SPECTRUM_STREAM_FPS` (30) while a
+  Java-fed stream is watched. (The fast path's Java pipeline therefore drops from 30 to 5 fps while unwatched.)
+- `SPECTRUM_NATIVE_POSE=0`: kept as a DEBUG switch only (Java path, WPILib orthogonal iteration).
+- **sc-vision NT**: the legacy top-level `heartbeat`, `latencyMillis`, `fps`, `hasTarget`, `targetYaw/Pitch/Area`
+  are gone (no readers in robot-vision/, tests or docs: they use PhotonLib on rawBytes); `health/*` stays.
+- `SPECTRUM_CAMERA_PTS_DELAY_US` is still read (USBFrameProvider and NativeFrameProvider, the camera-clock shift):
+  kept.
+- Tests (`nativecam.sh`) default to min tag 22 and keep the boot-loaded uvcvideo (swap only if stock is loaded).
+
+Lit sanity check after it (both cameras, min 22, 12 s, plain env + the test drop-in, no SPECTRUM_NATIVE_PUBLISH):
+both "Native camera source", PV the only owner; Swyft 119.6 results/s, Thriftiest 120.6/s, all with targets,
+tag quality 1435/1435 and 1447/1447 matched, health/processEvery 1, no health/scale. Latency/CPU of that run
+are NOT representative: another agent's tagfit_bench was using ~93% of a core meanwhile (p50 capture->publish
+9.0/8.9 ms, PV 99.4%).

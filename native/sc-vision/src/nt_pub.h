@@ -16,9 +16,9 @@ void nt_pub_destroy(NtPub *p);
 // PhotonVision's /photonvision/<camera>/health/* (fps, state, lastFrameAgeMs, pipelineMs, latencyMs, frames,
 // decodeFailures, ...): call on every loop pass (publishes once a second; frame_done: a frame finished now).
 void nt_pub_health(NtPub *p, int64_t now_ns, long frames_total, long failures, double pipeline_ms, int frame_done);
-// The robot's per-camera frame policy, /photonvision/<camera>/input/{scale (1 or 2), fullEvery, processEvery} (integers;
-// docs/FRAME-POLICY.md). Each is left unchanged when the robot hasn't published it (or published <= 0).
-void nt_pub_policy(NtPub *p, int *scale, int *full_every, int *process_every);
+// The robot's per-camera frame policy, /photonvision/<camera>/input/processEvery (integer; docs/FRAME-POLICY.md:
+// frame skipping only). Left unchanged when the robot hasn't published it (or published <= 0).
+void nt_pub_policy(NtPub *p, int *process_every);
 // NAPA's corners (OpenCV order) -> AprilTag's order, which PhotonVision's pose and corners use.
 inline void napa_to_apriltag_order(const double *in, double *out) {
   static const int perm[4] = {1, 0, 3, 2};

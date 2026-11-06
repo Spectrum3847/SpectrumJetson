@@ -1,0 +1,215 @@
+From 0fc4b12ec336b7a60cb25b4a5684ce020bfd2ae1 Mon Sep 17 00:00:00 2001
+From: Allen Gregory <allengregoryiv@gmail.com>
+Date: Fri, 6 Nov 2026 14:19:57 -0600
+Subject: [PATCH 1/3] Frame policy: decode scale removed (processEvery only)
+
+No input/scale or input/fullEvery subscriptions, no health/scale, health/fullEvery or health/scaledFrames topics, no SPECTRUM_POLICY_SCALE / SPECTRUM_POLICY_FULL_EVERY; the native policy is {1, 0, processEvery}. The Low-CPU Decode switch is gone from the AprilTag tab and the half-resolution gray decode is never requested (the saved setting stays so old settings load). Half scale saved at most ~1 point of a core live (SpectrumJetson docs/FRAME-POLICY.md).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../components/dashboard/tabs/AprilTagTab.vue |  9 ----
+ .../vision/pipe/impl/NativePublish.java       | 53 ++++++-------------
+ .../processes/CameraHealthPublisher.java      | 17 +-----
+ .../vision/processes/SystemCoreProfile.java   |  5 +-
+ 4 files changed, 20 insertions(+), 64 deletions(-)
+
+diff --git a/photon-client/src/components/dashboard/tabs/AprilTagTab.vue b/photon-client/src/components/dashboard/tabs/AprilTagTab.vue
+index 9ab4b7a7..2e7b0227 100644
+--- a/photon-client/src/components/dashboard/tabs/AprilTagTab.vue
++++ b/photon-client/src/components/dashboard/tabs/AprilTagTab.vue
+@@ -101,15 +101,6 @@ const interactiveCols = computed(() =>
+         (value) => useCameraSettingsStore().changeCurrentPipelineSetting({ refineEdges: value }, false)
+       "
+     />
+-    <pv-switch
+-      v-model="currentPipelineSettings.lowCpuDecode"
+-      :switch-cols="interactiveCols"
+-      label="Low-CPU Decode"
+-      tooltip="Decodes USB MJPEG cameras to gray at half resolution and searches that (decimate halved). Saves under 1 ms a frame; finds fewer small tags and corners are less precise. Leave off unless CPU-bound."
+-      @update:modelValue="
+-        (value) => useCameraSettingsStore().changeCurrentPipelineSetting({ lowCpuDecode: value }, false)
+-      "
+-    />
+     <NapaSettings
+       flag="napa"
+       label="Detector: NAPA"
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+index 1098643d..083ae04b 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+@@ -125,47 +125,31 @@ public final class NativePublish {
+         String topicName = javaPub.getTopic().getName();
+         String dir = topicName.substring(0, topicName.lastIndexOf('/'));
+         if (!dir.equals(policyDir)) {
+-            if (inScale != null) {
+-                inScale.close();
+-                inFullEvery.close();
+-                inProcessEvery.close();
+-            }
+-            inScale = pvInst.getIntegerTopic(dir + "/input/scale").subscribe(0);
+-            inFullEvery = pvInst.getIntegerTopic(dir + "/input/fullEvery").subscribe(0);
++            if (inProcessEvery != null) inProcessEvery.close();
+             inProcessEvery = pvInst.getIntegerTopic(dir + "/input/processEvery").subscribe(0);
+             policyDir = dir;
+         }
+     }
+ 
+     /**
+-     * Spectrum (sc/mjpeg-napa): the frame policy (docs/FRAME-POLICY.md in SpectrumJetson): decode
+-     * scale (1 or 2 from the robot; 4 only via SPECTRUM_POLICY_SCALE, for tests), every Nth processed
+-     * frame at full scale (0: never forced), process 1 frame in N (the others aren't decoded). The
+-     * robot publishes them under /photonvision/<camera>/input/; until it does, SPECTRUM_POLICY_SCALE
+-     * / _FULL_EVERY / _PROCESS_EVERY, else full scale, every frame. Scale and skipping apply only
+-     * while nobody watches the camera's stream.
++     * Spectrum (sc/mjpeg-napa): the frame policy (docs/FRAME-POLICY.md in SpectrumJetson): frame
++     * skipping only, process 1 frame in N (the others aren't decoded). The robot publishes
++     * /photonvision/<camera>/input/processEvery; until it does, SPECTRUM_POLICY_PROCESS_EVERY, else
++     * every frame. Skipping applies only while nobody watches the camera's stream. (The decode scale
++     * was removed: it saved ~1 point of a core at best.)
+      */
+-    private static final int DEF_SCALE = envInt("SPECTRUM_POLICY_SCALE", 1);
+-
+-    private static final int DEF_FULL_EVERY = envInt("SPECTRUM_POLICY_FULL_EVERY", 0);
+     private static final int DEF_PROCESS_EVERY = envInt("SPECTRUM_POLICY_PROCESS_EVERY", 1);
+ 
+-    private org.wpilib.networktables.IntegerSubscriber inScale, inFullEvery, inProcessEvery;
++    private org.wpilib.networktables.IntegerSubscriber inProcessEvery;
+     private String policyDir;
+-    private volatile long scaledFrames = 0;
+ 
+     private volatile int[] activePolicy = {1, 0, 1};
+ 
+-    /** The frame policy in force: {scale, fullEvery, processEvery}. */
++    /** The frame policy in force: {1, 0, processEvery} (scale and fullEvery fixed: skipping only). */
+     public int[] activePolicy() {
+         return activePolicy;
+     }
+ 
+-    /** Frames decoded at a reduced scale so far. */
+-    public long scaledFrames() {
+-        return scaledFrames;
+-    }
+-
+     private static int envInt(String name, int def) {
+         try {
+             String v = System.getenv(name);
+@@ -176,16 +160,12 @@ public final class NativePublish {
+     }
+ 
+     private synchronized int[] policy() {
+-        int scale = DEF_SCALE, fullEvery = DEF_FULL_EVERY, every = DEF_PROCESS_EVERY;
+-        if (inScale != null) {
+-            long v = inScale.get();
+-            if (v == 1 || v == 2) scale = (int) v; // 1/4 only as a test option (environment)
+-            v = inFullEvery.get();
+-            if (v > 0) fullEvery = (int) v;
+-            v = inProcessEvery.get();
++        int every = DEF_PROCESS_EVERY;
++        if (inProcessEvery != null) {
++            long v = inProcessEvery.get();
+             if (v > 0) every = (int) v;
+         }
+-        return new int[] {scale, fullEvery, every};
++        return new int[] {1, 0, every};
+     }
+ 
+     private boolean ensureOwnClient(
+@@ -235,11 +215,9 @@ public final class NativePublish {
+         if (ownInst != null) ownInst.close();
+         ownPub = null;
+         ownInst = null;
+-        if (inScale != null) {
+-            inScale.close();
+-            inFullEvery.close();
++        if (inProcessEvery != null) {
+             inProcessEvery.close();
+-            inScale = null;
++            inProcessEvery = null;
+             policyDir = null;
+         }
+     }
+@@ -312,8 +290,7 @@ public final class NativePublish {
+         try {
+             int[] pol = policy();
+             activePolicy = pol;
+-            scaledFrames =
+-                    org.photonvision.jni.NapaDetectorJNI.setNativePolicy(napaHandle, pol[0], pol[1], pol[2]);
++            org.photonvision.jni.NapaDetectorJNI.setNativePolicy(napaHandle, pol[0], pol[1], pol[2]);
+         } catch (UnsatisfiedLinkError e) {
+             // an older NAPA library: full scale, every frame
+         }
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java b/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
+index a9c01ce8..65cb0b9f 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
+@@ -60,10 +60,10 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+     private IntegerPublisher frames, failures, recoveryCount, heartbeat, lastFrameAge;
+     // Spectrum (sc/mjpeg-napa): the frame policy in force (fast path) and frames decoded reduced so
+     // far
+-    private IntegerPublisher policyScale, policyFullEvery, policyProcessEvery, scaledFrames;
++    private IntegerPublisher policyProcessEvery;
+     private long beats = 0;
+ 
+-    private long windowStartNs = 0, total = 0, nativeAtWindowStart = -1, scaledAtWindowStart = -1;
++    private long windowStartNs = 0, total = 0, nativeAtWindowStart = -1;
+     private int count = 0;
+     private double sumMs = 0, maxMs = 0, sumLatencyMs = 0;
+ 
+@@ -166,14 +166,7 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+             latencyMs.set(nativePub.latencyMs());
+             frames.set(pub);
+             int[] pol = nativePub.activePolicy();
+-            policyScale.set(pol[0]);
+-            policyFullEvery.set(pol[1]);
+             policyProcessEvery.set(pol[2]);
+-            // frames decoded at a reduced scale in this window (about a second); the native count is
+-            // cumulative
+-            long sc = nativePub.scaledFrames();
+-            scaledFrames.set(scaledAtWindowStart >= 0 ? Math.max(0, sc - scaledAtWindowStart) : 0);
+-            scaledAtWindowStart = sc;
+         } else {
+             nativeAtWindowStart = -1;
+             fps.set(count / window);
+@@ -201,10 +194,7 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+             frames.close();
+             failures.close();
+             recoveryCount.close();
+-            policyScale.close();
+-            policyFullEvery.close();
+             policyProcessEvery.close();
+-            scaledFrames.close();
+             problemPub.close();
+             statePub.close();
+             heartbeat.close();
+@@ -227,10 +217,7 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+         frames = t.getIntegerTopic("frames").publish();
+         failures = t.getIntegerTopic("decodeFailures").publish();
+         recoveryCount = t.getIntegerTopic("recoveries").publish();
+-        policyScale = t.getIntegerTopic("scale").publish();
+-        policyFullEvery = t.getIntegerTopic("fullEvery").publish();
+         policyProcessEvery = t.getIntegerTopic("processEvery").publish();
+-        scaledFrames = t.getIntegerTopic("scaledFrames").publish();
+         problemPub = t.getStringTopic("problem").publish();
+         publishedName = name;
+     }
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/SystemCoreProfile.java b/photon-core/src/main/java/org/photonvision/vision/processes/SystemCoreProfile.java
+index c05d7814..84a296fc 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/SystemCoreProfile.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/SystemCoreProfile.java
+@@ -96,10 +96,11 @@ public final class SystemCoreProfile {
+     }
+ 
+     /**
+-     * Whether to decode at half resolution: the pipeline's setting (the profile doesn't force it).
++     * Whether to decode at half resolution: never (the size change was removed; the saved pipeline
++     * setting is kept only so old settings still load).
+      */
+     public static boolean lowCpuDecode(boolean setting) {
+-        return setting;
++        return false;
+     }
+ 
+     /** The decimation to run. */
+-- 
+2.55.0.windows.2
+

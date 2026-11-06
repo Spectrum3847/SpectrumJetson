@@ -1,0 +1,204 @@
+From f6e5f329ea2291afe51257929304354ed63ee8bc Mon Sep 17 00:00:00 2001
+From: Allen Gregory <allengregoryiv@gmail.com>
+Date: Fri, 6 Nov 2026 14:36:36 -0600
+Subject: [PATCH 3/3] Native publish always on (SPECTRUM_NATIVE_CAMERA=0 the
+ only opt-out); one Java-rate flag; native pose switch is debug only
+
+SPECTRUM_NATIVE_PUBLISH is gone: NativePublish engages per camera whenever its frames are streamed or captured natively, and verified cameras are native by default. SPECTRUM_NATIVE_PUBLISH_JAVA_FPS (30) and SPECTRUM_NATIVE_CAMERA_JAVA_FPS (5) are one flag, SPECTRUM_NATIVE_JAVA_FPS (default 5): the Java pipeline's rate while results are published natively, for the fast path and native cameras alike; SPECTRUM_STREAM_FPS (30) while a Java-fed stream is watched. SPECTRUM_NATIVE_POSE=0 documented as a debug switch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../camera/USBCameras/NativeCameraSource.java |  8 ++---
+ .../frame/provider/USBFrameProvider.java      |  3 +-
+ .../pipe/impl/AprilTagPoseEstimatorPipe.java  |  3 +-
+ .../vision/pipe/impl/NativePublish.java       | 32 +++++++++++++------
+ .../vision/processes/VisionRunner.java        | 32 +++----------------
+ 5 files changed, 34 insertions(+), 44 deletions(-)
+
+diff --git a/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSource.java b/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSource.java
+index 15482081..dca095e4 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSource.java
++++ b/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSource.java
+@@ -26,7 +26,6 @@ import org.photonvision.vision.camera.PVCameraInfo.PVUsbCameraInfo;
+ import org.photonvision.vision.camera.QuirkyCamera;
+ import org.photonvision.vision.frame.FrameProvider;
+ import org.photonvision.vision.frame.provider.NativeFrameProvider;
+-import org.photonvision.vision.pipe.impl.NativePublish;
+ import org.photonvision.vision.processes.VisionSource;
+ import org.photonvision.vision.processes.VisionSourceSettables;
+ import org.wpilib.util.PixelFormat;
+@@ -35,9 +34,8 @@ import org.wpilib.util.PixelFormat;
+  * Spectrum (sc/mjpeg-napa) native camera backend (SpectrumJetson
+  * docs/SYSTEMCORE-NATIVE-BACKEND.md): a USB camera with no cscore UsbCamera. Chosen per camera by
+  * {@link #createOrNull}: verified cameras (Thriftiest Cam 1bcf:28c5, Swyft 0bda:3035; more with
+- * SPECTRUM_NATIVE_CAMERA_IDS) with MJPEG modes, while native publish is on and the library is
+- * there. SPECTRUM_NATIVE_CAMERA=0 turns it off. Anything else, or any failure here, and the camera
+- * is a normal USBCameraSource.
++ * SPECTRUM_NATIVE_CAMERA_IDS) with MJPEG modes, when the library is there. SPECTRUM_NATIVE_CAMERA=0
++ * turns it off. Anything else, or any failure here, and the camera is a normal USBCameraSource.
+  */
+ public class NativeCameraSource extends VisionSource {
+     private static final Logger staticLogger = new Logger(NativeCameraSource.class, LogGroup.Camera);
+@@ -59,7 +57,7 @@ public class NativeCameraSource extends VisionSource {
+ 
+     /** A native source for this camera, or null (it gets a USBCameraSource). */
+     public static VisionSource createOrNull(CameraConfiguration config) {
+-        if ("0".equals(System.getenv("SPECTRUM_NATIVE_CAMERA")) || !NativePublish.ENABLED) return null;
++        if ("0".equals(System.getenv("SPECTRUM_NATIVE_CAMERA"))) return null;
+         if (!(config.matchedCameraInfo instanceof PVUsbCameraInfo usb)) return null;
+         if (!verified(usb.vendorId, usb.productId)) return null;
+         String dev = config.getDevicePath();
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+index 43bf4015..030d892a 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+@@ -100,7 +100,8 @@ public class USBFrameProvider extends CpuImageProcessor {
+ 
+     // ---- Spectrum (sc/mjpeg-napa) native camera backend (SpectrumJetson
+     // docs/SYSTEMCORE-NATIVE-BACKEND.md) ----
+-    // SPECTRUM_NATIVE_CAMERA=1 (with SPECTRUM_NATIVE_PUBLISH=1): this camera's frames are captured,
++    // SPECTRUM_NATIVE_CAMERA=cscore-legacy (superseded, see below): this camera's frames are
++    // captured,
+     // decoded,
+     // detected, posed and published by a native thread that owns the V4L2 queue; cscore keeps the
+     // device open only
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagPoseEstimatorPipe.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagPoseEstimatorPipe.java
+index f7844847..2c94743a 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagPoseEstimatorPipe.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagPoseEstimatorPipe.java
+@@ -54,7 +54,8 @@ public class AprilTagPoseEstimatorPipe
+     MatOfPoint2f cornersMat = new MatOfPoint2f();
+ 
+     // Spectrum (sc/mjpeg-napa): the native IPPE + Gauss-Newton pose when the NAPA library is there
+-    // (SPECTRUM_NATIVE_POSE=0: WPILib's orthogonal iteration as before). Measured: the Java path
++    // (SPECTRUM_NATIVE_POSE=0, a DEBUG switch only, not a setting: WPILib's orthogonal iteration as
++    // before, Java path only). Measured: the Java path
+     // (orthogonal
+     // iteration + OpenCV IPPE for the alternate) was 0.28 ms of every frame's latency on the
+     // SystemCore.
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+index 083ae04b..f9d50ca8 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+@@ -22,20 +22,25 @@ package org.photonvision.vision.pipe.impl;
+  * publishes that camera's PhotonPipelineResult itself (NapaDetectorJNI.setNativePublish: native
+  * pose + the fork's serde on the camera's own rawBytes publisher) the moment its tags are known, so
+  * the Java pipeline is off the per-frame path. The Java pipeline keeps running for the UI, the
+- * stream and health, at most {@link #JAVA_FPS} frames a second, and doesn't publish rawBytes itself
+- * while the native side does.
++ * stream and health, at most {@link #JAVA_FPS} frames a second ({@link #STREAM_FPS} while a stream
++ * fed by the Java pipeline is watched), and doesn't publish rawBytes itself while the native side
++ * does.
+  *
+  * <p>One instance per camera: its VisionRunner owns it and makes it {@link #current()} on its
+  * thread, where the camera's pipeline, NapaDetector, NTDataPublisher and CameraHealthPublisher run,
+  * so any number of cameras each publish on their own topics with their own calibration and timing.
+  * A camera whose frames aren't streamed (no band-sink result) stays on the Java path.
+  *
+- * <p>SPECTRUM_NATIVE_PUBLISH=1 turns it on; SPECTRUM_NATIVE_PUBLISH_JAVA_FPS (default 30) caps the
+- * Java pipeline meanwhile.
++ * <p>Always on (it engages per camera only when that camera's frames are streamed or captured
++ * natively; SPECTRUM_NATIVE_CAMERA=0 opts out of native cameras). SPECTRUM_NATIVE_JAVA_FPS (default
++ * 5) is the Java pipeline's rate meanwhile, for the fast path and native cameras alike.
+  */
+ public final class NativePublish {
+-    public static final boolean ENABLED = "1".equals(System.getenv("SPECTRUM_NATIVE_PUBLISH"));
+-    public static final double JAVA_FPS = javaFps();
++    public static final boolean ENABLED = true;
++    public static final double JAVA_FPS = envFps("SPECTRUM_NATIVE_JAVA_FPS", 5);
++    // while someone watches a stream the Java pipeline feeds (the output overlay; the input stream
++    // of a native camera is its own JPEG)
++    public static final double STREAM_FPS = envFps("SPECTRUM_STREAM_FPS", 30);
+ 
+     private static final ThreadLocal<NativePublish> CURRENT = new ThreadLocal<>();
+ 
+@@ -222,15 +227,22 @@ public final class NativePublish {
+         }
+     }
+ 
+-    private static double javaFps() {
++    private static double envFps(String name, double def) {
+         try {
+-            String v = System.getenv("SPECTRUM_NATIVE_PUBLISH_JAVA_FPS");
+-            return v == null || v.isBlank() ? 30 : Double.parseDouble(v.trim());
++            String v = System.getenv(name);
++            return v == null || v.isBlank() ? def : Double.parseDouble(v.trim());
+         } catch (NumberFormatException e) {
+-            return 30;
++            return def;
+         }
+     }
+ 
++    /** The Java pipeline's rate while results are published natively. */
++    public static double javaFpsNow() {
++        return org.photonvision.vision.frame.consumer.MJPGFrameConsumer.anyMatViewers()
++                ? STREAM_FPS
++                : JAVA_FPS;
++    }
++
+     /**
+      * NapaDetector, after each streamed frame: refresh this camera's native settings, track whether
+      * it publishes.
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
+index f6d8fd42..48f95afc 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
+@@ -48,19 +48,6 @@ import org.photonvision.vision.pipeline.result.CVPipelineResult;
+  */
+ @SuppressWarnings("rawtypes")
+ public class VisionRunner implements AutoCloseable {
+-    // Spectrum (sc/mjpeg-napa) native camera backend: the Java pipeline's rate while no stream is
+-    // watched (results, tag quality and health counters come from the native thread every frame)
+-    private static final double NATIVE_IDLE_JAVA_FPS = nativeIdleJavaFps();
+-
+-    private static double nativeIdleJavaFps() {
+-        try {
+-            String v = System.getenv("SPECTRUM_NATIVE_CAMERA_JAVA_FPS");
+-            return v == null || v.isBlank() ? 5 : Double.parseDouble(v.trim());
+-        } catch (NumberFormatException e) {
+-            return 5;
+-        }
+-    }
+-
+     private final Logger logger;
+     private final Thread visionProcessThread;
+     private final FrameProvider frameSupplier;
+@@ -83,7 +70,7 @@ public class VisionRunner implements AutoCloseable {
+                     ? new org.photonvision.vision.pipe.impl.NativePublish()
+                     : null;
+ 
+-    /** This camera's native publish state (null when SPECTRUM_NATIVE_PUBLISH is off). */
++    /** This camera's native publish state. */
+     public org.photonvision.vision.pipe.impl.NativePublish getNativePublish() {
+         return nativePublish;
+     }
+@@ -317,22 +304,13 @@ public class VisionRunner implements AutoCloseable {
+                         nativePublish.cameraHandle = nat.nativeCameraHandle();
+                     }
+                     if (nat.isNative()) {
+-                        double fps =
+-                                org.photonvision.vision.frame.consumer.MJPGFrameConsumer.anyMatViewers()
+-                                        ? org.photonvision.vision.pipe.impl.NativePublish.JAVA_FPS
+-                                        : NATIVE_IDLE_JAVA_FPS;
++                        double fps = org.photonvision.vision.pipe.impl.NativePublish.javaFpsNow();
+                         if (fps > 0) capNanos = Math.max(capNanos, (long) (1e9 / fps));
+                     }
+                 }
+-                boolean nativeOn =
+-                        nativePublish != null
+-                                && nativePublish.active()
+-                                && org.photonvision.vision.pipe.impl.NativePublish.JAVA_FPS > 0;
+-                if (nativeOn)
+-                    capNanos =
+-                            Math.max(
+-                                    capNanos,
+-                                    (long) (1e9 / org.photonvision.vision.pipe.impl.NativePublish.JAVA_FPS));
++                double javaFps = org.photonvision.vision.pipe.impl.NativePublish.javaFpsNow();
++                boolean nativeOn = nativePublish != null && nativePublish.active() && javaFps > 0;
++                if (nativeOn) capNanos = Math.max(capNanos, (long) (1e9 / javaFps));
+                 // Spectrum (pv-perf): the decoder thread decodes only around the frames taken (and, while
+                 // the results are published natively, one frame per take)
+                 if (frameSupplier
+-- 
+2.55.0.windows.2
+

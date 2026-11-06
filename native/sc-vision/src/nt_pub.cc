@@ -1,6 +1,7 @@
 // sc-vision: publish each frame's tags as PhotonVision does, so PhotonLib on the robot reads sc-vision as a
 // PhotonVision camera: /photonvision/<camera>/rawBytes ("photonstruct:PhotonPipelineResult:<uuid>", the
-// Spectrum fork's serde, little-endian Packet encoding) + heartbeat, latencyMillis, hasTarget, target*.
+// Spectrum fork's serde, little-endian Packet encoding) + health/* (the legacy top-level heartbeat, latencyMillis,
+// fps, hasTarget and target* topics were removed 2026-11-07: nothing read them; PhotonLib reads rawBytes).
 //
 // Conventions copied from the fork (AprilTagPipeline + TrackedTarget + NTDataPublisher):
 //  - corners in AprilTag order: NAPA's OpenCV order permuted {1, 0, 3, 2} (detector/napa/napa_far.h);
@@ -63,16 +64,12 @@ const Schema kSchemas[] = {
 struct NtPub {
   wpi::nt::NetworkTableInstance inst;
   wpi::nt::RawPublisher raw;
-  wpi::nt::IntegerPublisher heartbeat;
-  wpi::nt::DoublePublisher latency, yaw, pitch, area, fps;
-  wpi::nt::BooleanPublisher has;
   wpi::nt::StringPublisher version;
   cam_model cam{};
   bool have_cam = false;
   double tag_size = 0.1651;
   int64_t mid_offset_ns = 5000000;  // first packet -> mid-exposure (exposure/2 + camera delay)
-  int64_t seq = 0, last_ns = 0;
-  double fps_ema = 0;
+  int64_t seq = 0;
   int width = 1280, height = 800;
   // PhotonVision's /photonvision/<camera>/health/* (CameraHealthPublisher), once a second
   wpi::nt::DoublePublisher h_fps, h_pipe, h_pipe_max, h_lat;
@@ -81,14 +78,12 @@ struct NtPub {
   int64_t h_next = 0, h_beats = 0, h_win_frames = 0, h_last_frame = 0;
   double h_sum_pipe = 0, h_max_pipe = 0, h_sum_lat = 0;
   // the robot's frame policy (input/*)
-  wpi::nt::IntegerSubscriber in_scale, in_full_every, in_process_every;
+  wpi::nt::IntegerSubscriber in_process_every;
 };
 
-void nt_pub_policy(NtPub *p, int *scale, int *full_every, int *process_every) {
+void nt_pub_policy(NtPub *p, int *process_every) {
   if (!p) return;
-  const int64_t s = p->in_scale.Get(0), f = p->in_full_every.Get(0), e = p->in_process_every.Get(0);
-  if (s == 1 || s == 2) *scale = (int)s;  // 1/4 is a test option only (--scale 4), never from the robot
-  if (f > 0) *full_every = (int)f;
+  const int64_t e = p->in_process_every.Get(0);
   if (e > 0) *process_every = (int)e;
 }
 
@@ -132,16 +127,7 @@ NtPub *nt_pub_create(const char *host, const char *camera) {
   p->raw.GetTopic().SetProperty("message_uuid", wpi::util::json(std::string(kUuid)));
   for (const auto &s : kSchemas)
     p->inst.AddSchema(std::string("photonstruct:") + s.name + ":" + s.uuid, "photonstructschema", s.schema);
-  p->heartbeat = t->GetIntegerTopic("heartbeat").Publish();
-  p->latency = t->GetDoubleTopic("latencyMillis").Publish();
-  p->fps = t->GetDoubleTopic("fps").Publish();
-  p->yaw = t->GetDoubleTopic("targetYaw").Publish();
-  p->pitch = t->GetDoubleTopic("targetPitch").Publish();
-  p->area = t->GetDoubleTopic("targetArea").Publish();
-  p->has = t->GetBooleanTopic("hasTarget").Publish();
   auto in = t->GetSubTable("input");
-  p->in_scale = in->GetIntegerTopic("scale").Subscribe(0);
-  p->in_full_every = in->GetIntegerTopic("fullEvery").Subscribe(0);
   p->in_process_every = in->GetIntegerTopic("processEvery").Subscribe(0);
   auto h = t->GetSubTable("health");
   wpi::nt::PubSubOptions keep;
@@ -193,21 +179,8 @@ void nt_pub_result(NtPub *p, int64_t t_first_ns, const napa_detection *d, const 
   // timeSinceLastPong 0: same machine and clock as the robot's time sync server
   pvpack::pack_result(buf, ++p->seq, capture, now, 0, p->have_cam ? &p->cam : nullptr, p->width, p->height, n, ids,
                       corners, best, alt, first);
-  const double yaw0 = first[0], pitch0 = first[1], area0 = first[2];
   p->raw.Set(buf);
-  if (p->last_ns) {
-    double f = 1e9 / (double)(now - p->last_ns);
-    p->fps_ema = p->fps_ema ? 0.95 * p->fps_ema + 0.05 * f : f;
-  }
-  p->last_ns = now;
-  p->latency.Set((now - capture) / 1e6);
   p->h_sum_lat += (now - capture) / 1e6;
-  p->fps.Set(p->fps_ema);
-  p->has.Set(n > 0);
-  p->yaw.Set(yaw0);
-  p->pitch.Set(pitch0);
-  p->area.Set(area0);
-  p->heartbeat.Set(p->seq);
   p->inst.Flush();
 }
 
