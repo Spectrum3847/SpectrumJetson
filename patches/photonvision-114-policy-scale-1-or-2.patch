@@ -1,0 +1,29 @@
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+index 84ba327d..3a867c54 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+@@ -127,10 +127,11 @@ public final class NativePublish {
+ 
+     /**
+      * Spectrum (sc/mjpeg-napa): the frame policy (docs/FRAME-POLICY.md in SpectrumJetson): decode
+-     * scale (1, 2, 4), every Nth processed frame at full scale (0: never forced), process 1 frame in
+-     * N (the others aren't decoded). The robot publishes them under /photonvision/<camera>/input/;
+-     * until it does, SPECTRUM_POLICY_SCALE / _FULL_EVERY / _PROCESS_EVERY, else full scale, every
+-     * frame. Scale and skipping apply only while nobody watches the camera's stream.
++     * scale (1 or 2 from the robot; 4 only via SPECTRUM_POLICY_SCALE, for tests), every Nth processed
++     * frame at full scale (0: never forced), process 1 frame in N (the others aren't decoded). The
++     * robot publishes them under /photonvision/<camera>/input/; until it does, SPECTRUM_POLICY_SCALE
++     * / _FULL_EVERY / _PROCESS_EVERY, else full scale, every frame. Scale and skipping apply only
++     * while nobody watches the camera's stream.
+      */
+     private static final int DEF_SCALE = envInt("SPECTRUM_POLICY_SCALE", 1);
+ 
+@@ -159,7 +160,7 @@ public final class NativePublish {
+         int scale = DEF_SCALE, fullEvery = DEF_FULL_EVERY, every = DEF_PROCESS_EVERY;
+         if (inScale != null) {
+             long v = inScale.get();
+-            if (v == 1 || v == 2 || v == 4) scale = (int) v;
++            if (v == 1 || v == 2) scale = (int) v; // 1/4 only as a test option (environment)
+             v = inFullEvery.get();
+             if (v > 0) fullEvery = (int) v;
+             v = inProcessEvery.get();

@@ -270,7 +270,7 @@ int main(int argc, char **argv) {
     else if (a == "--hamming") np.max_hamming = atoi(nx());
     else if (a == "--min-contrast") np.min_contrast = atoi(nx());
     else if (a == "--every") every = std::max(1, atoi(nx()));
-    else if (a == "--scale") scale_def = atoi(nx());          // decode scale of processed frames: 1, 2 or 4
+    else if (a == "--scale") scale_def = atoi(nx());          // decode scale of processed frames: 1 or 2 (4: tests only)
     else if (a == "--full-every") full_every_def = atoi(nx());  // every Nth processed frame at full scale (0: off)
     else if (a == "--fps-max") fps_max = atof(nx());  // process at most this many frames/s, decided at a frame's start
     else if (a == "--check") check = atoi(nx());

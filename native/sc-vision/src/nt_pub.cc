@@ -87,7 +87,7 @@ struct NtPub {
 void nt_pub_policy(NtPub *p, int *scale, int *full_every, int *process_every) {
   if (!p) return;
   const int64_t s = p->in_scale.Get(0), f = p->in_full_every.Get(0), e = p->in_process_every.Get(0);
-  if (s == 1 || s == 2 || s == 4) *scale = (int)s;
+  if (s == 1 || s == 2) *scale = (int)s;  // 1/4 is a test option only (--scale 4), never from the robot
   if (f > 0) *full_every = (int)f;
   if (e > 0) *process_every = (int)e;
 }
