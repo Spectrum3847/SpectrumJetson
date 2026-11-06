@@ -1,0 +1,52 @@
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+index 590cfbfe..a6e022b1 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+@@ -1039,14 +1039,39 @@ public class USBFrameProvider extends CpuImageProcessor {
+      * SPECTRUM_UVC_STAMP_LAG_US overrides; default 2400 with Limelight's uvcvideo (its ll_compressed_* module
+      * parameters), else 0 (our Jetson uvcvideo: urb_packets=4, hwtimestamps=1).
+      */
+-    private static final long UVC_STAMP_LAG_US =
+-            envLong(
+-                    "SPECTRUM_UVC_STAMP_LAG_US",
+-                    java.nio.file.Files.exists(
+-                                    java.nio.file.Path.of(
+-                                            "/sys/module/uvcvideo/parameters/ll_compressed_payload_fast"))
+-                            ? 2400
+-                            : 0);
++    private static final long UVC_STAMP_LAG_US = envLong("SPECTRUM_UVC_STAMP_LAG_US", defaultStampLagUs());
++
++    /**
++     * The driver's median stamp lag from its URB size (measured on the SystemCore, kernel trace, SpectrumJetson
++     * tests/systemcore-latency/urb-compare.sh): 32-packet URBs (stock) 2.5 ms, our urb_packets=4 0.13 ms,
++     * urb_packets=2 0.005 ms. Our uvcvideo has the urb_packets parameter (0 = 32); Limelight's stock one has
++     * ll_compressed_* and 32-packet URBs; elsewhere (our Jetson driver with hwtimestamps) 0.
++     */
++    private static long defaultStampLagUs() {
++        try {
++            var urb = java.nio.file.Path.of("/sys/module/uvcvideo/parameters/urb_packets");
++            int n;
++            if (java.nio.file.Files.exists(urb)) {
++                n = Integer.parseInt(java.nio.file.Files.readString(urb).trim());
++                if (n <= 0 || n > 32) n = 32;
++                if (java.nio.file.Files.exists(
++                        java.nio.file.Path.of("/sys/module/uvcvideo/parameters/hwtimestamps"))
++                        && "1".equals(java.nio.file.Files.readString(
++                                java.nio.file.Path.of("/sys/module/uvcvideo/parameters/hwtimestamps")).trim()))
++                    return 0;  // stamped from the camera clock, not the URB
++            } else if (java.nio.file.Files.exists(
++                    java.nio.file.Path.of("/sys/module/uvcvideo/parameters/ll_compressed_payload_fast"))) {
++                n = 32;
++            } else {
++                return 0;
++            }
++            if (n <= 2) return 0;
++            if (n <= 4) return 130;
++            return 130 + (long) (n - 4) * (2500 - 130) / 28;
++        } catch (Exception e) {
++            return 0;
++        }
++    }
+ 
+     private static long envLong(String name, long fallback) {
+         try {

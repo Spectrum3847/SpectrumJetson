@@ -36,6 +36,9 @@ typedef struct {
   int force;             // detach uvcvideo even when a process has the camera's /dev/video node open
 } uvc_config;
 
+// Pick one of several identical cameras: by USB serial (e.g. "SJ-05", sysfs serial / iSerial) and/or USB port (the
+// sysfs device name, e.g. "3-1"). NULL or "" = any. Applies to uvc_open() and uvc_v4l2_set().
+void uvc_select(const char *serial, const char *port);
 // Opens and starts streaming. NULL on failure (message on stderr).
 uvc_usb *uvc_open(const uvc_config *cfg);
 // Waits for the next URB (blocking). Fills up to max chunks (one per non-empty packet), sets *t_ns to the

@@ -242,7 +242,7 @@ static int selftest() {
 // ------------------------------------------------------------------------------------------- main
 int main(int argc, char **argv) {
   double secs = 0, tag_size = 0.1651, mid_offset_ms = 5.0, fps_max = 0;
-  const char *lock_path = nullptr;
+  const char *lock_path = nullptr, *cam_serial = nullptr, *cam_port = nullptr;
   const char *csv = nullptr, *calib = nullptr, *save = nullptr, *nt_host = nullptr, *cam_name = "thrifty";
   int cpu = -1, fifo = 0, exposure = -1, gain = -1, gamma = -1, backlight = -1, every = 1, check = 64, whole = 0, no_napa = 0;
   uvc_config uc{};
@@ -275,6 +275,8 @@ int main(int argc, char **argv) {
     else if (a == "--name") cam_name = nx();
     else if (a == "--mid-offset-ms") mid_offset_ms = atof(nx());  // first packet -> mid-exposure
     else if (a == "--no-refine") pose_refine = 0;
+    else if (a == "--serial") cam_serial = nx();  // which camera: USB serial (e.g. SJ-05)
+    else if (a == "--port") cam_port = nx();      // or USB port (sysfs name, e.g. 3-1)
     else if (a == "--force") uc.force = 1;     // take the camera even if its /dev/video node is open
     else if (a == "--lock") lock_path = nx();  // hold this flock (e.g. /tmp/camera.lock) while running
     else if (a == "--gamma") gamma = atoi(nx());
@@ -297,6 +299,7 @@ int main(int argc, char **argv) {
   }
   signal(SIGINT, on_sig);
   signal(SIGTERM, on_sig);
+  uvc_select(cam_serial, cam_port);
   // Controls first, through uvcvideo (they stay in the camera after we detach it).
   if (exposure > 0) {
     uvc_v4l2_set(0, 0, V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_MANUAL);

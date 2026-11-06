@@ -50,7 +50,26 @@ static int rd_dec(const char *dir, const char *name) {
   return v;
 }
 
-// The camera's sysfs device dir (e.g. /sys/bus/usb/devices/3-1).
+static char g_serial[64], g_port[64];  // uvc_select(): which of several identical cameras
+
+void uvc_select(const char *serial, const char *port) {
+  snprintf(g_serial, sizeof g_serial, "%s", serial ? serial : "");
+  snprintf(g_port, sizeof g_port, "%s", port ? port : "");
+}
+
+static int matches_serial(const char *dir) {
+  if (!g_serial[0]) return 1;
+  char p[512], b[128] = "";
+  snprintf(p, sizeof p, "%s/serial", dir);
+  FILE *f = fopen(p, "r");
+  if (!f) return 0;
+  if (!fgets(b, sizeof b, f)) b[0] = 0;
+  fclose(f);
+  b[strcspn(b, "\n")] = 0;
+  return strcmp(b, g_serial) == 0;
+}
+
+// The camera's sysfs device dir (e.g. /sys/bus/usb/devices/3-1): VID:PID, and the serial / USB port when selected.
 static int find_dev(int vid, int pid, char *out, size_t n) {
   DIR *d = opendir("/sys/bus/usb/devices");
   if (!d) return -1;
@@ -60,7 +79,8 @@ static int find_dev(int vid, int pid, char *out, size_t n) {
     if (e->d_name[0] == '.' || strchr(e->d_name, ':')) continue;
     char p[300];
     snprintf(p, sizeof p, "/sys/bus/usb/devices/%.200s", e->d_name);
-    if (rd_hex(p, "idVendor") == vid && rd_hex(p, "idProduct") == pid) {
+    if (rd_hex(p, "idVendor") == vid && rd_hex(p, "idProduct") == pid && matches_serial(p) &&
+        (!g_port[0] || strcmp(e->d_name, g_port) == 0)) {
       snprintf(out, n, "%s", p);
       found = 0;
       break;
