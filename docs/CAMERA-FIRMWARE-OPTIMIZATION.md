@@ -29,10 +29,13 @@ How it was measured:
    don't change it. Only fewer rows (a window, or binning) or a faster line time would.
 3. **Swyft 640x400 at 210 fps already reads out in 3.75 ms** (2x2 binned, stock firmware), every 4.75 ms.
    It costs half the resolution.
-4. **The biggest firmware lever is a full-pitch window, e.g. 1280x400 (est. -3.7 ms).** It keeps tag
-   range, unlike binning. Neither camera has one. On the Thriftiest it needs a descriptor edit, a resolution
-   table entry, a sensor table and the mode-to-table mapping (not traced yet). On the Swyft the modes are
-   built in code. A proposal and its risks are below; nothing is ready to flash.
+4. **A full-pitch 1280x400 band works on the Thriftiest** (spare, 2026-11-05). It is the repurposed 1280x720
+   mode: 120 fps, 0 errors, 3.61 ms transfer instead of 7.24.
+   - The sensor reads the band at the end of the frame period, so the latency gain depends on where
+     exposure ends. The LED test decides.
+   - Every other mode stops streaming until the firmware gets a per-mode sensor table, which is code that
+     isn't traced yet.
+   - The 640x400 binned-fast-readout patch does nothing: 640x400 is scaled from the full readout.
 5. **Decode CPU follows JPEG bytes, and sharpness drives the bytes.**
    - Swyft sharpness 0/50/100 gives 63/84/114 KB a frame. Thriftiest sharpness 1/5/10 gives 57/61/82 KB.
    - Keep both at their minimum. The Swyft's default of 50 costs ~0.8 ms of decode per frame (est.).
@@ -137,8 +140,8 @@ decode and NAPA, pose is ready ~0.1 ms after that, so a readout saving is an end
 | 2 | **Sharpness at minimum** (Swyft 0, Thriftiest 1), gamma 100, gain as low as the exposure allows | V4L2 settings | Swyft 84 -> 63 KB: ~-0.8 ms decode per frame (est., at ~0.039 ms/KB from the builder's decode numbers), ~10% of a core at 120 fps. Thriftiest ~-0.15 ms | none | | none |
 | 3 | **Swyft 640x400 @ 210 fps** where half resolution is enough (near tags) | mode choice | readout 7.5 -> 3.75 ms (-3.75 ms), frame every 4.75 ms (-1.8 ms average age) | none; detection range halves | | none |
 | 4 | **Thriftiest exposure: use 2 (~1.1 ms) or 3/4 (~0.3 ms)**, never assume 1-6 is linear | setting | correct exposure and timestamps (exposure/2) | none | | none |
-| 5 | **Thriftiest binned-fast-readout** ([THRIFTIEST-FIRMWARE-ANALYSIS.md](THRIFTIEST-FIRMWARE-ANALYSIS.md)) | 14-byte sensor-table patch | 640x400 readout 7.24 -> ~3.7 ms | low/medium: sensor timing only, descriptors untouched | reflash over USB (the XU and maintenance mode are untouched) | yes: flash a spare |
-| 6 | **Full-pitch window, 1280x400 (or 480) at 120 fps** | sensor table + descriptor (+ code) | readout 7.4 -> 3.7 ms (400 rows) or 4.5 ms (480): **-3.7 / -2.9 ms**, full range kept, vertical FOV 50/60% | medium-high (below) | Thriftiest: reflash over USB if it still enumerates; Swyft: boot loader + power cycle | yes; first trace the code |
+| 5 | ~~Thriftiest binned-fast-readout~~ **tested 2026-11-05: no effect** | 14-byte sensor-table patch | none: 640x400 MJPEG is the bridge scaling the full readout (see the window tests); the binned table isn't used by any MJPEG mode | | | |
+| 6 | **Full-pitch window, 1280x400 at 120 fps** (`window400-test` + `window400-mode`, **tested on the spare**) | sensor table + bridge mode record + descriptor values | transfer 7.24 -> **3.61 ms** measured; latency gain **unproven**: the band is read at the end of the frame (below), and every other mode stops streaming | medium: works, but breaks 1280x800 until a per-mode sensor table exists (code) | reflashed over USB 3 times, fine | LED test first, then code tracing |
 | 7 | Thriftiest 1280x720 as a real sensor window (rows 40..760) | sensor table + mode mapping | first data 0.36 ms sooner, readout -0.7 ms | medium (mode mapping not traced) | reflash | yes |
 | 8 | Thriftiest JPEG quality clamp (rate-control limits in the struct at 0x77FF) | data constant | fewer bytes: ~0.04 ms of decode per KB (est.) | low/medium; needs a tag-decode check | reflash | yes |
 | 9 | Swyft power-up defaults (sharpness 0, gamma 100) in the settings block at 0x1F000 | data block | none if software sets them; fewer flash writes | low (data sector) | boot loader + power cycle | yes; check how the camera saves first |
@@ -149,11 +152,63 @@ decode and NAPA, pose is ready ~0.1 ms after that, so a readout saving is an end
 
 **Test first:**
 - 1, 2, 3 and 4 need no approval: they are settings and constants.
-- Of the firmware items, **5** is the only one ready to flash. It is a known image built by `make-patched.py`,
-  for a spare Thriftiest.
-- **6** is the most valuable, but it needs code tracing (Ghidra on both images) before any patch exists.
+- Firmware: run the LED test on both full height and the 1280x400 band before any more flashing (see
+  "Tested on the spare"). Then trace the code (Ghidra, ~450 MB download, needs approval) for a per-mode sensor
+  table.
 
 ## Windowed (cropped) full-resolution readout
+
+### Tested on the spare Thriftiest SJ-05 (2026-11-05, user-approved)
+
+Each image was built with `firmware/thriftiest/patches/make-patched.py` from the published 5.13 and flashed
+with `thriftiest-fw.py` while holding the camera lock. The camera was backed up first, restarted by itself
+every time, and kept its serial.
+
+| Image | sha256 | Result |
+|---|---|---|
+| usbrecov + binned-fast-readout | `3a3cb04d…` | 1 sector. **No change anywhere**: 640x400 still takes 7.24 ms, period 8.25 ms. 1280x800 unchanged (7.24 ms, 121 fps). NAPA at 640x400: first packet -> pose 8.40 ms vs 8.41 before; 100% tags; decode 0.60 ms + NAPA 0.62 ms per frame, vs 1.95 + 1.53 ms at 1280x800. Asking for 160/200/240 fps at 640x400 (standard probe) is clamped to 120 |
+| usbrecov + window400-test (sensor table 0x1810: rows 200..615, 408 output rows) | `1500cdd9…` | The sensor reads the band: 30 data packets, 3.61 ms. But the bridge still expects 808 rows: every frame is flagged ERR, one frame per two sensor frames (16.5 ms), no EOI. **1280x800 and every mode derived from the full table stop streaming** (a plain `v4l2-ctl` 1280x800 capture hangs) |
+| usbrecov + window400-test + **window400-mode** (1280x720 -> 1280x400: bridge mode records at 0x72AC/0x743C, frame descriptor 3, still-image list) | `f9e1976a…` | Enumerates with **1280x400 @ 120 fps** in place of 1280x720. **Works**: 120 fps (8.25 ms), 0 ERR, SOF 1280x400, DRI 80 = 8 rows, 50 restart intervals, ~20 KB a frame, **first -> last packet 3.61 ms**. 1280x800 is still broken (shared sensor table) |
+| usbrecov (restore) | `9a6eedb6…` | 1280x800 streams again (121 fps, 7.24 ms). This is what the camera runs now |
+
+**Where the band lands in the frame.** With VTS unchanged (910 lines), the sensor reads the 408-row band at
+the **end** of the frame: first data comes 4.06 ms after PTS (0.35 ms at full height), and the last data at
+7.65 ms after PTS, the same as full height. Whether this cuts latency depends on where exposure ends:
+- **If exposure ends just before readout** (OV9281 global-shutter behaviour), exposure end -> last row drops
+  from ~7.6 to ~4.0 ms. That is -3.6 ms.
+- **If exposure stays tied to the frame start (PTS)**, nothing is gained.
+
+A first flicker-phase test (`flicker_phase.py`, the Swyft streaming at the same time as reference) moved
+the Thriftiest's apparent exposure by +2.7 ms between full height (-1.6 ms vs the Swyft) and the band
+(+1.1 ms). That is between the two predictions (0 and +3.7 ms), with no repeat runs yet, so it is
+inconclusive. **The LED test (`led-test.sh`) settles it.**
+
+If the band only helps once it is read early, add **VTS 910 -> ~460**: the band then runs at ~240 fps, read
+right after a short blanking. That needs a frame-interval change in the descriptor, and the firmware
+clamps probe requests to 120 fps, so it also needs the interval-to-rate-slot code (not traced).
+
+**The bridge's per-mode records** (found 2026-11-05) explain both results. There are two copies: 0x7270
+(from 0x727A) and 0x7400, 26 bytes per UVC frame in descriptor order, big-endian:
+`09 00 00 00`, a flags/mode word, sensor output W,H, crop x,y, crop W,H, scaler W,H, output W,H.
+- 1280x800 crops 1284x804 at (2,2) of 1288x808.
+- 1280x720 crops 1284x724 at (2,42).
+- 640x400 and 640x360 *scale* the same crops by 1/2.
+- 800x600 and 640x480 scale a 1028x772 crop at (130,18).
+- Every MJPEG mode takes the full 1288x808 sensor frame: the binned (0x19E4) and 656x488 window (0x1B54)
+  sensor tables aren't used.
+
+**A production 1280x400 needs its own sensor table**, so that 1280x800 keeps working:
+- Either the code that loads the full table must pick a table by mode, or the window registers must be
+  written after it for that mode.
+- Both need the code traced: Ghidra 12.x with `firmware/thriftiest/tools/DumpListing.java`. It isn't
+  installed here (a ~450 MB download).
+- Until then, a camera flashed with window400-mode is a 1280x400-only camera.
+
+**Calibration for 1280x400 (rows 200..599 of the 1280x800 image).**
+- Same fx, fy, cx and distortion coefficients.
+- **cy_400 = cy_800 - 200**. The window starts at sensor row 200 and the bridge crop starts at row 2 of
+  the sensor output, as for 1280x800, so the offset is exactly 200 rows.
+- For the stand-in calibration (cal.json, cy 417.8) that gives cy 217.8.
 
 Goal: read a band of full-pitch rows (e.g. 1280x400) where field tags appear. Readout time drops in
 proportion to rows and tag range is kept. 2x2 binning halves the range instead.

@@ -9,5 +9,5 @@ WPI=${WPI:-$(ls -d /c/Users/Public/wpilib/2027*/systemcore "$HOME"/wpilib/2027*/
 CC=$WPI/bin/aarch64-systemcore2027-linux-gnu-gcc
 [[ -f $CC.exe ]] && CC=$CC.exe
 mkdir -p "$OUT"
-"$CC" -O2 -mcpu=cortex-a76 -Wall -Wextra -std=gnu11 "$HERE/uvc_timing.c" "$HERE/uvc_usb.c" -o "$OUT/uvc_timing"
+"$CC" -O2 -mcpu=cortex-a76 -Wall -Wextra -std=gnu11 "$HERE/uvc_timing.c" "$HERE/uvc_usb.c" -o "$OUT/uvc_timing" -lpthread
 echo "built $OUT/uvc_timing"

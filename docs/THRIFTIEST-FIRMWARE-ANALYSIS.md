@@ -7,6 +7,11 @@ existing usbrecov/bwreport patches.
 
 ## Summary
 
+> **Update 2026-11-05 (tested on a spare):** `binned-fast-readout` has **no effect**. MJPEG 640x400 is the
+> bridge scaling the full 1288x808 readout (per-mode records at 0x7270/0x7400), not the binned sensor table.
+> A full-pitch 1280x400 band (`window400-test` + `window400-mode`) works but breaks the other modes. See
+> [CAMERA-FIRMWARE-OPTIMIZATION.md](CAMERA-FIRMWARE-OPTIMIZATION.md).
+
 - **The 8 ms the frame takes to stream is the sensor readout, not buffering.** Full res uses HTS 728
   and VTS 910 at 120 fps, so 808 rows take ~7.4 ms. The bridge encodes in 8-row MCU strips: the
   restart interval is one MCU row (DRI = width/16 = 80), and each strip goes out as it's read.

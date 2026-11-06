@@ -14,6 +14,9 @@ command is ever sent. Every run holds `flock /tmp/camera.lock`.
 | `jpeg_info.py F.mjpeg` | Markers, SOF sampling, DHT/DQT, DRI (rows per restart interval), bytes per frame and per interval |
 | `brightness.py DIR` | Mean luma per exposure setting (laptop, Pillow), for exposure-control linearity |
 | `mode_map.py FULL.mjpeg MODE.mjpeg...` | Fits each mode onto the full-resolution image: crop window at full pitch, or scaled/binned |
+| `napa_stats.py RUN.csv...` | Summary of sc-vision per-frame CSVs (latency, transfer, CPU, margin, pose jitter) |
+| `flicker_phase.py A.mjpeg DA EA B.mjpeg DB EB` | Relative exposure timing of two cameras streaming at the same time, from the phase of the 120 Hz light flicker (`--frames` writes `F.mjpeg.idx` with each frame's first-packet time) |
+| `led-test.sh thr\|swyft OUT [SECS]` + `led_analyze.py OUT/frames.mjpeg OUT/pulses.csv --clock HZ` | **LED camera-delay test**: `uvc_timing --led` pulses the Pi's ACT LED (SoC GPIO; on-write ~9 us, scheduling error p50 0.1 us / p99 7-52 us) 100 us long at 0..8.3 ms after a frame's first packet (0.05 ms steps, every 4th frame). The analysis fits the exposure window relative to the first packet and to the PTS |
 
 ```bash
 tests/camera-timing/build.sh && scp tests/camera-timing/out/uvc_timing tests/camera-timing/*.py \
