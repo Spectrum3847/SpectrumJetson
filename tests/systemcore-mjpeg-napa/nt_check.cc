@@ -131,6 +131,7 @@ static double Pct(std::vector<double> v, double q) {
 int main(int argc, char **argv) {
   std::string host = "127.0.0.1", cam = "thrifty";
   FILE *csv_out = nullptr;
+  std::vector<std::pair<std::string, long long>> pub_inputs;
   double secs = 10;
   int dump = 1;
   for (int i = 1; i + 1 < argc; i += 2) {
@@ -139,7 +140,11 @@ int main(int argc, char **argv) {
     else if (a == "--camera") cam = argv[i + 1];
     else if (a == "--secs") secs = atof(argv[i + 1]);
     else if (a == "--dump") dump = atoi(argv[i + 1]);
-    else if (a == "--csv") {  // one row per result: seq, capture ns, publish ns, received ns (CLOCK_MONOTONIC), targets
+    else if (a == "--pub") {  // NAME=VALUE (integer) under /photonvision/<camera>/input/
+      std::string s = argv[i + 1];
+      auto eq = s.find('=');
+      if (eq != std::string::npos) pub_inputs.push_back({s.substr(0, eq), std::atoll(s.c_str() + eq + 1)});
+    } else if (a == "--csv") {  // one row per result: seq, capture ns, publish ns, received ns (CLOCK_MONOTONIC), targets
       csv_out = std::fopen(argv[i + 1], "w");
       if (csv_out) std::fprintf(csv_out, "seq,capture_ns,publish_ns,received_ns,ntargets\n");
     }
@@ -158,6 +163,20 @@ int main(int argc, char **argv) {
   std::printf("connected %d to %s; rawBytes type '%s'\n", (int)inst.IsConnected(), host.c_str(),
               raw.GetTopic().GetTypeString().c_str());
   raw.ReadQueue();  // drop what queued while connecting (it would count as late)
+  // photonvision-61 tagQuality: [seq, n, per tag (id, margin, edgePx, undistortPx, reprojBestPx, reprojAltPx)]
+  auto qsub = inst.GetTopic(base + "tagQuality").GenericSubscribe(all);
+  qsub.ReadQueue();
+  // robot-side policy inputs: --pub name=value publishes /photonvision/<cam>/input/<name> (integer)
+  std::vector<wpi::nt::GenericPublisher> pubs;
+  for (auto &kv : pub_inputs) {
+    auto t = inst.GetTopic(base + "input/" + kv.first);
+    pubs.push_back(t.GenericPublish("int"));
+    pubs.back().SetInteger(kv.second);
+    std::printf("publishing %sinput/%s = %lld\n", base.c_str(), kv.first.c_str(), (long long)kv.second);
+  }
+  std::map<long, std::vector<double>> quality;  // by sequence ID
+  long q_arrays = 0, q_bad = 0;
+  std::vector<std::pair<long, std::vector<int>>> tagged_ids;  // per tagged result: seq, ids in order
   long n = 0, tagged = 0, gaps = 0, bad = 0;
   double last_seq = -1;
   std::vector<double> rx_lat, pub_lat, pub_rx;
@@ -175,6 +194,16 @@ int main(int argc, char **argv) {
           g_schemas[name.substr(0, name.find(':'))] = ParseSchema(std::string(r.begin(), r.end()));
         }
       }
+    }
+    for (auto &v : qsub.ReadQueue()) {
+      if (!v.IsDoubleArray()) continue;
+      auto a = v.GetDoubleArray();
+      q_arrays++;
+      if (a.size() < 2 || a.size() != 2 + 6 * (size_t)a[1]) {
+        q_bad++;
+        continue;
+      }
+      quality[(long)a[0]] = std::vector<double>(a.begin(), a.end());
     }
     for (auto &v : raw.ReadQueue()) {
       const int64_t now = MonoNs();
@@ -203,6 +232,11 @@ int main(int argc, char **argv) {
         if (first.empty()) first = d;
         for (auto &kv : d)
           if (kv.first.rfind("targets[0].", 0) == 0) fields[kv.first].push_back(kv.second);
+      }
+      if (d["targets#"] > 0) {
+        std::vector<int> ids;
+        for (int i = 0; i < (int)d["targets#"]; i++) ids.push_back((int)d["targets[" + std::to_string(i) + "].fiducialId"]);
+        tagged_ids.push_back({(long)seq, ids});
       }
       // per fiducial id: range, translation, rotation (angle from the mean later), apparent size (px)
       for (int i = 0; i < (int)d["targets#"]; i++) {
@@ -237,6 +271,43 @@ int main(int argc, char **argv) {
               "publish -> received %.3f / %.3f / %.3f\n",
               Pct(rx_lat, .5), Pct(rx_lat, .95), Pct(rx_lat, .99), Pct(pub_lat, .5), Pct(pub_lat, .95),
               Pct(pub_lat, .99), Pct(pub_rx, .5), Pct(pub_rx, .95), Pct(pub_rx, .99));
+  // drain quality that arrived after the last result
+  for (auto &v : qsub.ReadQueue())
+    if (v.IsDoubleArray()) {
+      auto a = v.GetDoubleArray();
+      q_arrays++;
+      if (a.size() >= 2 && a.size() == 2 + 6 * (size_t)a[1]) quality[(long)a[0]] = std::vector<double>(a.begin(), a.end());
+      else q_bad++;
+    }
+  {
+    long matched = 0, id_mismatch = 0;
+    std::map<int, std::map<std::string, std::vector<double>>> qid;
+    for (auto &t : tagged_ids) {
+      auto it = quality.find(t.first);
+      if (it == quality.end()) continue;
+      const auto &a = it->second;
+      const int nq = (int)a[1];
+      bool same = nq == (int)t.second.size();
+      for (int i = 0; same && i < nq; i++) same = (int)a[2 + 6 * i] == t.second[i];
+      if (!same) {
+        id_mismatch++;
+        continue;
+      }
+      matched++;
+      for (int i = 0; i < nq; i++) {
+        auto &m = qid[(int)a[2 + 6 * i]];
+        const char *names[5] = {"margin", "edge", "undist", "reprojBest", "reprojAlt"};
+        for (int k = 0; k < 5; k++) m[names[k]].push_back(a[3 + 6 * i + k]);
+      }
+    }
+    std::printf("tagQuality: %ld arrays (%ld malformed); %ld of %zu tagged results matched by sequence ID with the same "
+                "ids (%ld id mismatches)\n",
+                q_arrays, q_bad, matched, tagged_ids.size(), id_mismatch);
+    for (auto &kv : qid)
+      std::printf("  quality id %-3d margin p50 %7.2f  edge px %7.1f  undistort px %6.2f  reproj best/alt px %6.3f %6.3f\n",
+                  kv.first, Pct(kv.second["margin"], .5), Pct(kv.second["edge"], .5), Pct(kv.second["undist"], .5),
+                  Pct(kv.second["reprojBest"], .5), Pct(kv.second["reprojAlt"], .5));
+  }
   auto msd = [](const std::vector<double> &v, double &m, double &s) {
     m = 0, s = 0;
     for (double x : v) m += x;
