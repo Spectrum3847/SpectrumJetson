@@ -37,6 +37,10 @@ chmod +x "$S/napa_test"
 # A truncated jar would crash-loop the service.
 python3 -c "import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); z.getinfo('org/photonvision/Main.class')" \
   "$S/photonvision.jar" || { echo "not a valid PhotonVision jar" >&2; exit 1; }
+# Another agent's run may own PhotonVision: take the bench's camera lock before touching the running service, and
+# hold it until the install is done (released when this shell exits).
+exec 9>/tmp/camera.lock
+flock -w 600 9 || { echo "camera lock busy for 10 min: not installing" >&2; exit 1; }
 sudo systemctl stop photonvision 2>/dev/null || true
 sudo mkdir -p /opt/photonvision/lib
 [[ -f /opt/photonvision/photonvision.jar ]] && sudo cp /opt/photonvision/photonvision.jar /opt/photonvision/photonvision.jar.prev

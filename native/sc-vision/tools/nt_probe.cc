@@ -16,6 +16,7 @@
 #include <wpi/nt/NetworkTable.hpp>
 #include <wpi/nt/NetworkTableEntry.hpp>
 #include <wpi/nt/RawTopic.hpp>
+#include <wpi/nt/DoubleArrayTopic.hpp>
 #include <wpi/nt/ntcore_cpp.hpp>
 
 static int64_t mono_ns() {
@@ -34,6 +35,10 @@ int main(int argc, char **argv) {
   wpi::nt::PubSubOptions o;
   o.sendAll = true;
   o.pollStorage = 200;
+  // photonvision-61's tagQuality: [seq, n, per tag 6 values]; each should carry a result's sequence ID
+  auto qsub = inst.GetDoubleArrayTopic("/photonvision/" + cam + "/tagQuality").Subscribe({}, o);
+  std::vector<int64_t> qseqs, tagged_seqs;
+  long qbad = 0;
   auto sub = inst.GetRawTopic("/photonvision/" + cam + "/rawBytes").Subscribe("photonstruct:PhotonPipelineResult:fd353b11f3a818e9c5b457c7dc5a8f5c", {}, o);
   auto ht = inst.GetTable("/photonvision/" + cam + "/health");
   auto e_fps = ht->GetEntry("fps"), e_state = ht->GetEntry("state"), e_age = ht->GetEntry("lastFrameAgeMs"),
@@ -50,6 +55,10 @@ int main(int argc, char **argv) {
   FILE *csv = getenv("NT_PROBE_CSV") ? fopen(getenv("NT_PROBE_CSV"), "w") : nullptr;
   if (csv) fprintf(csv, "seq,capture_ns,publish_ns,received_ns,tags\n");
   while (mono_ns() < end) {
+    for (auto &q : qsub.ReadQueue()) {
+      if (q.value.size() < 2 || q.value.size() != 2 + 6 * static_cast<size_t>(q.value[1])) qbad++;
+      else qseqs.push_back(static_cast<int64_t>(q.value[0]));
+    }
     for (auto &v : sub.ReadQueue()) {
       int64_t now = mono_ns();
       n++;
@@ -60,6 +69,7 @@ int main(int argc, char **argv) {
       memcpy(&cap, b.data() + 8, 8);
       memcpy(&pub, b.data() + 16, 8);
       int ntg = (int8_t)b[32];
+      if (ntg > 0) tagged_seqs.push_back(seq);
       lat.push_back((now - cap) / 1e6);
       if (csv)
         fprintf(csv, "%lld,%lld,%lld,%lld,%d\n", (long long)seq, (long long)cap, (long long)pub, (long long)now, ntg);
@@ -103,6 +113,13 @@ int main(int argc, char **argv) {
            e_fps.GetDouble(-1), e_state.GetString("?").c_str(),
            (long long)e_age.GetInteger(-1), (long long)e_frames.GetInteger(-1),
            (long long)e_fail.GetInteger(-1), e_lat.GetDouble(-1));
+  }
+  {  // every tagged result should have its quality, with the same sequence ID
+    std::sort(qseqs.begin(), qseqs.end());
+    long matched = 0;
+    for (int64_t sq : tagged_seqs) matched += std::binary_search(qseqs.begin(), qseqs.end(), sq);
+    printf("tagQuality: %zu arrays (%ld malformed); %ld of %zu tagged results have quality with their sequence ID\n",
+           qseqs.size(), qbad, matched, tagged_seqs.size());
   }
   std::sort(lat.begin(), lat.end());
   auto P = [&](double q) { return lat.empty() ? 0.0 : lat[std::min(lat.size() - 1, (size_t)(lat.size() * q))]; };

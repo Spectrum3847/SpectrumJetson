@@ -95,6 +95,7 @@ int64_t NowUs() {
 // sc/mjpeg-napa native publish: ntcore's C API from the copy PhotonVision's JVM already loaded (no second ntcore).
 struct NtApi {
   int (*set_raw)(unsigned, int64_t, const uint8_t *, size_t) = nullptr;
+  int (*set_double_array)(unsigned, int64_t, const double *, size_t) = nullptr;
   void (*flush)(unsigned) = nullptr;
 };
 const NtApi *Nt() {
@@ -103,6 +104,8 @@ const NtApi *Nt() {
     auto *a = new NtApi;
     a->set_raw = reinterpret_cast<decltype(a->set_raw)>(h ? dlsym(h, "NT_SetRaw") : dlsym(RTLD_DEFAULT, "NT_SetRaw"));
     a->flush = reinterpret_cast<decltype(a->flush)>(h ? dlsym(h, "NT_Flush") : dlsym(RTLD_DEFAULT, "NT_Flush"));
+    a->set_double_array = reinterpret_cast<decltype(a->set_double_array)>(
+        h ? dlsym(h, "NT_SetDoubleArray") : dlsym(RTLD_DEFAULT, "NT_SetDoubleArray"));
     if (!a->set_raw || !a->flush) {
       std::cout << "NAPA: native publish unavailable (ntcore's C API not found in this process)" << std::endl;
       return nullptr;
@@ -121,6 +124,7 @@ int64_t MonoNs() {
 // What the watcher needs to publish a frame's result itself (set from Java, every frame).
 struct PublishCfg {
   unsigned pub = 0, inst = 0;  // ntcore handles: PhotonVision's rawBytes publisher and its instance
+  unsigned quality_pub = 0;    // the camera's tagQuality publisher on the same instance (0: none)
   cam_model cam{};
   bool have_cam = false;
   double tag_size = 0.1651;
@@ -312,7 +316,25 @@ struct StreamSink {
     const bool by_cam = t_cam > 0 && p.cam_shift_ns > 0 && bias != 0;
     const int64_t capture = by_cam ? t_cam + std::llround(bias) - p.mid_shift_ns : t_begin - p.mid_shift_ns;
     if (by_cam) cam_stamped++;
-    pvpack::pack_result(buf, ++seq, capture + p.nt_offset_ns, now + p.nt_offset_ns, p.since_pong,
+    const int64_t this_seq = ++seq;
+    // photonvision-61's tagQuality for these tags, with this result's sequence ID, just before the result
+    if (p.quality_pub && nt->set_double_array && n > 0) {
+      std::vector<double> q;
+      q.reserve(2 + 6 * n);
+      q.push_back(static_cast<double>(this_seq));
+      q.push_back(n);
+      for (int i = 0; i < n; i++) {
+        const double *c = corners + 8 * i;
+        double edge = 1e30;
+        for (int k = 0; k < 4; k++)
+          edge = std::min({edge, c[2 * k], c[2 * k + 1], width - 1 - c[2 * k], height - 1 - c[2 * k + 1]});
+        double tq[3] = {NAN, NAN, NAN};
+        if (p.have_cam) pose_tag_quality(&p.cam, c, p.tag_size, &best[i], &alt[i], tq);
+        q.insert(q.end(), {static_cast<double>(ids[i]), tags[i].margin, edge, tq[0], tq[1], tq[2]});
+      }
+      nt->set_double_array(p.quality_pub, 0, q.data(), q.size());
+    }
+    pvpack::pack_result(buf, this_seq, capture + p.nt_offset_ns, now + p.nt_offset_ns, p.since_pong,
                         p.have_cam ? &p.cam : nullptr, width, height, n, ids, corners, p.have_cam ? best : nullptr,
                         p.have_cam ? alt : nullptr, nullptr);
     nt->set_raw(p.pub, 0, buf.data(), buf.size());
@@ -555,6 +577,7 @@ JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setNativePubli
   {
     std::lock_guard<std::mutex> l(n->sink->cfg_mu);
     p.cam_shift_ns = n->sink->pub.cam_shift_ns;  // set by setNativeCamShift
+    p.quality_pub = n->sink->pub.quality_pub;    // set by setNativeQualityPub
   }
   p.nt_offset_ns = ntOffsetNs;
   p.since_pong = sincePongNs;
@@ -581,6 +604,17 @@ JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setNativeCamSh
   const int64_t sight = n->sink->taken_sight.exchange(0);
   if (lastFrameCamNs > 0 && sight > 0) n->sink->Anchor(sight, lastFrameCamNs);
   return n->sink->cam_stamped.load();
+}
+
+// sc/mjpeg-napa: the camera's tagQuality publisher (an ntcore DoubleArray publisher handle on the same instance
+// as the native rawBytes publisher; 0: none). The native publish sends each result's tag quality with its own
+// sequence ID just before the result, as PhotonVision's Java path does.
+JNIEXPORT void JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setNativeQualityPub(JNIEnv *, jclass, jlong h,
+                                                                                    jint pub) {
+  auto *n = Handle(h);
+  if (!n || !n->sink) return;
+  std::lock_guard<std::mutex> l(n->sink->cfg_mu);
+  n->sink->pub.quality_pub = static_cast<unsigned>(pub);
 }
 
 // sc/mjpeg-napa frame policy for this camera's streamed frames (docs/FRAME-POLICY.md): decode scale 1, 2 or 4

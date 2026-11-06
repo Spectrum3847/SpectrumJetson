@@ -253,6 +253,36 @@ static int read_array(const char *js, const char *key, double *out, int n) {
   return n;
 }
 
+static double reproj_px(const cam_model *c, const tag_pose *p, const double und[8], double size_m) {
+  static const double obj[4][2] = {{-1, 1}, {1, 1}, {1, -1}, {-1, -1}};
+  if (!p) return NAN;
+  double sum = 0;
+  for (int i = 0; i < 4; i++) {
+    const double X = obj[i][0] * size_m / 2, Y = obj[i][1] * size_m / 2;
+    double P[3];
+    for (int r = 0; r < 3; r++) P[r] = p->R[3 * r] * X + p->R[3 * r + 1] * Y + p->t[r];
+    if (P[2] <= 1e-6) return NAN;
+    const double du = c->fx * P[0] / P[2] + c->cx - und[2 * i], dv = c->fy * P[1] / P[2] + c->cy - und[2 * i + 1];
+    sum += du * du + dv * dv;
+  }
+  return sqrt(sum / 4);
+}
+
+void pose_tag_quality(const cam_model *cam, const double corners[8], double size_m, const tag_pose *best,
+                      const tag_pose *alt, double out[3]) {
+  double und[8], moved = 0;
+  for (int i = 0; i < 4; i++) {
+    double x, y;
+    undistort(cam, corners[2 * i], corners[2 * i + 1], &x, &y);
+    und[2 * i] = cam->fx * x + cam->cx, und[2 * i + 1] = cam->fy * y + cam->cy;
+    const double d = hypot(und[2 * i] - corners[2 * i], und[2 * i + 1] - corners[2 * i + 1]);
+    if (d > moved) moved = d;
+  }
+  out[0] = moved;
+  out[1] = reproj_px(cam, best, und, size_m);
+  out[2] = reproj_px(cam, alt, und, size_m);
+}
+
 int cam_model_load(const char *path, cam_model *cam) {
   FILE *f = fopen(path, "rb");
   if (!f) return -1;

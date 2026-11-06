@@ -28,6 +28,12 @@ extern int pose_refine;
 
 // Parse a PhotonVision calibration JSON (cameraIntrinsics.data, distCoeffs.data). 0 or -1.
 int cam_model_load(const char *path, cam_model *cam);
+// PhotonVision's TagQuality (photonvision-61) for one tag, as its Java computes it: out[0] undistortPx (how far
+// undistortion moved the corner that moved most), out[1] / out[2] reprojBestPx / reprojAltPx (RMS pixel error of
+// the undistorted corners under the best / alternate pose, pinhole projection). corners: as given to
+// pose_ippe_square. NaN where unknown (null pose).
+void pose_tag_quality(const cam_model *cam, const double corners[8], double size_m, const tag_pose *best,
+                      const tag_pose *alt, double out[3]);
 
 #ifdef __cplusplus
 }
