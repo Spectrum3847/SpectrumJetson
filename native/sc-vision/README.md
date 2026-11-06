@@ -51,7 +51,10 @@ Measure: `tests/systemcore-latency/run.sh native SECS NAME [args]`, `native-matr
 ## Clock
 
 The app's times are CLOCK_MONOTONIC, which is NetworkTables time on WPILib 2027 and the robot code's clock on the
-same SystemCore. "Mid-exposure" = the frame's first USB packet - (exposure/2 + 2.5 ms camera delay): the same
-constants PhotonVision uses, but PhotonVision applies them to uvcvideo's buffer timestamp, which (hwtimestamps=0 on
-LimelightOS) is taken when the first 4 ms URB completes, ~2.4 ms after the first packet. Compare runs on the first
+same SystemCore. "Mid-exposure" = the frame's first USB packet - (exposure/2 + camera delay). The camera delay (exposure end ->
+first packet, `--camera-delay-ms`, per camera) defaults to 0.4 ms: the LED test measured 0.41 +- 0.04 ms on the
+Thriftiest, and the camera clock's PTS -> first packet is 0.35 ms on both the Thriftiest and the Swyft (the Swyft uses
+the default until measured). (It was Team 100's 2.5 ms until 2026-11-06.) The PhotonVision fork applies the same
+delay, after converting its own reference back to the first packet: uvcvideo's buffer timestamp (hwtimestamps=0 on
+LimelightOS) is taken when the URB holding the first packet completes, ~2.4 ms after it with 4 ms URBs. Compare runs on the first
 USB packet (kernel trace for PhotonVision, the app's own reap time for sc-vision).

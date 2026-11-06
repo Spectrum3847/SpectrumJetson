@@ -51,3 +51,39 @@ When on, the camera's `VisionSource` is a `NativeFastPathSource` instead of `USB
 Not built yet. The pieces exist and are measured: `native/sc-vision` (capture, decode, NAPA, pose, PV serde), the
 fork's `detectStreamed` result plumbing, and the URB-size work. Next step: `NativeFastPathJNI` (start/stop/next/
 set_control) over `sc_vision.cc`'s loop, and `NativeFastPathSource` in the fork, behind `SPECTRUM_NATIVE_FASTPATH`.
+
+## Multi-camera native publish (photonvision-110, 2026-11-06)
+
+What shipped instead of the separate backend above (option 1: V4L2 with our small-URB uvcvideo, cscore keeps the
+device): photonvision-108 (no image copy without a viewer, native pose) and 109 (each frame's result published from
+the streaming thread). photonvision-110 makes that work for any number of cameras in one PhotonVision:
+
+- `NativePublish` is one instance per camera, owned by its `VisionRunner` and current on its vision thread; the
+  native side was already per NAPA handle (per camera). Calibration, tag size, mid-exposure shift and topic are
+  per camera. A camera whose frames aren't streamed stays on the Java path.
+- **One NetworkTables client per camera.** ntcore drops a flush that comes within 5 ms of the connection's last
+  send (`NetworkOutgoingQueue::SendOutgoing`, `MIN_PERIOD_MS = 5`; the value then waits for the next send), so
+  coalescing on one connection can't fix it: two cameras at 120 fps on PhotonVision's connection lost 7 ms at p95.
+  Each camera's native publisher is its own client of the same server (identity `photonvision-native-*`),
+  publishing the same `/photonvision/<cam>/rawBytes` topic and type; PhotonVision's Java publisher stays idle while
+  the native one is active. `SPECTRUM_NATIVE_NT_CLIENT=0` shares PhotonVision's connection instead.
+- Health (`/photonvision/<cam>/health`): fps and frames are the native publish count, `latencyMs` the mean
+  capture -> publish (it read 30 fps, the capped Java rate, before).
+- Camera delay 0.4 ms (LED test), per camera: `SPECTRUM_CAMERA_DELAY_US="400,name=N"`. The streaming watcher's
+  first sight is now converted back to the first packet (less the URB length) before it is applied.
+
+Measured (`tests/systemcore-latency/multicam-native.sh 20`, our uvcvideo urb_packets 2, ondemand, Thriftiest
+exposure 0.2 ms gain 128, Swyft exposure 1 ms, min tag 32, both cameras seeing tag 3, NT subscriber on the same
+SystemCore; capture -> received ms p50/p95/p99; PhotonVision process CPU in % of one core):
+
+| Run | Thriftiest | Swyft | CPU |
+|---|---|---|---|
+| Swyft alone | | 9.46 / 10.71 / 11.03 | 44.1% |
+| Thriftiest alone | 9.13 / 10.13 / 10.42 | | 44.3% |
+| Both, shared NT connection | 10.28 / 16.93 / 17.90 | 13.33 / 17.72 / 18.73 | 92.2% |
+| Both, one NT client per camera (default) | 9.16 / 10.18 / 10.54 | 9.77 / 10.84 / 11.41 | 86.5% |
+| Both, per-camera clients, pinned (cores 1-3, watcher with its camera) | 9.17 / 10.25 / 11.02 | 9.65 / 10.92 / 11.92 | 90.8% |
+
+Every run at the full camera rate (120-121 results/s per camera, all with tags). Two cameras cost what two single
+cameras cost (the streaming threads are ~35% of a core each) and neither camera's latency moves. Pinning didn't
+help at two cameras. Health read fps 120-121 per camera.

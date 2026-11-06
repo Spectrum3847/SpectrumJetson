@@ -35,8 +35,14 @@ if [[ ! -f /etc/default/sc-vision ]]; then
   sudo tee /etc/default/sc-vision >/dev/null <<'EOF'
 # sc-vision options (sc-vision-native.service). Core 3, SCHED_FIFO 40 (below robot code's RT threads' limit 50),
 # 2-packet URBs (0.25 ms), exposure 50 (5 ms) gain 32. NT server: the robot code on this SystemCore.
-SC_VISION_ARGS=--serial SJ-05 --cpu 3 --fifo 40 --pkts 2 --exposure 50 --gain 32 --gamma 100 --backlight 0 --sharpness 1 --check 64 --calib /opt/sc-vision/etc/calib.json --nt 127.0.0.1 --name thrifty --mid-offset-ms 5.0
+SC_VISION_ARGS=--serial SJ-05 --cpu 3 --fifo 40 --pkts 2 --exposure 50 --gain 32 --gamma 100 --backlight 0 --sharpness 1 --check 64 --calib /opt/sc-vision/etc/calib.json --nt 127.0.0.1 --name thrifty --camera-delay-ms 0.4
 EOF
+fi
+# An older install pinned --mid-offset-ms 5.0 (exposure/2 2.5 + Team 100's 2.5 ms delay); now the measured 0.4 ms
+# delay (LED test, 2026-11-06) and the exposure from the command line. Other values are kept.
+if grep -q -- '--mid-offset-ms 5\.0\b' /etc/default/sc-vision; then
+  sudo sed -i 's/--mid-offset-ms 5\.0\b/--camera-delay-ms 0.4/' /etc/default/sc-vision
+  echo "sc-vision: --mid-offset-ms 5.0 -> --camera-delay-ms 0.4 in /etc/default/sc-vision"
 fi
 sudo tee /etc/systemd/system/sc-vision-native.service >/dev/null <<'EOF'
 [Unit]

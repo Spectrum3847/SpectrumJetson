@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Per-frame stage table for sc-vision's CSV (native/sc-vision), in the same terms as analyze.py.
 
-  native_analyze.py CSV [--exposure-ms 5.0] [--delay-ms 2.5] [--skip 60]
+  native_analyze.py CSV [--exposure-ms 5.0] [--delay-ms 0.4] [--skip 60]
 
 Times are ms p50/p95/p99. 'first packet' is the reap time of the URB holding the frame's first payload, less
 the packets after it in that URB (0.5 ms URBs: within ~0.125 ms). Mid-exposure is ESTIMATED as first packet -
 exposure/2 - camera delay (the same constants PhotonVision uses for its published timestamp; the camera delay is
-Team 100's 2.5 ms, not measured here). Pose jitter: standard deviation of the tag translation (static scene).
+0.4 ms: LED test 0.41 +- 0.04 ms on the Thriftiest). Pose jitter: standard deviation of the tag translation (static scene).
 """
 import argparse
 import csv
@@ -22,7 +22,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('csv')
     ap.add_argument('--exposure-ms', type=float, default=5.0)
-    ap.add_argument('--delay-ms', type=float, default=2.5)
+    ap.add_argument('--delay-ms', type=float, default=0.4)
     ap.add_argument('--skip', type=int, default=60, help='start-up frames to drop')
     a = ap.parse_args()
     rows = list(csv.DictReader(open(a.csv)))[a.skip:]

@@ -1,0 +1,535 @@
+diff --git a/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java b/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java
+index f8b52d12..c12152b9 100644
+--- a/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java
++++ b/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java
+@@ -261,17 +261,14 @@ public class NTDataPublisher implements CVPipelineResultConsumer {
+         // (every frame,
+         // as soon as its tags are known); hand it the publisher and time-sync state, and don't publish
+         // twice.
+-        if (org.photonvision.vision.pipe.impl.NativePublish.ENABLED) {
+-            org.photonvision.vision.pipe.impl.NativePublish.pubHandle =
+-                    ts.resultPublisher.publisher.getHandle();
+-            org.photonvision.vision.pipe.impl.NativePublish.instHandle =
+-                    rootTable.getInstance().getHandle();
+-            org.photonvision.vision.pipe.impl.NativePublish.ntOffsetNs = offsetNanos;
+-            org.photonvision.vision.pipe.impl.NativePublish.sincePongNs =
+-                    NetworkTablesManager.getInstance().getTimeSinceLastPong();
+-        }
+-        if (!org.photonvision.vision.pipe.impl.NativePublish.active())
+-            ts.resultPublisher.set(simplified, 1024);
++        var nativePub = org.photonvision.vision.pipe.impl.NativePublish.current();
++        if (nativePub != null)
++            nativePub.bind(
++                    rootTable.getInstance(),
++                    ts.resultPublisher.publisher,
++                    offsetNanos,
++                    NetworkTablesManager.getInstance().getTimeSinceLastPong());
++        if (nativePub == null || !nativePub.active()) ts.resultPublisher.set(simplified, 1024);
+         // photonvision-79: the same result into the open Rewind recording's vision log.
+         org.photonvision.rewind.VisionLog.result(rewindCamera, simplified, nowNanos);
+         if (ConfigProvider.getInstance().getConfig().getNetworkConfig().shouldPublishProto) {
+@@ -328,7 +325,7 @@ public class NTDataPublisher implements CVPipelineResultConsumer {
+         // (fast path: ntcore rate-limits flushes; the native publish flushes every frame, so a Java
+         // flush here
+         // would make some of those wait for the next periodic send)
+-        if (!org.photonvision.vision.pipe.impl.NativePublish.active()) rootTable.getInstance().flush();
++        if (nativePub == null || !nativePub.active()) rootTable.getInstance().flush();
+         org.photonvision.vision.processes.LatencyTrace.mark(
+                 org.photonvision.vision.processes.LatencyTrace.NT1);
+     }
+diff --git a/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java b/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
+index 8cf912cc..31c1c1dd 100644
+--- a/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
++++ b/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
+@@ -101,6 +101,12 @@ public final class NapaDetectorJNI {
+     public static native double[] poseSquare(
+             double[] corners, double[] k, double[] dist, double tagSize);
+ 
++    /**
++     * Spectrum (sc/mjpeg-napa): mean capture (mid-exposure) -> publish of this camera's natively
++     * published results since the last call, ms; -1 if none.
++     */
++    public static native double nativeLatencyMs(long handle);
++
+     /**
+      * Spectrum (sc/mjpeg-napa) fast path: the streaming thread publishes each frame's
+      * PhotonPipelineResult on the ntcore raw publisher pub (0 = off) as soon as its tags are known.
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+index 96015b76..924c9c04 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+@@ -1037,10 +1037,54 @@ public class USBFrameProvider extends CpuImageProcessor {
+ 
+     /**
+      * SpectrumJetson (photonvision-13): the camera's delay from the end of exposure to its first USB
+-     * packet (sensor readout + JPEG start), in microseconds. Not visible from here; measure it on the
+-     * robot (spin in front of a tag) and set SPECTRUM_CAMERA_DELAY_US. Default 0.
++     * packet (sensor readout + JPEG start), in microseconds, per camera.
++     *
++     * <p>Spectrum (sc/mjpeg-napa): measured 0.41 +- 0.04 ms on the Thriftiest (LED test; the camera
++     * clock's PTS -> first packet is 0.35 ms on the Thriftiest and the Swyft), so 400 by default
++     * where the frame's time reference is its first USB packet (the driver's stamp less {@link
++     * #UVC_STAMP_LAG_US}, or when the streaming watcher first sees its bytes less {@link
++     * #URB_LAG_US}). Where uvcvideo stamps from the camera clock (hwtimestamps=1, our Jetson driver)
++     * the reference is earlier than the first packet and not yet re-derived: default 0 there; the
++     * Jetson's 09-robot-tuning.sh sets its own value.
++     *
++     * <p>SPECTRUM_CAMERA_DELAY_US: "N" for every camera, or "N,name=N,..." to set cameras whose
++     * nickname or unique name contains name (case-insensitive) apart (the Swyft uses the default
++     * until measured).
+      */
+-    private static final long CAMERA_DELAY_US = envLong("SPECTRUM_CAMERA_DELAY_US", 0);
++    private static final String CAMERA_DELAY_SPEC = System.getenv("SPECTRUM_CAMERA_DELAY_US");
++
++    static long cameraDelayUs(String spec, String nickname, String uniqueName, long def) {
++        if (spec == null || spec.isBlank()) return def;
++        long match = -1;
++        for (String part : spec.split(",")) {
++            part = part.trim();
++            try {
++                int eq = part.indexOf('=');
++                if (eq < 0) {
++                    if (!part.isEmpty()) def = Long.parseLong(part);
++                } else {
++                    String key = part.substring(0, eq).trim().toLowerCase();
++                    long v = Long.parseLong(part.substring(eq + 1).trim());
++                    if (!key.isEmpty()
++                            && ((nickname != null && nickname.toLowerCase().contains(key))
++                                    || (uniqueName != null && uniqueName.toLowerCase().contains(key)))) match = v;
++                }
++            } catch (NumberFormatException e) {
++                // ignore a bad entry
++            }
++        }
++        return match >= 0 ? match : def;
++    }
++
++    private static boolean hwTimestamps() {
++        try {
++            var hw = java.nio.file.Path.of("/sys/module/uvcvideo/parameters/hwtimestamps");
++            return java.nio.file.Files.exists(hw)
++                    && "1".equals(java.nio.file.Files.readString(hw).trim());
++        } catch (Exception e) {
++            return false;
++        }
++    }
+ 
+     /**
+      * Spectrum (sc/mjpeg-napa): how late the driver's buffer timestamp is after the frame's first USB
+@@ -1053,7 +1097,15 @@ public class USBFrameProvider extends CpuImageProcessor {
+      * urb_packets=4, hwtimestamps=1).
+      */
+     private static final long UVC_STAMP_LAG_US =
+-            envLong("SPECTRUM_UVC_STAMP_LAG_US", defaultStampLagUs());
++            envLong("SPECTRUM_UVC_STAMP_LAG_US", hwTimestamps() ? 0 : urbLagUs());
++
++    /**
++     * Spectrum (sc/mjpeg-napa): how late the streaming watcher (fast path) first sees a frame's bytes
++     * after its first USB packet: uvcvideo copies a URB's packets when the URB completes, the moment
++     * it would stamp from it, so the URB lag whatever clock the stamp uses.
++     * SPECTRUM_STREAM_SEEN_LAG_US overrides.
++     */
++    private static final long URB_LAG_US = envLong("SPECTRUM_STREAM_SEEN_LAG_US", urbLagUs());
+ 
+     /**
+      * The driver's median stamp lag from its URB size (measured on the SystemCore, kernel trace,
+@@ -1062,20 +1114,13 @@ public class USBFrameProvider extends CpuImageProcessor {
+      * 32); Limelight's stock one has ll_compressed_* and 32-packet URBs; elsewhere (our Jetson driver
+      * with hwtimestamps) 0.
+      */
+-    private static long defaultStampLagUs() {
++    private static long urbLagUs() {
+         try {
+             var urb = java.nio.file.Path.of("/sys/module/uvcvideo/parameters/urb_packets");
+             int n;
+             if (java.nio.file.Files.exists(urb)) {
+                 n = Integer.parseInt(java.nio.file.Files.readString(urb).trim());
+                 if (n <= 0 || n > 32) n = 32;
+-                if (java.nio.file.Files.exists(
+-                                java.nio.file.Path.of("/sys/module/uvcvideo/parameters/hwtimestamps"))
+-                        && "1"
+-                                .equals(
+-                                        java.nio.file.Files.readString(
+-                                                        java.nio.file.Path.of("/sys/module/uvcvideo/parameters/hwtimestamps"))
+-                                                .trim())) return 0; // stamped from the camera clock, not the URB
+             } else if (java.nio.file.Files.exists(
+                     java.nio.file.Path.of("/sys/module/uvcvideo/parameters/ll_compressed_payload_fast"))) {
+                 n = 32;
+@@ -1100,6 +1145,10 @@ public class USBFrameProvider extends CpuImageProcessor {
+     }
+ 
+     private boolean loggedMidExposure = false;
++    private long cameraDelayUs = -1;
++
++    /** Spectrum (sc/mjpeg-napa): first bytes -> mid-exposure, for this camera's native publish. */
++    public volatile long nativeMidShiftNs = 0;
+ 
+     // Spectrum (sc/mjpeg-napa): streamDecodeGray without the image copy while nobody watches the
+     // stream
+@@ -1117,13 +1166,17 @@ public class USBFrameProvider extends CpuImageProcessor {
+      */
+     private long toMidExposureNs(long captureTimeNs) {
+         if (captureTimeNs == 0) return 0;
+-        double exposureUs = settables.getExposureTimeUs();
+-        if (exposureUs <= 0) return captureTimeNs - (CAMERA_DELAY_US + UVC_STAMP_LAG_US) * 1000;
+-        long shiftNs = ((long) (exposureUs / 2) + CAMERA_DELAY_US + UVC_STAMP_LAG_US) * 1000;
+-        // the fast path's native publish stamps from when the frame's first bytes were seen (no driver
+-        // stamp lag)
+-        org.photonvision.vision.pipe.impl.NativePublish.midShiftNs =
+-                ((long) (exposureUs / 2) + CAMERA_DELAY_US) * 1000;
++        if (cameraDelayUs < 0) {
++            var c = settables.getConfiguration();
++            cameraDelayUs =
++                    cameraDelayUs(CAMERA_DELAY_SPEC, c.nickname, c.uniqueName, hwTimestamps() ? 0 : 400);
++        }
++        double exposureUs = Math.max(0, settables.getExposureTimeUs());
++        // the driver's stamp -> first packet -> mid-exposure
++        long shiftNs = ((long) (exposureUs / 2) + cameraDelayUs + UVC_STAMP_LAG_US) * 1000;
++        // the fast path's native publish stamps from when the watcher first saw the frame's bytes:
++        // -> first packet (URB lag) -> mid-exposure
++        nativeMidShiftNs = ((long) (exposureUs / 2) + cameraDelayUs + URB_LAG_US) * 1000;
+         if (!loggedMidExposure) {
+             loggedMidExposure = true;
+             logger.info(
+@@ -1132,9 +1185,11 @@ public class USBFrameProvider extends CpuImageProcessor {
+                             + " ms earlier, to mid-exposure (exposure "
+                             + exposureUs / 1000.0
+                             + " ms, camera delay "
+-                            + CAMERA_DELAY_US / 1000.0
++                            + cameraDelayUs / 1000.0
+                             + " ms, driver stamp lag "
+                             + UVC_STAMP_LAG_US / 1000.0
++                            + " ms, streamed first-seen lag "
++                            + URB_LAG_US / 1000.0
+                             + " ms)");
+         }
+         return captureTimeNs - shiftNs;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NapaDetector.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NapaDetector.java
+index 9ac63641..d1dd3dc2 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NapaDetector.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NapaDetector.java
+@@ -125,12 +125,13 @@ public class NapaDetector implements Releasable {
+                                 gray.rows(),
+                                 (int) gray.step1(),
+                                 // the fast path publishes every frame natively: the watcher feeds them all
+-                                NativePublish.ENABLED
++                                NativePublish.current() != null
+                                         ? 0
+                                         : org.photonvision.vision.processes.FrameRateCap.nextWantedNanos())
+                         : NapaDetectorJNI.detect(
+                                 handle, gray.dataAddr(), gray.cols(), gray.rows(), (int) gray.step1());
+-        if (streamEnabled()) NativePublish.update(handle);
++        var nativePub = NativePublish.current();
++        if (streamEnabled() && nativePub != null) nativePub.update(handle);
+         return ret == null ? List.of() : List.of(ret);
+     }
+ 
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+index fee4a68b..df698a71 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+@@ -18,36 +18,131 @@
+ package org.photonvision.vision.pipe.impl;
+ 
+ /**
+- * Spectrum (sc/mjpeg-napa) fast path: with streaming NAPA, the camera's streaming-decoder thread
+- * publishes each frame's PhotonPipelineResult itself (NapaDetectorJNI.setNativePublish: native pose
+- * + the fork's serde on this camera's rawBytes publisher) the moment its tags are known, so the
+- * Java pipeline is off the per-frame path. The Java pipeline keeps running for the UI, the stream
+- * and health, at most {@link #JAVA_FPS} frames a second, and doesn't publish rawBytes itself while
+- * the native side does.
++ * Spectrum (sc/mjpeg-napa) fast path: with streaming NAPA, each camera's streaming-decoder thread
++ * publishes that camera's PhotonPipelineResult itself (NapaDetectorJNI.setNativePublish: native
++ * pose + the fork's serde on the camera's own rawBytes publisher) the moment its tags are known, so
++ * the Java pipeline is off the per-frame path. The Java pipeline keeps running for the UI, the
++ * stream and health, at most {@link #JAVA_FPS} frames a second, and doesn't publish rawBytes itself
++ * while the native side does.
+  *
+- * <p>SPECTRUM_NATIVE_PUBLISH=1 turns it on (prototype: one camera);
+- * SPECTRUM_NATIVE_PUBLISH_JAVA_FPS (default 30) caps the Java pipeline meanwhile.
++ * <p>One instance per camera: its VisionRunner owns it and makes it {@link #current()} on its
++ * thread, where the camera's pipeline, NapaDetector, NTDataPublisher and CameraHealthPublisher run,
++ * so any number of cameras each publish on their own topics with their own calibration and timing.
++ * A camera whose frames aren't streamed (no band-sink result) stays on the Java path.
++ *
++ * <p>SPECTRUM_NATIVE_PUBLISH=1 turns it on; SPECTRUM_NATIVE_PUBLISH_JAVA_FPS (default 30) caps the
++ * Java pipeline meanwhile.
+  */
+ public final class NativePublish {
+     public static final boolean ENABLED = "1".equals(System.getenv("SPECTRUM_NATIVE_PUBLISH"));
+     public static final double JAVA_FPS = javaFps();
+ 
++    private static final ThreadLocal<NativePublish> CURRENT = new ThreadLocal<>();
++
++    /** The camera whose vision thread this is, or null (off, or not a vision thread). */
++    public static NativePublish current() {
++        return ENABLED ? CURRENT.get() : null;
++    }
++
++    /** VisionRunner, on its own thread: this camera's instance (null: none). */
++    public static void makeCurrent(NativePublish p) {
++        CURRENT.set(p);
++    }
++
+     // from NTDataPublisher (the camera's rawBytes publisher, its instance, the time-sync state)
+-    public static volatile int pubHandle = 0;
+-    public static volatile int instHandle = 0;
+-    public static volatile long ntOffsetNs = 0;
+-    public static volatile long sincePongNs = 0;
+-    // from USBFrameProvider: the frame's first bytes -> mid-exposure (exposure / 2 + camera delay)
+-    public static volatile long midShiftNs = 0;
++    public volatile int pubHandle = 0;
++    public volatile int instHandle = 0;
++    public volatile long ntOffsetNs = 0;
++    public volatile long sincePongNs = 0;
++    // from the camera's frame provider: the frame's first bytes -> mid-exposure (exposure/2 + delay)
++    public volatile long midShiftNs = 0;
+     // from AprilTagPipeline: calibration and tag size
+-    public static volatile double[] intrinsics = null;
+-    public static volatile double[] distortion = null;
+-    public static volatile double tagSizeM = 0.1651;
++    public volatile double[] intrinsics = null;
++    public volatile double[] distortion = null;
++    public volatile double tagSizeM = 0.1651;
+ 
+-    private static volatile long lastPublished = -1;
+-    private static volatile long lastProgressNs = 0;
++    private volatile long published = -1;
++    private volatile long lastProgressNs = 0;
++    private volatile double latencyMs = 0;
+ 
+-    private NativePublish() {}
++    /**
++     * Whether each camera publishes on its own NetworkTables client (default;
++     * SPECTRUM_NATIVE_NT_CLIENT=0 shares PhotonVision's). ntcore drops a flush that comes within 5 ms
++     * of the connection's last send (NetworkOutgoingQueue::SendOutgoing, MIN_PERIOD_MS) and the value
++     * then waits for the next send: with two cameras at 120 fps on one connection, capture ->
++     * received p95 went from ~13 to ~21 ms. Its own connection keeps each camera's flushes clear of
++     * the others' and of PhotonVision's own sends.
++     */
++    static final boolean OWN_CLIENT = !"0".equals(System.getenv("SPECTRUM_NATIVE_NT_CLIENT"));
++
++    private org.wpilib.networktables.NetworkTableInstance ownInst;
++    private org.wpilib.networktables.RawPublisher ownPub;
++    private String ownTopic, ownServer;
++
++    /**
++     * NTDataPublisher, for each Java result: this camera's rawBytes publisher and the time-sync
++     * state. The native side publishes on this camera's own client (same topic, same type) once that
++     * is connected, else on PhotonVision's publisher.
++     */
++    public synchronized void bind(
++            org.wpilib.networktables.NetworkTableInstance pvInst,
++            org.wpilib.networktables.RawPublisher javaPub,
++            long offsetNs,
++            long sincePong) {
++        ntOffsetNs = offsetNs;
++        sincePongNs = sincePong;
++        int pub = javaPub.getHandle(), inst = pvInst.getHandle();
++        if (OWN_CLIENT) {
++            try {
++                if (ensureOwnClient(pvInst, javaPub)) {
++                    pub = ownPub.getHandle();
++                    inst = ownInst.getHandle();
++                }
++            } catch (Exception e) {
++                // stay on PhotonVision's connection
++            }
++        }
++        pubHandle = pub;
++        instHandle = inst;
++    }
++
++    private boolean ensureOwnClient(
++            org.wpilib.networktables.NetworkTableInstance pvInst,
++            org.wpilib.networktables.RawPublisher javaPub) {
++        // PhotonVision as a client of the robot: connect to the same server. (As a server it has no
++        // remote to share a flush with but its own clients: stay on it.)
++        if (!pvInst
++                .getNetworkMode()
++                .contains(org.wpilib.networktables.NetworkTableInstance.NetworkMode.CLIENT)) return false;
++        var conns = pvInst.getConnections();
++        if (conns.length == 0) return ownInst != null && ownInst.isConnected() && ownPub != null;
++        String server = conns[0].remoteIp + ":" + conns[0].remotePort;
++        var topic = javaPub.getTopic();
++        String name = topic.getName();
++        if (ownInst == null) {
++            ownInst = org.wpilib.networktables.NetworkTableInstance.create();
++            ownInst.startClient("photonvision-native-" + System.identityHashCode(this));
++        }
++        if (!server.equals(ownServer)) {
++            ownInst.setServer(conns[0].remoteIp, conns[0].remotePort);
++            ownServer = server;
++        }
++        if (!name.equals(ownTopic)) { // first use, or the camera was renamed
++            if (ownPub != null) ownPub.close();
++            ownPub = ownInst.getRawTopic(name).publish(topic.getTypeString());
++            ownTopic = name;
++        }
++        return ownInst.isConnected();
++    }
++
++    /** The camera's VisionRunner closed: its own client goes. */
++    public synchronized void close() {
++        pubHandle = 0;
++        if (ownPub != null) ownPub.close();
++        if (ownInst != null) ownInst.close();
++        ownPub = null;
++        ownInst = null;
++    }
+ 
+     private static double javaFps() {
+         try {
+@@ -59,11 +154,11 @@ public final class NativePublish {
+     }
+ 
+     /**
+-     * NapaDetector, after each streamed frame: refresh the native side's settings, track whether it
+-     * publishes.
++     * NapaDetector, after each streamed frame: refresh this camera's native settings, track whether
++     * it publishes.
+      */
+-    static void update(long napaHandle) {
+-        if (!ENABLED || napaHandle == 0) return;
++    void update(long napaHandle) {
++        if (napaHandle == 0) return;
+         long n =
+                 org.photonvision.jni.NapaDetectorJNI.setNativePublish(
+                         napaHandle,
+@@ -75,14 +170,26 @@ public final class NativePublish {
+                         midShiftNs,
+                         ntOffsetNs,
+                         sincePongNs);
+-        if (n > lastPublished) {
+-            lastPublished = n;
++        if (n > published) {
++            published = n;
+             lastProgressNs = System.nanoTime();
++            double l = org.photonvision.jni.NapaDetectorJNI.nativeLatencyMs(napaHandle);
++            if (l >= 0) latencyMs = l;
+         }
+     }
+ 
+     /** Whether the native side published recently (then the Java side doesn't publish rawBytes). */
+-    public static boolean active() {
+-        return ENABLED && pubHandle != 0 && System.nanoTime() - lastProgressNs < 200_000_000L;
++    public boolean active() {
++        return pubHandle != 0 && System.nanoTime() - lastProgressNs < 200_000_000L;
++    }
++
++    /** Results the native side published so far (for health), -1 before the first. */
++    public long published() {
++        return published;
++    }
++
++    /** Mean capture -> publish of the native results since the last update that saw new ones, ms. */
++    public double latencyMs() {
++        return latencyMs;
+     }
+ }
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java b/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java
+index 67bf4102..bd951745 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java
+@@ -235,12 +235,12 @@ public class AprilTagPipeline extends CVPipeline<CVPipelineResult, AprilTagPipel
+                     settings.napaFarSearch,
+                     settings.napaFarMinTagPx,
+                     60);
+-            if (NativePublish
+-                    .ENABLED) { // Spectrum (sc/mjpeg-napa) fast path: what the native publish needs
++            var nativePub = NativePublish.current();
++            if (nativePub != null) { // Spectrum (sc/mjpeg-napa) fast path: this camera's calibration
+                 var cal = frameStaticProperties.cameraCalibration;
+-                NativePublish.intrinsics = cal != null ? cal.getIntrinsicsArr() : null;
+-                NativePublish.distortion = cal != null ? cal.getDistCoeffsArr() : null;
+-                NativePublish.tagSizeM = tagWidthMeters;
++                nativePub.intrinsics = cal != null ? cal.getIntrinsicsArr() : null;
++                nativePub.distortion = cal != null ? cal.getDistCoeffsArr() : null;
++                nativePub.tagSizeM = tagWidthMeters;
+             }
+             detections = napaDetector.detect(in);
+             sumPipeNanosElapsed += System.nanoTime() - t0;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java b/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
+index 22fe42b5..a38c8387 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
+@@ -60,7 +60,7 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+     private IntegerPublisher frames, failures, recoveryCount, heartbeat, lastFrameAge;
+     private long beats = 0;
+ 
+-    private long windowStartNs = 0, total = 0;
++    private long windowStartNs = 0, total = 0, nativeAtWindowStart = -1;
+     private int count = 0;
+     private double sumMs = 0, maxMs = 0, sumLatencyMs = 0;
+ 
+@@ -152,11 +152,24 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+         double window = (now - windowStartNs) / 1e9;
+         if (window < 1.0) return;
+         ensurePublishers();
+-        fps.set(count / window);
++        // Spectrum (sc/mjpeg-napa) fast path: while this camera's results are published natively (every
++        // frame) the Java pipeline runs at a capped rate; report what the robot gets: the native rate,
++        // count and capture -> publish latency.
++        var nativePub = org.photonvision.vision.pipe.impl.NativePublish.current();
++        if (nativePub != null && nativePub.active() && nativePub.published() >= 0) {
++            long pub = nativePub.published();
++            if (nativeAtWindowStart >= 0) fps.set((pub - nativeAtWindowStart) / window);
++            nativeAtWindowStart = pub;
++            latencyMs.set(nativePub.latencyMs());
++            frames.set(pub);
++        } else {
++            nativeAtWindowStart = -1;
++            fps.set(count / window);
++            latencyMs.set(count > 0 ? sumLatencyMs / count : 0);
++            frames.set(total);
++        }
+         pipelineMs.set(count > 0 ? sumMs / count : 0);
+         pipelineMsMax.set(maxMs);
+-        latencyMs.set(count > 0 ? sumLatencyMs / count : 0);
+-        frames.set(total);
+         failures.set(decodeFailures.getAsLong());
+         recoveryCount.set(recoveries.getAsLong());
+         windowStartNs = now;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
+index bc5e344f..97887338 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
+@@ -64,6 +64,17 @@ public class VisionRunner implements AutoCloseable {
+     private final FrameRateCap frameRateCap = new FrameRateCap(); // photonvision-100
+     private long lastLoopErrorLogMs = 0; // photonvision-63: monotonic (System.nanoTime) ms
+ 
++    // Spectrum (sc/mjpeg-napa) fast path: this camera's native publish (null when off)
++    private final org.photonvision.vision.pipe.impl.NativePublish nativePublish =
++            org.photonvision.vision.pipe.impl.NativePublish.ENABLED
++                    ? new org.photonvision.vision.pipe.impl.NativePublish()
++                    : null;
++
++    /** This camera's native publish state (null when SPECTRUM_NATIVE_PUBLISH is off). */
++    public org.photonvision.vision.pipe.impl.NativePublish getNativePublish() {
++        return nativePublish;
++    }
++
+     /**
+      * VisionRunner contains a thread to run a pipeline, given a frame, and will give the result to
+      * the consumer.
+@@ -271,7 +282,12 @@ public class VisionRunner implements AutoCloseable {
+                 if (fpsLimit > 0) capNanos = Math.max(capNanos, 1_000_000_000L / fpsLimit);
+                 // Spectrum (sc/mjpeg-napa) fast path: results are published natively every frame; the Java
+                 // pipeline (UI, stream, health) runs at most NativePublish.JAVA_FPS a second meanwhile
+-                if (org.photonvision.vision.pipe.impl.NativePublish.active()
++                org.photonvision.vision.pipe.impl.NativePublish.makeCurrent(nativePublish);
++                if (nativePublish != null
++                        && frameSupplier instanceof org.photonvision.vision.frame.provider.USBFrameProvider usb)
++                    nativePublish.midShiftNs = usb.nativeMidShiftNs;
++                if (nativePublish != null
++                        && nativePublish.active()
+                         && org.photonvision.vision.pipe.impl.NativePublish.JAVA_FPS > 0)
+                     capNanos =
+                             Math.max(
+@@ -399,5 +415,6 @@ public class VisionRunner implements AutoCloseable {
+         if (visionProcessThread.isAlive()) {
+             stopProcess();
+         }
++        if (nativePublish != null) nativePublish.close();
+     }
+ }

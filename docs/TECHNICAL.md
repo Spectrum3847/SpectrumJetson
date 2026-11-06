@@ -1635,6 +1635,19 @@ inside "N: name". Suite: 5 tests, 1.5 min, all passing.
   (`SPECTRUM_CAMERA_DELAY_US`, `09-robot-tuning.sh` step 17: Team 100's rotating-disc figure for
   the Thriftiest Cam in MJPEG), pending our own robot spin test. The TXMAN1 rotation replay
   (tests/field-replay/RESULTS.md) can't separate it from the robot's log latency.
+- **Camera delay, measured (2026-11-06, SystemCore bench):** an LED flashed during exposure put the
+  end of exposure 0.41 +- 0.04 ms before the frame's first USB packet on the Thriftiest (confirmed
+  independently), and the camera clock's PTS is 0.35 ms before the first packet on both the
+  Thriftiest and the Swyft. Team 100's 2.5 ms is too large for our cameras. The SystemCore defaults
+  are now 0.4 ms, relative to the first USB packet: sc-vision (`--camera-delay-ms`, which stamps
+  the first packet itself) and the PhotonVision fork (`SPECTRUM_CAMERA_DELAY_US`, per camera as
+  "N,name=N"; it first converts its own reference to the first packet: the driver's stamp less the
+  URB stamp lag, or the streaming watcher's first sight less the URB length). The Swyft uses 0.4 ms
+  until measured. **The Jetson still sets 2500 µs** (`09-robot-tuning.sh` step 17): its reference
+  is the camera-clock stamp (hwtimestamps=1, about 0.74 ms before the first-packet stamp, above),
+  not the first packet, so its delay must be re-derived against that reference (roughly 0.4 - 0.35
+  ms from PTS if the PTS means the same there) and checked before the default changes; the fork
+  defaults to 0 when hwtimestamps=1.
 - **Measured** (`tests/uvc-timestamps/run.sh`: v4l2-ctl, PhotonVision stopped, one or all
   cameras):
 
@@ -2940,7 +2953,7 @@ p50 from mid-exposure, 1 camera, GPU detector:
 
 | Stage | ms |
 |---|---|
-| Mid-exposure to first USB packet | ~4.5 (2.5 is half the exposure; 2.5 is the assumed camera delay) |
+| Mid-exposure to first USB packet | ~4.5 (2.5 is half the exposure; 2.5 is the assumed camera delay, measured 0.41 on 2026-11-06, so ~2.9) |
 | Frame over USB | 8.1 (paced by the sensor readout; bytes arrive evenly) |
 | DQBUF and cscore | 0.1 |
 | NVJPG decode | 2.64 |

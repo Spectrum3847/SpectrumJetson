@@ -3,7 +3,7 @@
 # PhotonLib-style NT subscriber on the same SystemCore (nt_probe: capture timestamp -> received, results/s, ambiguity,
 # corners, health). Thriftiest, our uvcvideo urb_packets=2, CD settings, min 32, governor as it is. Short runs.
 #   nt-compare.sh [SECS] [CONFIGS]     default 15 s, "pvjava pvnative scv"
-# Both publishers stamp capture = first bytes/packet - (exposure/2 + 2.5 ms); PhotonVision's "first bytes" are when
+# Both publishers stamp capture = first bytes/packet - (exposure/2 + camera delay, 2.5 ms before 2026-11-06, now 0.4 ms); PhotonVision's "first bytes" are when
 # its watcher saw the first 0.25 ms URB (up to ~0.3 ms after sc-vision's first-packet estimate), so PhotonVision's
 # capture -> received reads up to ~0.3 ms shorter than the same delay for sc-vision.
 set -uo pipefail

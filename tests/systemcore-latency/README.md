@@ -20,8 +20,10 @@ One Thriftiest Cam (SJ-05, usbrecov 5.13) on a SystemCore (LimelightOS SystemCor
 - **V4L2 timestamp -> pose** is what stock PhotonVision reports as latency on LimelightOS (uvcvideo hwtimestamps=0:
   the buffer is stamped when the first 32-packet URB completes, ~2.4 ms after the first packet, with 4 ms
   granularity).
-- **mid-exposure** adds an assumed constant (exposure/2 + 2.5 ms) to one of the above; the fork applies it to the
-  V4L2 timestamp, sc-vision to the first packet, so the two "mid-exposure" columns are not comparable.
+- **mid-exposure** adds exposure/2 + the camera delay to one of the above (results here before 2026-11-06 used an
+  assumed 2.5 ms; the default is now 0.4 ms, LED test: 0.41 +- 0.04 ms on the Thriftiest; camera PTS -> first packet 0.35 ms on both cameras). Older runs: the fork applied it to the
+  V4L2 timestamp, sc-vision to the first packet, so those two "mid-exposure" columns are not comparable; the fork now
+  converts its reference back to the first packet first.
 
 ## Head-to-head (`post-compare.sh 30`, the user's Chief Delphi #46 settings)
 

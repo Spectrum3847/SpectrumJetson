@@ -73,9 +73,17 @@ if [[ ! -f /etc/systemd/system/photonvision.service.d/10-spectrum.conf ]]; then
 Environment=SPECTRUM_JPEG_DECODER=stream
 # Streaming NAPA (tags while the frame arrives; needs a pipeline with Tags on CPU (NAPA))
 Environment=SPECTRUM_NAPA_STREAM=1
-# The Thriftiest Cam's delay (Team 100's figure, not measured here)
-Environment=SPECTRUM_CAMERA_DELAY_US=2500
+# Exposure end -> first USB packet, per camera ("N" or "N,name=N"); measured 0.41 ms on the Thriftiest
+# (LED test), the Swyft uses the same until measured. The fork converts its own time reference (driver stamp
+# or the streaming watcher's first sight) back to the first packet before applying it.
+Environment=SPECTRUM_CAMERA_DELAY_US=400
 EOF
+fi
+# An older install pinned Team 100's 2.5 ms; the LED test measured 0.41 ms (2026-11-06). Other values are kept.
+if sudo grep -q '^Environment=SPECTRUM_CAMERA_DELAY_US=2500$' /etc/systemd/system/photonvision.service.d/*.conf 2>/dev/null; then
+  sudo sed -i 's/^Environment=SPECTRUM_CAMERA_DELAY_US=2500$/Environment=SPECTRUM_CAMERA_DELAY_US=400/' \
+    /etc/systemd/system/photonvision.service.d/*.conf
+  echo "camera delay: 2500 -> 400 us in the PhotonVision drop-ins"
 fi
 sudo systemctl daemon-reload
 if [[ ${ENABLE:-0} == 1 ]]; then sudo systemctl enable photonvision; fi

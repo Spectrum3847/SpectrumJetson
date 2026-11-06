@@ -139,6 +139,7 @@ struct StreamSink {
   int width = 0, height = 0;
   std::atomic<int64_t> seq{0};
   std::atomic<long> published{0};
+  std::atomic<int64_t> lat_sum_ns{0}, lat_n{0};  // capture (mid-exposure) -> publish, since nativeLatencyMs
   spectrum_band_sink c{};
   explicit StreamSink(const std::string &family) : det(family) {
     c.ctx = this;
@@ -192,6 +193,8 @@ struct StreamSink {
                         p.have_cam ? alt : nullptr, nullptr);
     nt->set_raw(p.pub, 0, buf.data(), buf.size());
     nt->flush(p.inst);
+    lat_sum_ns += MonoNs() - (t_begin - p.mid_shift_ns);
+    lat_n++;
     published++;
   }
 };
@@ -432,6 +435,16 @@ JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setNativePubli
     n->sink->pub = p;
   }
   return n->sink->published.load();
+}
+
+// Mean capture (mid-exposure) -> publish of this camera's natively published results since the last call, ms;
+// -1 if none.
+JNIEXPORT jdouble JNICALL Java_org_photonvision_jni_NapaDetectorJNI_nativeLatencyMs(JNIEnv *, jclass, jlong h) {
+  auto *n = Handle(h);
+  if (!n || !n->sink) return -1;
+  const int64_t c = n->sink->lat_n.exchange(0);
+  const int64_t sum = n->sink->lat_sum_ns.exchange(0);
+  return c > 0 ? sum / 1e6 / c : -1;
 }
 
 // Whether streamDecodeGray copies the decoded image (false: only when nobody watches the stream; the tags come from

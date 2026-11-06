@@ -243,7 +243,7 @@ static int selftest() {
 
 // ------------------------------------------------------------------------------------------- main
 int main(int argc, char **argv) {
-  double secs = 0, tag_size = 0.1651, mid_offset_ms = -1, camera_delay_ms = 2.5, fps_max = 0;
+  double secs = 0, tag_size = 0.1651, mid_offset_ms = -1, camera_delay_ms = 0.4, fps_max = 0;
   const char *lock_path = nullptr, *cam_serial = nullptr, *cam_port = nullptr;
   const char *csv = nullptr, *calib = nullptr, *save = nullptr, *nt_host = nullptr, *cam_name = "thrifty";
   int cpu = -1, fifo = 0, exposure = -1, gain = -1, gamma = -1, backlight = -1, sharpness = -1, brightness = -1000, every = 1, check = 64, whole = 0, no_napa = 0;
@@ -276,7 +276,8 @@ int main(int argc, char **argv) {
     else if (a == "--nt") nt_host = nx();
     else if (a == "--name") cam_name = nx();
     else if (a == "--mid-offset-ms") mid_offset_ms = atof(nx());  // first packet -> mid-exposure (overrides)
-    else if (a == "--camera-delay-ms") camera_delay_ms = atof(nx());  // exposure end -> first packet (per camera)
+    else if (a == "--camera-delay-ms") camera_delay_ms = atof(nx());  // exposure end -> first packet (per camera;
+                                                                    // LED test: 0.41 +- 0.04 ms on the Thriftiest; camera PTS -> first packet 0.35 ms on both cameras)
     else if (a == "--no-refine") pose_refine = 0;
     else if (a == "--usb") {  // camera model VID:PID (hex), default 1bcf:28c5 (Thriftiest); Swyft: 0bda:3035
       unsigned v = 0, p = 0;

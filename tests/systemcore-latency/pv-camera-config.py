@@ -3,10 +3,14 @@
 
   pv-camera-config.py list
   pv-camera-config.py only NAME_SUBSTRING NICKNAME [CALIB.json] [key=value ...]
+  pv-camera-config.py add  NAME_SUBSTRING NICKNAME [CALIB.json] [key=value ...]
+  pv-camera-config.py off  NAME_SUBSTRING
 
 `only`: the camera whose matched name/path contains NAME_SUBSTRING (e.g. SJ-SW01, SJ-05) is activated with
 NICKNAME, its current pipeline gets NAPA (min 32, hamming 1) plus the key=value fields, and CALIB.json (a
 PhotonVision calibration for its resolution) if given; every other camera is deactivated (one camera at a time).
+`add`: the same, but the other cameras are left as they are (any number of cameras at once: `only` the first,
+then `add` each other one). `off`: deactivate the matched camera.
 """
 import json
 import sqlite3
@@ -36,7 +40,10 @@ def main():
             print(uid[:8], d.get('nickname'), 'deactivated' if d.get('deactivated') else 'active',
                   info.get('uniquePath') or info.get('path'))
         return
-    sub, nick = sys.argv[2], sys.argv[3]
+    mode, sub = sys.argv[1], sys.argv[2]
+    if mode not in ('only', 'add', 'off'):
+        sys.exit(__doc__)
+    nick = sys.argv[3] if mode != 'off' else None
     rest = sys.argv[4:]
     cal = None
     if rest and rest[0].endswith('.json'):
@@ -47,7 +54,15 @@ def main():
         d = json.loads(contents)
         info = json.dumps(d.get('matchedCameraInfo', {}))
         mine = sub in info
-        d['deactivated'] = not mine
+        if mode == 'off':
+            if not mine:
+                continue
+            d['deactivated'] = True
+            mine = False
+        elif mode == 'only' or mine:
+            d['deactivated'] = not mine
+        else:
+            continue  # add: leave the others as they are
         if mine:
             d['nickname'] = nick
             if cal:
