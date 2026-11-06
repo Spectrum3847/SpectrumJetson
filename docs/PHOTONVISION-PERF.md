@@ -170,7 +170,7 @@ items: **32.7 / 32.6% -> 29.1-29.5% of a core, 6340 -> 4880-4965 wake-ups/s**, c
 
 | Item | Commit | Measured | Verdict |
 |---|---|---|---|
-| Identity checks every 1024th frame (stream re-decode, NAPA re-detect; `SPECTRUM_STREAM_CHECK_EVERY`, `SPECTRUM_NAPA_CHECK_EVERY`) | SpectrumJetson sc/pv-perf 9dd097e (`stream_decode.cc`, `NapaDetectorJNI.cc`) | 29.3 -> 29.5% (noise) in the dark, where a whole-frame decode is cheap | **waiting for the builder's OK** (its files; diff in BUILDER-LOG) |
+| Identity checks every 1024th frame (stream re-decode, NAPA re-detect; `SPECTRUM_STREAM_CHECK_EVERY`, `SPECTRUM_NAPA_CHECK_EVERY`) | SpectrumJetson sc/mjpeg-napa 49d42c1 (`stream_decode.cc`, `NapaDetectorJNI.cc`) | 29.3 -> 29.5% (noise) in the dark, where a whole-frame decode is cheap | **merged** (builder approved) |
 | Java pipeline at 10 fps while no UI and no stream viewer (`SPECTRUM_NATIVE_PUBLISH_IDLE_FPS`) | f9868494 | 29.5 -> 29.1% (noise; C2 alone moves 1-4 points) | small; merge only if the legacy NT entries at 10 Hz are fine |
 | Stream preview: a 1/2 or 1/4-size picture from the decoder for a watched stream instead of the 1 MB copy | 2bc0e468 + SpectrumJetson `spectrum_stream_preview` | two viewers: 33.8 / 34.3% without, 34.2 / 33.7% with; decoder 1.5 -> 1.2%, stream thread 1.25 -> 1.05% | **not worth it**: after 124 the copy happens 30 times a second (~0.3% of a core); most of a viewer's cost is cscore's MJPEG encode/serve (2.4%) and the stream thread. Leave unmerged |
 | Dashboard: back off failed stream retries (0.1 s doubling to 5 s) | fork sc/mjpeg-napa 7b1ea248 = photonvision-125 | client lint/prettier clean | **merged** |
@@ -246,8 +246,22 @@ changed jar (LimelightOS has no stat(1): run.sh uses wc and date -r).
 
 - Builder: the native camera backend (owns `USBFrameProvider`, `VisionSourceManager`, `NativeCameraSource`), its
   Rewind writer, and a proper eMMC/partition plan for recordings.
-- Merged: photonvision-125..127 (fork dc840246, SpectrumJetson 17e2caa). Waiting: the identity-check interval
-  (builder's OK). Optional after a lit A/B: the 10 fps idle Java pipeline (fork sc/pv-perf 65cddfbc). Not merging:
+- Merged: photonvision-125..127 (fork dc840246, SpectrumJetson 17e2caa), the identity-check interval (SpectrumJetson
+  49d42c1), the installer's AOT cache (SpectrumJetson d6ed364). Optional after a lit A/B: the 10 fps idle Java pipeline (fork sc/pv-perf 65cddfbc). Not merging:
   the stream preview (fork branch sc/pv-perf-preview).
 - Lights on: the lit A/B for the identity-check interval and the idle Java rate, and nt_check identity of the
   merged build.
+
+## Status (where to resume)
+
+- **Merged:** fork `sc/mjpeg-napa` 1d2b5021 (photonvision-120..124) and dc840246 (125..127); SpectrumJetson
+  `sc/mjpeg-napa` f8327b0 + 17e2caa (patch mirrors), 49d42c1 (identity checks every 1024th), d6ed364 (installer
+  AOT cache + `scripts/systemcore/photonvision-run.sh`).
+- **Not merged:** 10 fps idle Java pipeline (fork `sc/pv-perf`, needs a lit A/B showing a gain); stream preview (fork
+  `sc/pv-perf-preview`, not worth it).
+- **Open:** lit A/B for the idle Java rate and the check interval; nt_check identity of the merged build with tags
+  in view; Rewind cost and write pattern on a real SystemCore eMMC (the bench writes to a slow SD card); first real
+  install with the AOT cache (`install-photonvision.sh`, owned by the builder). File ownership: BUILDER2 owns the
+  native camera backend (`USBFrameProvider`, `VisionSourceManager`, `NativeCameraSource`, the decoder/JNI).
+- **Tools:** `tests/pv-perf/` (measure.sh, ab.sh, rewind-ab.sh, aot.sh, aot-install-test.sh, threadcpu.py,
+  jfrsum.py, viewer.py, rewind_rec.py). Keep test jars, logs and recordings in `/dev/shm` on the bench.
