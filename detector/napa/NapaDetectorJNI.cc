@@ -559,12 +559,11 @@ JNIEXPORT jdoubleArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_poseSqu
   for (int s = 0; s < 2; s++) {
     double *o = out + 13 * s;
     for (int i = 0; i < 3; i++) o[i] = ps[s]->t[i];
-    // the homography frame (x right, y up, z out of the tag) -> AprilTag's (y down, z into the tag): R diag(1,-1,-1)
-    for (int r = 0; r < 3; r++) {
-      o[3 + r * 3 + 0] = ps[s]->R[r * 3 + 0];
-      o[3 + r * 3 + 1] = -ps[s]->R[r * 3 + 1];
-      o[3 + r * 3 + 2] = -ps[s]->R[r * 3 + 2];
-    }
+    // Already AprilTag's tag frame: the corners come in AprilTag's order and pose.c pairs corner i with the same
+    // object point AprilTag's estimate_tag_pose does ((-s/2, s/2), (s/2, s/2), (s/2, -s/2), (-s/2, -s/2): x right,
+    // y down, z into the tag). (photonvision-108 to -115 flipped it by diag(1,-1,-1): published rotations were
+    // 180 degrees off against WPILib's orthogonal iteration, and TagQuality's reprojection read about a tag side.)
+    for (int i = 0; i < 9; i++) o[3 + i] = ps[s]->R[i];
     o[12] = ps[s]->err;
   }
   jdoubleArray arr = env->NewDoubleArray(26);

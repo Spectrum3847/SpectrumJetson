@@ -1,0 +1,199 @@
+diff --git a/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java b/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java
+index d136b61a..50d48ee0 100644
+--- a/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java
++++ b/photon-core/src/main/java/org/photonvision/common/dataflow/networktables/NTDataPublisher.java
+@@ -275,7 +275,11 @@ public class NTDataPublisher implements CVPipelineResultConsumer {
+                     NetworkTablesManager.getInstance().getTimeSinceLastPong());
+         if (nativePub == null || !nativePub.active()) ts.resultPublisher.set(simplified, 1024);
+         // photonvision-79: the same result into the open Rewind recording's vision log.
+-        org.photonvision.rewind.VisionLog.result(rewindCamera, simplified, nowNanos);
++        // (fast path: the native results go to the vision log instead, with their own sequence IDs and
++        // quality; NativePublish drains them)
++        if (nativePub == null || !nativePub.active())
++            org.photonvision.rewind.VisionLog.result(rewindCamera, simplified, nowNanos);
++        if (nativePub != null) nativePub.rewindCamera = rewindCamera;
+         if (ConfigProvider.getInstance().getConfig().getNetworkConfig().shouldPublishProto) {
+             ts.protoResultPublisher.set(simplified);
+         }
+diff --git a/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java b/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
+index 10e33f2a..76741603 100644
+--- a/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
++++ b/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
+@@ -114,6 +114,14 @@ public final class NapaDetectorJNI {
+      */
+     public static native void setNativeQualityPub(long handle, int pub);
+ 
++    /**
++     * Spectrum (sc/mjpeg-napa): the results this camera's native publish sent since the last call,
++     * for Rewind's vision log: each [publish time ns (8 bytes LE)][quality count (4)][quality
++     * doubles][the serialized result]. Calling it turns the collection on (off 1 s after the last
++     * call). Null if none.
++     */
++    public static native byte[][] drainNativeResults(long handle);
++
+     /**
+      * Spectrum (sc/mjpeg-napa): this camera's frame policy for streamed frames: decode scale 1, 2 or
+      * 4, every fullEvery-th processed frame at full scale (0: never), process 1 frame in
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/VisionLog.java b/photon-core/src/main/java/org/photonvision/rewind/VisionLog.java
+index 69faf7b2..90b9610d 100644
+--- a/photon-core/src/main/java/org/photonvision/rewind/VisionLog.java
++++ b/photon-core/src/main/java/org/photonvision/rewind/VisionLog.java
+@@ -56,6 +56,8 @@ public final class VisionLog {
+ 
+     private static DataLog log;
+     private static final Map<String, RawLogEntry> results = new HashMap<>();
++    private static final Map<String, org.wpilib.datalog.DoubleArrayLogEntry> qualities =
++            new HashMap<>();
+     private static final Map<String, StructLogEntry<Pose3d>> poses = new HashMap<>();
+     private static IntegerLogEntry offsetEntry;
+     private static BooleanLogEntry connectedEntry;
+@@ -90,6 +92,7 @@ public final class VisionLog {
+         log.close();
+         log = null;
+         results.clear();
++        qualities.clear();
+         poses.clear();
+         lastOffset = null;
+         lastConnected = null;
+@@ -115,6 +118,31 @@ public final class VisionLog {
+         }
+     }
+ 
++    /** Whether a vision log is open (Rewind recording). */
++    public static synchronized boolean isOpen() {
++        return log != null;
++    }
++
++    /**
++     * Spectrum (sc/mjpeg-napa) fast path: a result the camera's streaming thread published itself, as
++     * sent (the serialized PhotonPipelineResult), with its tagQuality (photonvision-61; null or empty
++     * without tags), at its publish time (nowNs: NT clock). The same entries as {@link #result}, plus
++     * /camera/tagQuality.
++     */
++    public static synchronized void rawResult(
++            String camera, byte[] packet, double[] quality, long nowNs) {
++        if (log == null) return;
++        long nowUs = nowNs / 1000;
++        results
++                .computeIfAbsent(camera, c -> new RawLogEntry(log, "/" + c + "/result", "", RESULT_TYPE))
++                .append(packet, nowUs);
++        if (quality != null && quality.length > 0)
++            qualities
++                    .computeIfAbsent(
++                            camera, c -> new org.wpilib.datalog.DoubleArrayLogEntry(log, "/" + c + "/tagQuality"))
++                    .append(quality, nowUs);
++    }
++
+     /** From Rewind's tick: the link to the robot, logged when it changes (nanosecond arguments). */
+     static synchronized void robot(
+             long nowNs, boolean connected, long offsetNs, String mode, String match) {
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+index ba951c2f..d54dc55c 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+@@ -83,6 +83,8 @@ public final class NativePublish {
+     private org.wpilib.networktables.NetworkTableInstance ownInst;
+     private org.wpilib.networktables.RawPublisher ownPub;
+     private org.wpilib.networktables.DoubleArrayPublisher ownQualityPub;
++    // Rewind's folder name for this camera (from NTDataPublisher)
++    public volatile String rewindCamera;
+     // the tagQuality publisher the native side sends each result's quality on (0: none)
+     public volatile int qualityHandle = 0;
+     private String ownTopic, ownServer;
+@@ -149,6 +151,13 @@ public final class NativePublish {
+     private String policyDir;
+     private volatile long scaledFrames = 0;
+ 
++    private volatile int[] activePolicy = {1, 0, 1};
++
++    /** The frame policy in force: {scale, fullEvery, processEvery}. */
++    public int[] activePolicy() {
++        return activePolicy;
++    }
++
+     /** Frames decoded at a reduced scale so far. */
+     public long scaledFrames() {
+         return scaledFrames;
+@@ -268,6 +277,26 @@ public final class NativePublish {
+         } catch (UnsatisfiedLinkError e) {
+             // an older NAPA library: first-sight stamps only
+         }
++        // Rewind: while it records, the native results (with their quality) go into its vision log
++        String cam = rewindCamera;
++        if (cam != null && org.photonvision.rewind.VisionLog.isOpen()) {
++            try {
++                byte[][] items = org.photonvision.jni.NapaDetectorJNI.drainNativeResults(napaHandle);
++                if (items != null)
++                    for (byte[] it : items) {
++                        var bb = java.nio.ByteBuffer.wrap(it).order(java.nio.ByteOrder.LITTLE_ENDIAN);
++                        long t = bb.getLong();
++                        int nq = bb.getInt();
++                        double[] q = new double[nq];
++                        for (int i = 0; i < nq; i++) q[i] = bb.getDouble();
++                        byte[] packet = new byte[bb.remaining()];
++                        bb.get(packet);
++                        org.photonvision.rewind.VisionLog.rawResult(cam, packet, q, t);
++                    }
++            } catch (UnsatisfiedLinkError e) {
++                // an older NAPA library
++            }
++        }
+         try {
+             org.photonvision.jni.NapaDetectorJNI.setNativeQualityPub(napaHandle, qualityHandle);
+         } catch (UnsatisfiedLinkError e) {
+@@ -275,6 +304,7 @@ public final class NativePublish {
+         }
+         try {
+             int[] pol = policy();
++            activePolicy = pol;
+             scaledFrames =
+                     org.photonvision.jni.NapaDetectorJNI.setNativePolicy(napaHandle, pol[0], pol[1], pol[2]);
+         } catch (UnsatisfiedLinkError e) {
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java b/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
+index a38c8387..5f623fc2 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
+@@ -58,6 +58,9 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+     private String publishedName = null;
+     private DoublePublisher fps, pipelineMs, pipelineMsMax, latencyMs;
+     private IntegerPublisher frames, failures, recoveryCount, heartbeat, lastFrameAge;
++    // Spectrum (sc/mjpeg-napa): the frame policy in force (fast path) and frames decoded reduced so
++    // far
++    private IntegerPublisher policyScale, policyFullEvery, policyProcessEvery, scaledFrames;
+     private long beats = 0;
+ 
+     private long windowStartNs = 0, total = 0, nativeAtWindowStart = -1;
+@@ -162,6 +165,11 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+             nativeAtWindowStart = pub;
+             latencyMs.set(nativePub.latencyMs());
+             frames.set(pub);
++            int[] pol = nativePub.activePolicy();
++            policyScale.set(pol[0]);
++            policyFullEvery.set(pol[1]);
++            policyProcessEvery.set(pol[2]);
++            scaledFrames.set(nativePub.scaledFrames());
+         } else {
+             nativeAtWindowStart = -1;
+             fps.set(count / window);
+@@ -189,6 +197,10 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+             frames.close();
+             failures.close();
+             recoveryCount.close();
++            policyScale.close();
++            policyFullEvery.close();
++            policyProcessEvery.close();
++            scaledFrames.close();
+             problemPub.close();
+             statePub.close();
+             heartbeat.close();
+@@ -211,6 +223,10 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+         frames = t.getIntegerTopic("frames").publish();
+         failures = t.getIntegerTopic("decodeFailures").publish();
+         recoveryCount = t.getIntegerTopic("recoveries").publish();
++        policyScale = t.getIntegerTopic("scale").publish();
++        policyFullEvery = t.getIntegerTopic("fullEvery").publish();
++        policyProcessEvery = t.getIntegerTopic("processEvery").publish();
++        scaledFrames = t.getIntegerTopic("scaledFrames").publish();
+         problemPub = t.getStringTopic("problem").publish();
+         publishedName = name;
+     }
