@@ -397,68 +397,6 @@ void mjdec_idct_fast(const int32_t *blk, uint8_t *out, int stride) {
 }
 
 // What ISLOW gives a block with only a DC term: pass 1 makes every column (dc << 2), pass 2 descales by 5.
-// Only row 0 has coefficients (horizontal frequencies): ISLOW's pass 1 gives every column (in[0][c] << 2) in all
-// rows, so all 8 output rows equal pass 2 of that one workspace row. Exact (the same integer arithmetic).
-static void idct_row_only(const int32_t *blk, uint8_t *out, int stride) {
-  int32_t w[8];
-  for (int c = 0; c < 8; c++) w[c] = blk[c] * 4;
-  int32_t z1, z2, z3, z4, z5, tmp0, tmp1, tmp2, tmp3, tmp10, tmp11, tmp12, tmp13;
-  z2 = w[2], z3 = w[6];
-  z1 = (z2 + z3) * FIX_0_541196100;
-  tmp2 = z1 + z3 * -FIX_1_847759065;
-  tmp3 = z1 + z2 * FIX_0_765366865;
-  tmp0 = (w[0] + w[4]) * (1 << 13);
-  tmp1 = (w[0] - w[4]) * (1 << 13);
-  tmp10 = tmp0 + tmp3, tmp13 = tmp0 - tmp3, tmp11 = tmp1 + tmp2, tmp12 = tmp1 - tmp2;
-  tmp0 = w[7], tmp1 = w[5], tmp2 = w[3], tmp3 = w[1];
-  z1 = tmp0 + tmp3, z2 = tmp1 + tmp2, z3 = tmp0 + tmp2, z4 = tmp1 + tmp3;
-  z5 = (z3 + z4) * FIX_1_175875602;
-  tmp0 *= FIX_0_298631336, tmp1 *= FIX_2_053119869, tmp2 *= FIX_3_072711026, tmp3 *= FIX_1_501321110;
-  z1 *= -FIX_0_899976223, z2 *= -FIX_2_562915447, z3 *= -FIX_1_961570560, z4 *= -FIX_0_390180644;
-  z3 += z5, z4 += z5;
-  tmp0 += z1 + z3, tmp1 += z2 + z4, tmp2 += z2 + z3, tmp3 += z1 + z4;
-  const int R = 1 << 17;
-  uint8_t o[8];
-  o[0] = clamp8(((tmp10 + tmp3 + R) >> 18) + 128);
-  o[7] = clamp8(((tmp10 - tmp3 + R) >> 18) + 128);
-  o[1] = clamp8(((tmp11 + tmp2 + R) >> 18) + 128);
-  o[6] = clamp8(((tmp11 - tmp2 + R) >> 18) + 128);
-  o[2] = clamp8(((tmp12 + tmp1 + R) >> 18) + 128);
-  o[5] = clamp8(((tmp12 - tmp1 + R) >> 18) + 128);
-  o[3] = clamp8(((tmp13 + tmp0 + R) >> 18) + 128);
-  o[4] = clamp8(((tmp13 - tmp0 + R) >> 18) + 128);
-  uint64_t v;
-  memcpy(&v, o, 8);
-  for (int r = 0; r < 8; r++) memcpy(out + (size_t)r * stride, &v, 8);
-}
-
-// Only column 0 has coefficients (vertical frequencies): pass 1 of column 0, and each output row is then a
-// constant (pass 2 of a row with only a DC term). Exact.
-static void idct_col_only(const int32_t *blk, uint8_t *out, int stride) {
-  const int32_t *in = blk;
-  int32_t z1, z2, z3, z4, z5, tmp0, tmp1, tmp2, tmp3, tmp10, tmp11, tmp12, tmp13, ws[8];
-  z2 = in[16], z3 = in[48];
-  z1 = (z2 + z3) * FIX_0_541196100;
-  tmp2 = z1 + z3 * -FIX_1_847759065;
-  tmp3 = z1 + z2 * FIX_0_765366865;
-  z2 = in[0], z3 = in[32];
-  tmp0 = (z2 + z3) * (1 << 13);
-  tmp1 = (z2 - z3) * (1 << 13);
-  tmp10 = tmp0 + tmp3, tmp13 = tmp0 - tmp3, tmp11 = tmp1 + tmp2, tmp12 = tmp1 - tmp2;
-  tmp0 = in[56], tmp1 = in[40], tmp2 = in[24], tmp3 = in[8];
-  z1 = tmp0 + tmp3, z2 = tmp1 + tmp2, z3 = tmp0 + tmp2, z4 = tmp1 + tmp3;
-  z5 = (z3 + z4) * FIX_1_175875602;
-  tmp0 *= FIX_0_298631336, tmp1 *= FIX_2_053119869, tmp2 *= FIX_3_072711026, tmp3 *= FIX_1_501321110;
-  z1 *= -FIX_0_899976223, z2 *= -FIX_2_562915447, z3 *= -FIX_1_961570560, z4 *= -FIX_0_390180644;
-  z3 += z5, z4 += z5;
-  tmp0 += z1 + z3, tmp1 += z2 + z4, tmp2 += z2 + z3, tmp3 += z1 + z4;
-  ws[0] = (tmp10 + tmp3 + (1 << 10)) >> 11, ws[7] = (tmp10 - tmp3 + (1 << 10)) >> 11;
-  ws[1] = (tmp11 + tmp2 + (1 << 10)) >> 11, ws[6] = (tmp11 - tmp2 + (1 << 10)) >> 11;
-  ws[2] = (tmp12 + tmp1 + (1 << 10)) >> 11, ws[5] = (tmp12 - tmp1 + (1 << 10)) >> 11;
-  ws[3] = (tmp13 + tmp0 + (1 << 10)) >> 11, ws[4] = (tmp13 - tmp0 + (1 << 10)) >> 11;
-  for (int r = 0; r < 8; r++) memset(out + (size_t)r * stride, clamp8(((ws[r] + 16) >> 5) + 128), 8);
-}
-
 static inline void fill_dc(int32_t dq, uint8_t *out, int stride) {
   int v = (((dq * 4) + 16) >> 5) + 128;
   uint8_t p = clamp8(v);
@@ -644,11 +582,9 @@ static int decode_interval(mjdec *d, int end) {
               fill_dc(blk[0], o, d->stride);
               d->st_dc++;
             } else {
-              int wide = 0, rows = 0, cols = 0;  // coefficients in rows/cols 4-7? any row > 0? any col > 0?
-              for (int i = 0; i < n; i++) wide |= nz[i] & 0x24, rows |= nz[i] & 0x38, cols |= nz[i] & 7;
-              if (!rows) idct_row_only(blk, o, d->stride);
-              else if (!cols) idct_col_only(blk, o, d->stride);
-              else if (wide) IDCT(blk, o, d->stride);
+              int wide = 0;  // any coefficient in rows 4-7 or columns 4-7?
+              for (int i = 0; i < n; i++) wide |= nz[i] & 0x24;
+              if (wide) IDCT(blk, o, d->stride);
               else IDCT4(blk, o, d->stride);
               for (int i = 0; i < n; i++) blk[nz[i]] = 0;
             }
