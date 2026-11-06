@@ -29,9 +29,17 @@ SCMN_HAVE_LOCK=1 "$HERE/pvmulti.sh" "$OUT" "$SECS"
 sudo systemctl stop photonvision
 sudo python3 "$HERE/pvdb.py" restore "$BK" "$DB"
 rc=$?
-# the Swyft stores controls in flash: write its exposure back only if the run changed it
-now=$(v4l2-ctl -d "$SW" -C exposure_time_absolute 2>/dev/null | awk '{print $2}')
-if [[ -n $sw_exp0 && -n $now && $now != "$sw_exp0" ]]; then
+# the Swyft stores controls in flash: write its exposure back only if the run changed it. The node comes back a
+# moment after pvmulti.sh reloads the stock uvcvideo, so wait for it (a silent miss left 300 in place once).
+now=""
+for _ in $(seq 20); do
+  now=$(v4l2-ctl -d "$SW" -C exposure_time_absolute 2>/dev/null | awk '{print $2}')
+  [[ -n $now ]] && break
+  sleep 0.5
+done
+if [[ -z $sw_exp0 || -z $now ]]; then
+  echo "WARNING: could not read the Swyft's exposure (before '$sw_exp0', after '$now'): check it by hand" >&2
+elif [[ $now != "$sw_exp0" ]]; then
   v4l2-ctl -d "$SW" -c exposure_time_absolute="$sw_exp0" && echo "Swyft exposure restored $now -> $sw_exp0"
 fi
 [[ $was == active ]] && sudo systemctl start photonvision

@@ -64,7 +64,7 @@ for s in ${SCALES:-}; do
     grep -v -E '^NT:|topic /photon' >"$OUT/scale$s.nt"
   wait
   echo "== swyft input/scale = $s"
-  grep -E "publishing|results in|capture ->|^  id |tagQuality" "$OUT/scale$s.nt"
+  grep -E "publishing|results in|capture ->|^  id |tagQuality|health/" "$OUT/scale$s.nt"
   sed -n 2,4p "$OUT/scale$s.cpu"
 done
 [[ -n ${SCALES:-} ]] && sudo journalctl -u photonvision --since "-60 s" --no-pager | grep -i -E "scale|policy" | tail -5 | cut -c1-220

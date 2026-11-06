@@ -333,8 +333,9 @@ int main(int argc, char **argv) {
     double am = 0;
     for (double a : ang) am += a * a;
     am = ang.empty() ? 0 : std::sqrt(am / ang.size());
-    std::printf("  id %-3d %6.1f%%  %6.1f  %7.4f (%6.2f)  %8.3f  %8.3f\n", kv.first, 100.0 * v["range"].size() / std::max(1L, n),
-                side, rm, 1000 * rs, am, Pct(v["amb"], .5));
+    std::printf("  id %-3d %6.1f%%  %6.1f  %7.4f (%6.2f)  %8.3f  %8.3f   mean q (w,x,y,z) %.4f %.4f %.4f %.4f\n", kv.first,
+                100.0 * v["range"].size() / std::max(1L, n), side, rm, 1000 * rs, am, Pct(v["amb"], .5), qm[0] / qn,
+                qm[1] / qn, qm[2] / qn, qm[3] / qn);
   }
   for (auto &kv : fields) {
     double m = 0, s = 0;
@@ -349,7 +350,8 @@ int main(int argc, char **argv) {
     for (auto &kv : first)
       if (kv.first.rfind("targets[0]", 0) != 0) std::printf("  %s = %.6f\n", kv.first.c_str(), kv.second);
   }
-  for (const char *t : {"heartbeat", "latencyMillis", "hasTarget", "targetYaw", "targetPitch", "targetArea",
+  for (const char *t : {"health/scale", "health/fullEvery", "health/processEvery", "health/scaledFrames", "health/fps",
+                        "heartbeat", "latencyMillis", "hasTarget", "targetYaw", "targetPitch", "targetArea",
                         "version", "photonVersion", "remoteVersion"}) {
     auto e = inst.GetEntry(base + t).GetValue();
     if (!e) continue;
