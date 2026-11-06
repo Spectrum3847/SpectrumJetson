@@ -10,10 +10,11 @@ first data URB, first-packet time estimate, EOF URB and the vb2 done / dequeue e
 """
 import re, sys
 
-URB = re.compile(r'\s(\d+\.\d+): xhci_urb_giveback: ep(\d+)in-isoc: urb \S+ pipe \d+ slot (\d+) length (\d+)/(\d+)')
+URB = re.compile(r'\s(\d+\.\d+): xhci_urb_giveback: (?:\S+ )?ep(\d+)in-isoc: urb \S+ pipe \d+ slot (\d+) length (\d+)/(\d+)')
 DONE = re.compile(r'\[(\d+)\].*\s(\d+\.\d+): vb2_buf_done: owner = \S+, queued = \d+, owned_by_drv = \d+, index = (\d+), type = \d+, bytesused = (\d+), timestamp = (\d+)')
 DQ = re.compile(r'\s(\d+\.\d+): v4l2_dqbuf: minor = (\d+), index = (\d+), .*bytesused = (\d+), .*timestamp = (\d+), .*sequence = (\d+)')
 HDR = 12
+PSIZE = int(__import__('os').environ.get('KTRACE_PSIZE', '1280'))  # max packet: 1280 Jetson capped driver, 1600 SystemCore
 
 def ns(s):
     a, b = s.split('.')
@@ -87,7 +88,7 @@ def frames(urbs, dones, dqs, slotmap=None):
         j0 = min((j for j in (i - 1, i) if 0 <= j <= je), key=lambda j: abs(ts[j] - d['ts']), default=None)
         if j0 is None or ts[je] - ts[j0] > 20_000_000:
             continue
-        npk = max(1, L[j0]['length'] // 1280)
+        npk = max(1, L[j0]['length'] // PSIZE)
         # first data packet: count the new frame's packets in that URB from its bytes (~1 KB each)
         hdr_only = npk * HDR
         head_pk = 0

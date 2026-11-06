@@ -1,0 +1,20 @@
+#!/bin/bash
+# Which vision program owns the SystemCore's camera (only one process can open it).
+#   sc-vision photonvision   PhotonVision fork (stops Limelight's visionserver: the unit Conflicts= it)
+#   sc-vision native         sc-vision native app (native/sc-vision), if installed
+#   sc-vision limelight      Limelight's own visionserver (stops the others)
+#   sc-vision off            none of them (camera free for tests)
+#   sc-vision status
+# Takes /tmp/camera.lock briefly so it never switches under a running camera test.
+set -euo pipefail
+units=(photonvision sc-vision-native limelight_visionserver)
+stop_all() { for u in "${units[@]}"; do sudo systemctl stop "$u" 2>/dev/null || true; done; }
+case ${1:-status} in
+  photonvision) flock -w 30 /tmp/camera.lock true; stop_all; sudo systemctl start photonvision ;;
+  native) flock -w 30 /tmp/camera.lock true; stop_all; sudo systemctl start sc-vision-native ;;
+  limelight) flock -w 30 /tmp/camera.lock true; stop_all; sudo systemctl start limelight_visionserver ;;
+  off) stop_all ;;
+  status) ;;
+  *) echo "usage: sc-vision photonvision|native|limelight|off|status" >&2; exit 2 ;;
+esac
+for u in "${units[@]}"; do printf '%-24s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || true)"; done
