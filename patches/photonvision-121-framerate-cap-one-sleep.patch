@@ -1,0 +1,20 @@
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/FrameRateCap.java b/photon-core/src/main/java/org/photonvision/vision/processes/FrameRateCap.java
+index 6eef1446..9a3ecb77 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/FrameRateCap.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/FrameRateCap.java
+@@ -85,9 +85,12 @@ public final class FrameRateCap {
+                 nextDueNanos += period;
+                 return true;
+             }
+-            try {
+-                Thread.sleep(Math.max(1, Math.min(5, wait / 1_000_000)), 0);
+-            } catch (InterruptedException e) {
++            // Spectrum (pv-perf): one sleep to the due time. It slept in 1-5 ms slices (rounded to whole
++            // ms): ~8 wake-ups a frame at the fast path's 30 fps Java cap. Idle mode can end while we
++            // sleep (its period is up to 200 ms), so it keeps 5 ms slices to notice that quickly.
++            long slice = idle > 0 ? Math.min(wait, 5_000_000L) : wait;
++            java.util.concurrent.locks.LockSupport.parkNanos(slice);
++            if (Thread.interrupted()) {
+                 Thread.currentThread().interrupt();
+                 return false;
+             }

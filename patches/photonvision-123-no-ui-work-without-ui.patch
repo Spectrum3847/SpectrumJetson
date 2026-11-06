@@ -1,0 +1,62 @@
+diff --git a/photon-core/src/main/java/org/photonvision/common/dataflow/websocket/UIDataPublisher.java b/photon-core/src/main/java/org/photonvision/common/dataflow/websocket/UIDataPublisher.java
+index 7257fd1f..f7ed5060 100644
+--- a/photon-core/src/main/java/org/photonvision/common/dataflow/websocket/UIDataPublisher.java
++++ b/photon-core/src/main/java/org/photonvision/common/dataflow/websocket/UIDataPublisher.java
+@@ -47,6 +47,8 @@ public class UIDataPublisher implements CVPipelineResultConsumer {
+ 
+         // only update the UI at 10hz
+         if (lastUIResultUpdateTime + 1000.0 / 10.0 > now) return;
++        // Spectrum (pv-perf): no web UI open, nobody to send it to
++        if (org.photonvision.vision.processes.ClockThrottle.uiClients() == 0) return;
+ 
+         Map<String, Object> dataMap = new HashMap<>();
+         dataMap.put("sequenceID", result.sequenceID);
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/ClockThrottle.java b/photon-core/src/main/java/org/photonvision/vision/processes/ClockThrottle.java
+index c401ca46..bb27132a 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/ClockThrottle.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/ClockThrottle.java
+@@ -185,6 +185,11 @@ public final class ClockThrottle {
+         if (n > 0) wake();
+     }
+ 
++    /** Spectrum (pv-perf): web UI websocket clients now; UI-only work is skipped while 0. */
++    public static int uiClients() {
++        return uiClients;
++    }
++
+     /**
+      * photonvision-99: the frame period while deep idle (0 when not): IdleMode caps every camera to
+      * DEEP_FPS. Cleared before the clocks come back, so the full rate is back within 5 ms of a robot
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionSourceManager.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionSourceManager.java
+index a6028ffe..dbd95159 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionSourceManager.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionSourceManager.java
+@@ -86,7 +86,15 @@ public class VisionSourceManager implements AutoCloseable {
+     public VisionModuleManager vmm = new VisionModuleManager();
+ 
+     public void registerTimedTasks() {
+-        TimedTaskManager.getInstance().addTask("CameraDeviceExplorer", this::pushUiUpdate, 1000);
++        // Spectrum (pv-perf): the once-a-second list is for the web UI (it enumerates every USB camera
++        // and serializes the list): only while a UI is open. A UI that connects gets it within 1 s.
++        TimedTaskManager.getInstance()
++                .addTask(
++                        "CameraDeviceExplorer",
++                        () -> {
++                            if (ClockThrottle.uiClients() > 0) pushUiUpdate();
++                        },
++                        1000);
+     }
+ 
+     /**
+diff --git a/photon-server/src/main/java/org/photonvision/server/DataSocketHandler.java b/photon-server/src/main/java/org/photonvision/server/DataSocketHandler.java
+index 635e993f..4dd43961 100644
+--- a/photon-server/src/main/java/org/photonvision/server/DataSocketHandler.java
++++ b/photon-server/src/main/java/org/photonvision/server/DataSocketHandler.java
+@@ -289,6 +289,7 @@ public class DataSocketHandler {
+     }
+ 
+     public void broadcastMessage(Object message, WsContext userToSkip) throws JsonException {
++        if (users.isEmpty()) return; // Spectrum (pv-perf): don't serialize for nobody
+         ByteBuffer b = ByteBuffer.wrap(msgpackJsonb.toJsonBytes(message));
+ 
+         if (userToSkip == null) {

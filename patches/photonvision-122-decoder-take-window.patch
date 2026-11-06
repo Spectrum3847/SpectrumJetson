@@ -1,0 +1,50 @@
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+index b89716da..40006dec 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+@@ -1292,6 +1292,17 @@ public class USBFrameProvider extends CpuImageProcessor {
+     private Thread decoder = null;
+     private volatile int decodeWidth, decodeHeight;
+     private volatile long lastTakenNs = 0;
++    private volatile long takePeriodNanos = 0;
++
++    /**
++     * Spectrum (pv-perf): the camera loop takes a frame at most every this many ns (its frame-rate
++     * cap: Tag FPS max, the FPS limit, the fast path's Java cap; 0 = every frame). The decoder thread
++     * then decodes only around the frames the loop takes, as it does for idle mode.
++     */
++    public void setTakePeriodNanos(long nanos) {
++        takePeriodNanos = Math.max(0, nanos);
++    }
++
+     private volatile boolean loggedAsync = false;
+ 
+     private CapturedFrame takeDecoded(int width, int height) {
+@@ -1367,7 +1378,11 @@ public class USBFrameProvider extends CpuImageProcessor {
+         while (true) {
+             // Spectrum (photonvision-98): and the SystemCore profile's frame rate cap, with a
+             // shorter lead (a quarter period), so a 20 ms period decodes one frame, not two
+-            long idle = IdleMode.periodNanos(), cap = SystemCoreProfile.minPeriodNanos();
++            // Spectrum (pv-perf): and the camera loop's own cap (Tag FPS max, the FPS limit, the fast
++            // path's 30 fps Java cap while native publish is on), so frames the loop won't take aren't
++            // grabbed from cscore (a ~0.2 MB copy each) or handed through the streaming decoder.
++            long idle = IdleMode.periodNanos(),
++                    cap = Math.max(SystemCoreProfile.minPeriodNanos(), takePeriodNanos);
+             long period = Math.max(idle, cap);
+             if (period == 0) return true;
+             long lead = idle >= cap ? DECODE_LEAD_NS : Math.min(DECODE_LEAD_NS, period / 4);
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
+index 7c8dd414..e5ce6645 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
+@@ -296,6 +296,10 @@ public class VisionRunner implements AutoCloseable {
+                             Math.max(
+                                     capNanos,
+                                     (long) (1e9 / org.photonvision.vision.pipe.impl.NativePublish.JAVA_FPS));
++                // Spectrum (pv-perf): the decoder thread decodes only around the frames taken
++                if (frameSupplier
++                        instanceof org.photonvision.vision.frame.provider.USBFrameProvider usbProvider)
++                    usbProvider.setTakePeriodNanos(capNanos);
+                 if (capNanos > 0) {
+                     if (!frameRateCap.await(capNanos)) return;
+                 } else if (IdleMode.active() && !IdleMode.waitForNextFrame(lastGrabNanos)) return;
