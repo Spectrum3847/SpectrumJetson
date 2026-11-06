@@ -18,19 +18,30 @@ if [[ ${SCMN_HAVE_LOCK:-0} != 1 ]]; then  # pvboth.sh holds it around the DB edi
   flock -w 300 9 || { echo "camera lock busy" >&2; exit 1; }
 fi
 was=$(systemctl is-active photonvision)
+# Our uvcvideo may already be loaded at boot (sc-uvcvideo.service): then leave the driver alone.
+ours_at_start=0
+[[ -e /sys/module/uvcvideo/parameters/urb_packets ]] && ours_at_start=1
 cleanup() {
   sudo systemctl stop photonvision
   sudo rm -f "$DROP"
   sudo systemctl daemon-reload
   sudo sh -c "echo 0 > $T/tracing_on; echo 0 > $T/events/enable; echo > $T/trace; echo local > $T/trace_clock"
-  SC_VISION_HAVE_LOCK=1 bash "$LOAD" stock
+  ((ours_at_start)) || SC_VISION_HAVE_LOCK=1 bash "$LOAD" stock
   [[ $was == active ]] && sudo systemctl start photonvision
 }
 trap cleanup EXIT
 sudo systemctl stop photonvision
-SC_VISION_HAVE_LOCK=1 bash "$LOAD" urb 2
-printf '[Service]\nEnvironment=SPECTRUM_JPEG_DECODER=stream\nEnvironment=SPECTRUM_NAPA_STREAM=1\nEnvironment=SPECTRUM_STREAM_DECODER=mjdec\nEnvironment=SPECTRUM_NATIVE_PUBLISH=%s\n' "${NATIVE:-1}" |
-  sudo tee "$DROP" >/dev/null
+((ours_at_start)) || SC_VISION_HAVE_LOCK=1 bash "$LOAD" urb 2
+# MODE: native = PV as installed (native cameras, no tester drop-in) | fast = SPECTRUM_NATIVE_CAMERA=0 + stream
+# decoder + mjdec + streaming NAPA + native publish (NATIVE=0: Java publish) | java = native camera and publish off
+case ${MODE:-fast} in
+  native) DROPTXT="" ;;
+  fast) DROPTXT=$(printf '[Service]\nEnvironment=SPECTRUM_NATIVE_CAMERA=0\nEnvironment=SPECTRUM_JPEG_DECODER=stream\nEnvironment=SPECTRUM_NAPA_STREAM=1\nEnvironment=SPECTRUM_STREAM_DECODER=mjdec\nEnvironment=SPECTRUM_NATIVE_PUBLISH=%s\n' "${NATIVE:-1}") ;;
+  java) DROPTXT=$(printf '[Service]\nEnvironment=SPECTRUM_NATIVE_CAMERA=0\nEnvironment=SPECTRUM_NATIVE_PUBLISH=0\n') ;;
+  *) echo "MODE native|fast|java" >&2; exit 2 ;;
+esac
+[[ -n $DROPTXT ]] && echo "$DROPTXT" | sudo tee "$DROP" >/dev/null
+echo "MODE ${MODE:-fast}; uvcvideo urb_packets $(cat /sys/module/uvcvideo/parameters/urb_packets 2>/dev/null || echo stock)"
 sudo systemctl daemon-reload
 echo "governor $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor); under-voltage $(sudo dmesg | grep -c 'Undervoltage detected'); drop-ins: $(ls /etc/systemd/system/photonvision.service.d/ | tr '\n' ' ')"
 grep -h Environment /etc/systemd/system/photonvision.service.d/*.conf | tr '\n' ' '
