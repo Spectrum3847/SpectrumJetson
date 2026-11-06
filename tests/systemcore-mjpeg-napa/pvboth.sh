@@ -19,6 +19,7 @@ note "PV DB EDIT START $(date +%T) (tester, holding /tmp/camera.lock): backup $B
 sudo systemctl stop photonvision
 sudo python3 "$HERE/pvdb.py" backup "$DB" "$BK" || { note "PV DB EDIT ABORTED $(date +%T): backup/integrity failed, DB untouched"; exit 1; }
 sudo python3 "$HERE/pvdb.py" activate "$DB" thrifty swyft
+[[ -n ${MINTAG:-} ]] && sudo python3 "$HERE/pvdb.py" mintag "$DB" "$MINTAG"  # same min_tag on both cameras
 SCMN_HAVE_LOCK=1 "$HERE/pvmulti.sh" "$OUT" "$SECS"
 sudo systemctl stop photonvision
 sudo python3 "$HERE/pvdb.py" restore "$BK" "$DB"

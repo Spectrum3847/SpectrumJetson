@@ -3,6 +3,7 @@
   pvdb.py backup DB BACKUP      SQLite backup API copy + integrity_check of both
   pvdb.py activate DB [NAME..]  set "deactivated": false for the named cameras (nicknames; default all)
   pvdb.py restore BACKUP DB     SQLite backup API copy back + integrity_check
+  pvdb.py mintag DB N           napaMinTagPx = N in every camera's NAPA pipelines
   pvdb.py show DB               nickname, deactivated, per camera
 """
 import json
@@ -52,6 +53,28 @@ elif cmd == "activate":
     db.close()
     check(sys.argv[2])
     show(sys.argv[2])
+elif cmd == "mintag":  # pvdb.py mintag DB N: napaMinTagPx = N in every NAPA AprilTag pipeline of every camera
+    n = int(sys.argv[3])
+    db = sqlite3.connect(sys.argv[2])
+    for uniq, contents in db.execute("select unique_name, contents from cameras").fetchall():
+        c = json.loads(contents)
+        key = "pipelineSettings" if "pipelineSettings" in c else "pipelines"
+        out = []
+        for p in c.get(key, []):
+            wrapped = isinstance(p, list) and len(p) == 2
+            s = p[1] if wrapped else p
+            as_str = isinstance(s, str)
+            d = json.loads(s) if as_str else s
+            if isinstance(d, dict) and "napaMinTagPx" in d:
+                d["napaMinTagPx"] = n
+                print(f"  {c.get('nickname')}: pipeline {d.get('pipelineIndex')} {d.get('pipelineNickname')} napaMinTagPx = {n}")
+            s = json.dumps(d) if as_str else d
+            out.append([p[0], s] if wrapped else s)
+        c[key] = out
+        db.execute("update cameras set contents = ? where unique_name = ?", (json.dumps(c), uniq))
+    db.commit()
+    db.close()
+    check(sys.argv[2])
 elif cmd == "show":
     show(sys.argv[2])
 else:
