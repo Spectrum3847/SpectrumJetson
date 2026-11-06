@@ -23,7 +23,7 @@ trig=$(grep -o '\[[^]]*\]' "$led/trigger" | tr -d '[]')
 restore() { echo "$trig" | sudo tee "$led/trigger" >/dev/null; }
 trap restore EXIT
 echo none | sudo tee "$led/trigger" >/dev/null
-v4l2-ctl -d "$dev" -c auto_exposure=1,exposure_time_absolute="$exp",gain=128
+v4l2-ctl -d "$dev" -c auto_exposure=1,exposure_time_absolute="$exp",gain="${GAIN:-128}"
 if [[ ${LOCATE:-0} == 1 ]]; then
   # Aiming aid: 1 s with the LED steadily on, 1 s off (on.mjpeg / off.mjpeg); led_analyze.py --locate finds it.
   echo 1 | sudo tee "$led/brightness" >/dev/null
