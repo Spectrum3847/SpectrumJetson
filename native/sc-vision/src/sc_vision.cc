@@ -275,7 +275,10 @@ int main(int argc, char **argv) {
     else if (a == "--name") cam_name = nx();
     else if (a == "--mid-offset-ms") mid_offset_ms = atof(nx());  // first packet -> mid-exposure
     else if (a == "--no-refine") pose_refine = 0;
-    else if (a == "--serial") cam_serial = nx();  // which camera: USB serial (e.g. SJ-05)
+    else if (a == "--usb") {  // camera model VID:PID (hex), default 1bcf:28c5 (Thriftiest); Swyft: 0bda:3035
+      unsigned v = 0, p = 0;
+      if (sscanf(nx(), "%x:%x", &v, &p) == 2) uc.vid = (int)v, uc.pid = (int)p;
+    } else if (a == "--serial") cam_serial = nx();  // which camera: USB serial (e.g. SJ-05)
     else if (a == "--port") cam_port = nx();      // or USB port (sysfs name, e.g. 3-1)
     else if (a == "--force") uc.force = 1;     // take the camera even if its /dev/video node is open
     else if (a == "--lock") lock_path = nx();  // hold this flock (e.g. /tmp/camera.lock) while running
@@ -302,12 +305,12 @@ int main(int argc, char **argv) {
   uvc_select(cam_serial, cam_port);
   // Controls first, through uvcvideo (they stay in the camera after we detach it).
   if (exposure > 0) {
-    uvc_v4l2_set(0, 0, V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_MANUAL);
-    if (uvc_v4l2_set(0, 0, V4L2_CID_EXPOSURE_ABSOLUTE, exposure)) fprintf(stderr, "exposure: not set\n");
+    uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_MANUAL);
+    if (uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_EXPOSURE_ABSOLUTE, exposure)) fprintf(stderr, "exposure: not set\n");
   }
-  if (gain > 0 && uvc_v4l2_set(0, 0, V4L2_CID_GAIN, gain)) fprintf(stderr, "gain: not set\n");
-  if (gamma > 0 && uvc_v4l2_set(0, 0, V4L2_CID_GAMMA, gamma)) fprintf(stderr, "gamma: not set\n");
-  if (backlight >= 0 && uvc_v4l2_set(0, 0, V4L2_CID_BACKLIGHT_COMPENSATION, backlight))
+  if (gain > 0 && uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_GAIN, gain)) fprintf(stderr, "gain: not set\n");
+  if (gamma > 0 && uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_GAMMA, gamma)) fprintf(stderr, "gamma: not set\n");
+  if (backlight >= 0 && uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_BACKLIGHT_COMPENSATION, backlight))
     fprintf(stderr, "backlight compensation: not set\n");
   mlockall(MCL_CURRENT | MCL_FUTURE);
   if (cpu >= 0) {
