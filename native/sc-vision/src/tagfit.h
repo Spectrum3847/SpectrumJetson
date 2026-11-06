@@ -23,8 +23,20 @@ typedef struct {
   double max_cell_px;  // skip tags whose mean cell side is larger (0: no limit), e.g. far tags only
   int fit_bias;        // 1 (default): estimate the black-shrink bias with the geometry
   int samples_max;     // most samples along one cell edge (default 3)
-  double sample_px;    // one sample per this many pixels of cell edge (default 3)
+  double sample_px;    // interior: one sample per this many px of cell edge (default 99: one per segment)
   int pose;            // 1: fit a rigid 6-DoF pose (needs cam) instead of the 8-DoF homography (default 0)
+  double outline_px;   // outline sample spacing in px (default 3; 0: as interior edges)
+  int bias_axes;       // 1: separate bias for the tag's vertical and horizontal edges (anisotropic blur)
+  int edges;           // 0 all edges, 1 outline only, 2 interior only (diagnostics)
+  int fit_kappa;       // diagnostic: also fit kappa, how far (cells) the border's inner edge sits inward
+  int max_samples;     // edge samples per pass at most (0: no cap); interior edges thin out first
+  double branch_amb;   // pose fit: also fit IPPE's other solution when ambiguity exceeds this (0: never)
+  int seg_mode;        // 0 all edge segments, 1 the outline only, 2 the outline + the border's inner edges
+  int max_segments;    // keep at most this many unit edge segments (0: all): the outline, then the border's
+                       // inner edges, then the rest by distance from the centre and same-colour run length
+  double lobe_cells;   // gradient lobe at most this many cells either side of its peak (0: no limit)
+  int min_run;         // skip interior edges with a same-colour run shorter than this (cells) on either side...
+  double min_run_below;  // ...on tags whose cells are smaller than this (px)
 } tagfit_params;
 
 typedef struct {
@@ -33,6 +45,10 @@ typedef struct {
   int samples;        // edge samples used in the last pass
   double rms0, rms;   // RMS edge residual (px) at the input corners and after the fit
   double bias;        // black-shrink bias (px), 0 without fit_bias
+  double bias_v, bias_h;  // per edge direction (model vertical / horizontal edges); both = bias unless bias_axes
+  double kappa;           // fit_kappa: border inner-edge offset, cells
+  int branches, branch;   // pose fit: starting poses tried (1 or 2) and the one kept (1: IPPE's alternative)
+  int segments;           // unit edge segments used
   double cell_px;     // mean cell side (px)
 } tagfit_result;
 

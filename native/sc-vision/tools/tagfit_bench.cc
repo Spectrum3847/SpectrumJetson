@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <map>
+#include <numeric>
 #include <random>
 #include <string>
 #include <vector>
@@ -156,8 +157,9 @@ static double pct(std::vector<double> v, double p) {
 struct Opt {
   tagfit_params fp;
   bool use_cam = true;
-  int n = 2000, seed = 1, jpeg = 85, maxf = 1000000, min_tag = 16;
-  double noise = 2.5, blur = 0.8, bloom = 0;
+  int n = 2000, nseeds = 1, seed = 1, jpeg = 85, maxf = 1000000, min_tag = 16;
+  double noise = 2.5, blur = 0.8, bloom = 0, gamma = 1;
+  std::string cache;
 };
 
 // Pose of one corner set: best/alt, ambiguity, reprojection error.
@@ -184,13 +186,15 @@ static int synth(const cam_model &cam, const Opt &o) {
   std::vector<uint8_t> img(w * h), cells;
   std::vector<double> tmp(w * h);
   struct Bin {
-    std::vector<double> ce0, ce1, re0, re1, ro0, ro1, am0, am1, rp0, rp1, us, bias;
+    std::vector<double> ce0, ce1, re0, re1, ro0, ro1, am0, am1, rp0, rp1, us, bias, sr0, sr1, bv, bh, kp;
     int n = 0, ok = 0, flip0 = 0, flip1 = 0, worse = 0, better = 0;
   };
   const double edges[] = {0, 2.5, 4, 6, 9, 14, 1e9};
   const int NB = 6;
   Bin bins[NB];
   int rendered = 0, found = 0, rot_bad = 0;
+  for (int sd = o.seed; sd < o.seed + o.nseeds; sd++) {
+  rng.seed(sd);
   for (int f = 0; f < o.n; f++) {
     // pose: log-uniform range 0.6..8 m, anywhere in the image, turned up to 60 deg yaw, 25 pitch, 15 roll
     double range = exp(log(0.6) + U(rng) * (log(8.0) - log(0.6)));
@@ -223,6 +227,21 @@ static int synth(const cam_model &cam, const Opt &o) {
       }
     }
     if (!vis || bx0 < 4 || by0 < 4 || bx1 > w - 5 || by1 > h - 5) continue;
+    // cached render (--cache DIR): the same frame for the same seed and render settings
+    char cpath[600] = "";
+    bool cached = false;
+    if (!o.cache.empty()) {
+      snprintf(cpath, sizeof cpath, "%s/s%d_g%.2f_n%.1f_b%.2f_j%d_bl%.2f_%05d.raw", o.cache.c_str(), sd, o.gamma,
+               o.noise, o.blur, o.jpeg, o.bloom, f);
+      if (FILE *cf = fopen(cpath, "rb")) {
+        cached = fread(img.data(), 1, img.size(), cf) == img.size();
+        fclose(cf);
+      }
+    }
+    if (cached) {  // keep the random sequence identical to an uncached run
+      U(rng), U(rng), U(rng);
+      for (size_t i = 0; i < img.size(); i++) N01(rng);
+    } else {
     // render: background, then the tag region supersampled 4 x 4
     double black = 15 + U(rng) * 35, white = 150 + U(rng) * 80, bg = 60 + U(rng) * 80;
     for (int y = 0; y < h; y++)
@@ -276,10 +295,18 @@ static int synth(const cam_model &cam, const Opt &o) {
         }
     }
     for (size_t i = 0; i < img.size(); i++) {
-      double v = tmp[i] * (1 + o.bloom) + o.noise * N01(rng);
+      double v = tmp[i] * (1 + o.bloom);
+      if (o.gamma != 1) v = 255 * pow(std::clamp(v / 255, 0.0, 1.0), 1 / o.gamma);  // camera tone curve on linear light
+      v += o.noise * N01(rng);
       img[i] = (uint8_t)std::clamp(lround(v), 0L, 255L);
     }
     if (o.jpeg > 0) jpeg_roundtrip(img, w, h, o.jpeg);
+    if (cpath[0])
+      if (FILE *cf = fopen(cpath, "wb")) {
+        fwrite(img.data(), 1, img.size(), cf);
+        fclose(cf);
+      }
+    }
     rendered++;
     napa_detection dd[8];
     int nd = napa_detect(det, img.data(), w, h, w, &np, dd, 8);
@@ -316,6 +343,8 @@ static int synth(const cam_model &cam, const Opt &o) {
     if (p0.ok && p1.ok) {
       auto rg = [](const tag_pose &p) { return sqrt(p.t[0] * p.t[0] + p.t[1] * p.t[1] + p.t[2] * p.t[2]); };
       B.re0.push_back(100 * fabs(rg(p0.b) - tr) / tr), B.re1.push_back(100 * fabs(rg(p1.b) - tr) / tr);
+      B.sr0.push_back(100 * (rg(p0.b) - tr) / tr), B.sr1.push_back(100 * (rg(p1.b) - tr) / tr);
+      if (fr.ok) B.bv.push_back(fr.bias_v), B.bh.push_back(fr.bias_h), B.kp.push_back(fr.kappa);
       double a0 = rot_angle_deg(p0.b.R, R), a1 = rot_angle_deg(p1.b.R, R);
       B.ro0.push_back(a0), B.ro1.push_back(a1);
       B.flip0 += a0 > 10, B.flip1 += a1 > 10;
@@ -323,9 +352,10 @@ static int synth(const cam_model &cam, const Opt &o) {
       B.rp0.push_back(p0.b.err), B.rp1.push_back(p1.b.err);
     }
   }
+  }
   printf("synth: %d rendered, %d detected, %d with a corner order unlike the renderer's (skipped)\n", rendered, found,
          rot_bad);
-  printf("noise %.1f blur %.2f jpeg %d bloom %.2f iters %d bias %d cam %d\n", o.noise, o.blur, o.jpeg, o.bloom,
+  printf("gamma %.2f noise %.1f blur %.2f jpeg %d bloom %.2f iters %d bias %d cam %d\n", o.gamma, o.noise, o.blur, o.jpeg, o.bloom,
          o.fp.iters, o.fp.fit_bias, o.use_cam);
   printf("%-10s %5s %5s %9s | %-15s | %-15s | %-15s | %-15s | %-11s | %-15s | %-13s | %s\n", "cell px", "n", "fit%", "+/->0.1px",
          "corner med px", "corner p90 px", "range err % med", "rot err deg med", "flips>10deg", "ambiguity med",
@@ -340,6 +370,8 @@ static int synth(const cam_model &cam, const Opt &o) {
            lab, B.n, 100.0 * B.ok / B.n, B.better, B.worse, median(B.ce0), median(B.ce1), pct(B.ce0, 0.9), pct(B.ce1, 0.9), median(B.re0),
            median(B.re1), median(B.ro0), median(B.ro1), B.flip0, B.flip1, median(B.am0), median(B.am1), median(B.rp0),
            median(B.rp1), median(B.us), pct(B.us, 0.9), median(B.bias));
+    printf("%-10s signed range err %% med %+.4f -> %+.4f   bias v/h %+.3f %+.3f kappa %+.4f\n", "", median(B.sr0), median(B.sr1),
+           median(B.bv), median(B.bh), median(B.kp));
   }
   napa_destroy(det);
   return 0;
@@ -349,7 +381,7 @@ static int synth(const cam_model &cam, const Opt &o) {
 struct Acc {
   int n = 0, ok = 0;
   double cell = 0;
-  std::vector<double> c0[8], c1[8], r0, r1, w0[3], w1[3], am0, am1, rp0, rp1, us;
+  std::vector<double> c0[8], c1[8], r0, r1, w0[3], w1[3], am0, am1, rp0, rp1, us, bv, bh, rs, kp;
   double Rref[9];
   bool have_ref = false;
 };
@@ -403,7 +435,7 @@ static int replay(const char *path, const cam_model &cam, const Opt &o) {
       A.n++;
       A.ok += r.ok;
       A.cell += r.cell_px;
-      if (r.ok) A.us.push_back(us);
+      if (r.ok) A.us.push_back(us), A.bv.push_back(r.bias_v), A.bh.push_back(r.bias_h), A.rs.push_back(r.rms), A.kp.push_back(r.kappa);
       for (int k = 0; k < 8; k++) A.c0[k].push_back(dd[i].corners[k]), A.c1[k].push_back(r.corners[k]);
       auto rg = [](const tag_pose &p) { return sqrt(p.t[0] * p.t[0] + p.t[1] * p.t[1] + p.t[2] * p.t[2]); };
       A.r0.push_back(rg(p0.b)), A.r1.push_back(rg(p1.b));
@@ -436,6 +468,9 @@ static int replay(const char *path, const cam_model &cam, const Opt &o) {
            id, A.n, A.cell / A.n, 100.0 * A.ok / A.n, cstd(A.c0), cstd(A.c1), 1000 * stdev(A.r0), 1000 * stdev(A.r1),
            wstd(A.w0), wstd(A.w1), median(A.am0), median(A.am1), median(A.rp0), median(A.rp1), median(A.us),
            median(A.r0));
+    printf("     range mean %.4f -> %.4f m, bias v/h %+.3f %+.3f px, edge rms %.3f px, kappa %+.4f cell\n",
+           std::accumulate(A.r0.begin(), A.r0.end(), 0.0) / A.n, std::accumulate(A.r1.begin(), A.r1.end(), 0.0) / A.n,
+           median(A.bv), median(A.bh), median(A.rs), median(A.kp));
   }
   napa_destroy(det);
   return 0;
@@ -457,10 +492,13 @@ int main(int argc, char **argv) {
     auto nx = [&]() { return i + 1 < argc ? argv[++i] : (char *)"0"; };
     if (a == "--n") o.n = atoi(nx());
     else if (a == "--seed") o.seed = atoi(nx());
+    else if (a == "--seeds") o.nseeds = atoi(nx());
     else if (a == "--noise") o.noise = atof(nx());
     else if (a == "--blur") o.blur = atof(nx());
     else if (a == "--jpeg") o.jpeg = atoi(nx());
     else if (a == "--bloom") o.bloom = atof(nx());
+    else if (a == "--gamma") o.gamma = atof(nx());
+    else if (a == "--cache") o.cache = nx();
     else if (a == "--max") o.maxf = atoi(nx());
     else if (a == "--min-tag") o.min_tag = atoi(nx());
     else if (a == "--iters") o.fp.iters = atoi(nx());
@@ -471,6 +509,17 @@ int main(int argc, char **argv) {
     else if (a == "--sample-px") o.fp.sample_px = atof(nx());
     else if (a == "--samples-max") o.fp.samples_max = atoi(nx());
     else if (a == "--pose") o.fp.pose = 1;
+    else if (a == "--outline-px") o.fp.outline_px = atof(nx());
+    else if (a == "--bias-axes") o.fp.bias_axes = 1;
+    else if (a == "--edges") o.fp.edges = atoi(nx());
+    else if (a == "--kappa") o.fp.fit_kappa = 1;
+    else if (a == "--lobe-cells") o.fp.lobe_cells = atof(nx());
+    else if (a == "--min-run") o.fp.min_run = atoi(nx());
+    else if (a == "--min-run-below") o.fp.min_run_below = atof(nx());
+    else if (a == "--seg-mode") o.fp.seg_mode = atoi(nx());
+    else if (a == "--max-seg") o.fp.max_segments = atoi(nx());
+    else if (a == "--max-samples") o.fp.max_samples = atoi(nx());
+    else if (a == "--branch-amb") o.fp.branch_amb = atof(nx());
     else return fprintf(stderr, "unknown option %s\n", a.c_str()), 2;
   }
   cam_model cam;

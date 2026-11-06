@@ -5,6 +5,79 @@ PhotonVision yet. Code: `native/sc-vision/src/tagfit.{c,h}` and `native/sc-visio
 both with `native/sc-vision/build.sh`. Lens helpers `pose_undistort_px` and `pose_distort_px` were added to
 `pose.{c,h}`.
 
+**Pass 2 (2026-11-06, offline) supersedes the defaults and CPU figures in sections 3–5.** It is in section 0.
+
+## 0. Pass 2: why tagfit looked worse, and the cheaper default
+
+The SystemCore was unreachable for this pass. Everything ran on the laptop: the aarch64 `tagfit_bench`
+under qemu in Docker, against the WPILib SystemCore sysroot.
+- **Data:** the static recordings in `bench-archive-20261106/results`: `ctrl/cd`, `sweep1/e2_g128`,
+  `sweep1/e50_g32`, and `tagdist/thr`, which has tags 3, 10 and 11 at 0.8, 1.64 and 3.33 m. Calibration: the
+  SystemCore's `calib.json`, copied verbatim.
+- **Synthetic:** 4 seeds × 250 frames, 862 tags, cached with `--cache`.
+- **µs:** qemu time ÷ 17.4. That factor was measured against the earlier on-Pi run, and it held to ±3% in
+  every size bin.
+
+### Root causes
+
+| symptom | cause | evidence | status |
+|---|---|---|---|
+| Real recordings: range differs from NAPA's by up to ±0.75% | **NAPA's edges carry an uncorrected black/white bias from the camera's tone curve.** tagfit measures that bias (δ) and removes it. NAPA's `border_bias` only runs when it sees clipping (white ≥ 250 or black ≤ 4). | Fitted δ = −0.21 px on ctrl and tagdist and +0.07 to +0.12 px on the sweep sessions. The range shift follows the sign of δ in all 5 tags. Synthetic with a gamma 2.2 tone curve: NAPA range error +0.27 to +1.46% by bin, tagfit **+0.01 to +0.06% at 4 px cells and up**. κ (border width vs payload cells) fits to 0.000 to 0.003 cell, so the printed tag is fine. | Not a tagfit fault; NAPA is the one that is off |
+| Real recordings: reprojection error +0.03 to +0.07 px, ambiguity up | **These metrics compare against each method's own corners under the calibration.** Ambiguity is best/alt reprojection, so it rises with reprojection error. A 6-DoF pose fit to the edges has 0.171 px edge RMS against 0.142 px for the 8-DoF homography: the image departs from "calibrated camera + flat square" by about 0.1 px RMS. That points to calibration error, which the 100 edges show and 4 corners hide. | In synthetic (exact calibration, with or without gamma), tagfit lowers both. | Not an accuracy loss. Recommend refitting the intrinsics before relying on reprojection or ambiguity gates. |
+| e2_g128 rotation jitter 0.137° → 0.177° | **Too few outline samples.** Tilt is carried by the outline's lever arm, and the old default sampled 3 per cell (24 per side) against NAPA's ~100. | With dense outline samples (`--outline-px 3`) and one sample per interior segment: **0.137° → 0.078°**. The previous default gives 0.128° with the current code. | Fixed in the default |
+| Synthetic 4–9 px cells: median range error 0.047 → 0.058% (linear render only) | A residual scale bias in the edge estimator, about 0.006 px per side (signed range −0.013 → −0.040%). Limiting the lobe width (`--lobe-cells`) or dropping 1-cell features (`--min-run`) did not remove it, and the latter made things worse. | It appears only with an ideal linear sensor. With any tone curve, NAPA's own bias is 20–40× larger, and tagfit wins (1.12% → 0.06%). | Explained, not fixed; too small to matter |
+
+### Edge-segment sweep (synthetic medians, NAPA → fit; real = tagdist tag 3, 19 px cells)
+
+| segments | 2.5–4 px corner | 4–6 px corner | ≥ 14 px corner p90 | far flips (2.5–4) | real rot std ° | µs, 4–6 / ≥ 14 px |
+|---|---|---|---|---|---|---|
+| NAPA | 0.123 | 0.051 | 0.412 | 11 | 0.408 | – |
+| outline only (32) | 0.105 | 0.048 | 0.087 | 7 | 0.213 | 48 / 123 |
+| + inner border (~56) | 0.079 | 0.045 | 0.041 | 5 | 0.164 | 64 / 169 |
+| top 48 | 0.076 | 0.045 | 0.041 | 9 | 0.161 | 69 / 183 |
+| top 64 | 0.069 | 0.043 | 0.035 | 7 | – | 90 / 241 |
+| all (~100), 3 per segment (pass 1 default) | 0.069 | 0.039 | 0.035 | 6 | 0.137 | 94 / 260 |
+| **all, 1 per interior segment, outline every 3 px (new default)** | **0.069** | **0.039** | **0.033** | **6** | 0.160 (e2_g128: **0.078**) | **79 / 213** |
+
+- **Optimum: all segments.** Each segment that is dropped costs accuracy at every size. "Far from the centre"
+  and "long runs" ordering (`--max-seg`) is the best way to cut segments if they must be cut, but it saves
+  little, because each interior segment costs only one sample.
+- **Joint grid lines are already the model.** Fitting the 9 + 9 grid lines jointly is what the homography
+  does: every segment on a line shares the model.
+- **The real cost is samples per segment.** One sample per interior segment plus a dense outline keeps
+  accuracy and saves 15–45%.
+
+### CPU per tag
+
+Pi-equivalent µs (qemu ÷ 17.4), median, by cell size:
+
+| config | < 2.5 | 2.5–4 | 4–6 | 6–9 | 9–14 | ≥ 14 |
+|---|---|---|---|---|---|---|
+| pass 1 default | 76 | 86 | 94 | 175 | 260 | 260 |
+| **new default** | **64** | **72** | **79** | **107** | **142** | **213** |
+| new default, 1 iteration | 39 | 43 | 48 | 64 | 83 | 129 |
+
+With 1 iteration instead of 2:
+- Synthetic is near-equal for cells under 9 px. The ≥ 14 px corner p90 rises from 0.033 to 0.072 px.
+- The real tag 3 gets worse: range std 0.40 → 0.97 mm.
+- Use 1 iteration only with a warm start from the previous frame's fit, which is not built yet.
+
+**Not done in this pass:** float32/NEON, an undistortion LUT, and the warm start. The lens call is one exact
+`pose_distort_px` per sample, roughly a third of the per-sample cost.
+
+**Two IPPE branches with the 6-DoF fit (`--pose --branch-amb 0.2`)** gave no reduction in flips (13 vs 14
+for 1 branch, against 11 for the homography). At small tags the edges do not separate the branches either.
+It is dropped.
+
+### Recommendation (updated)
+
+- Use the new default for **all tag sizes**: homography, lens model, bias term, every segment, one sample per
+  interior segment, outline every 3 px, 2 iterations.
+- It is equal to or better than NAPA on every accuracy measure in every regime tested, except the
+  0.006 px/side linear-render case above.
+- **Gate on ambiguity and reprojection error only after refitting the intrinsics.**
+- Next steps for CPU: the warm start with 1 iteration (about −40%), refining only published frames, and NEON.
+
 ## 1. Where the idea comes from: Eagle Eye
 
 - **Chief Delphi.** In the NAPA thread
