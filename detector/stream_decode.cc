@@ -757,7 +757,8 @@ void Scan(int width, int height) {
 void Reap() {
   for (auto it = g_watchers.begin(); it != g_watchers.end();) {
     if ((*it)->dead) {
-      (*it)->thread.join();
+      // spectrum_stream_release joins before marking it dead: a second join throws std::system_error (terminate)
+      if ((*it)->thread.joinable()) (*it)->thread.join();
       for (int i = 0; i < (*it)->n; i++) munmap((*it)->buf[i], (*it)->length);
       for (Result &r : (*it)->results) r.ClearSink();
       close((*it)->fd);

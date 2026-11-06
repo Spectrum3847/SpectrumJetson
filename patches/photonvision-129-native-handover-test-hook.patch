@@ -1,0 +1,59 @@
+From 0c39517dc844826e958df21af52ca4807c4a8e07 Mon Sep 17 00:00:00 2001
+From: Allen Gregory <allengregoryiv@gmail.com>
+Date: Fri, 6 Nov 2026 04:40:39 -0600
+Subject: [PATCH 1/2] Native camera: handover test hook
+ (/tmp/spectrum-native-handover-test hands native cameras to cscore as
+ calibration does)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../frame/provider/NativeFrameProvider.java   | 24 +++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+index e41d85b9..8ab0bc70 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+@@ -97,9 +97,29 @@ public class NativeFrameProvider extends CpuImageProcessor {
+         return handle != 0;
+     }
+ 
++    // test hook: while this file exists, every native camera is handed to cscore as for calibration
++    private static final java.io.File HANDOVER_TEST_FILE =
++            new java.io.File("/tmp/spectrum-native-handover-test");
++    private long handoverTestCheckedNs = 0;
++    private boolean handoverTest = false;
++
+     private boolean wantNative() {
++        long now = System.nanoTime();
++        if (now - handoverTestCheckedNs > 500_000_000L) {
++            handoverTestCheckedNs = now;
++            boolean t = HANDOVER_TEST_FILE.exists();
++            if (t != handoverTest) {
++                handoverTest = t;
++                reopen = true;
++                logger.info("Native camera: handover test " + (t ? "on" : "off"));
++            }
++        }
+         VideoMode m = settables.getCurrentVideoMode();
+-        return !calibrating && !nativeFailed && m != null && m.pixelFormat == PixelFormat.MJPEG;
++        return !calibrating
++                && !handoverTest
++                && !nativeFailed
++                && m != null
++                && m.pixelFormat == PixelFormat.MJPEG;
+     }
+ 
+     private void closeNative() {
+@@ -162,7 +182,7 @@ public class NativeFrameProvider extends CpuImageProcessor {
+             cscoreSink.setSource(cscore);
+             logger.info(
+                     "Native camera: cscore handover ("
+-                            + (calibrating
++                            + (calibrating || handoverTest
+                                     ? "calibration"
+                                     : nativeFailed ? "native open failed" : "non-MJPEG mode")
+                             + ")");
+-- 
+2.55.0.windows.2
+

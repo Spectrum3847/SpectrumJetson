@@ -133,3 +133,26 @@ only owner of /dev/video0 (2 fds: control + capture; no cscore), 397 results (33
 quality 387/387 matched by sequence ID, health/fps 33.1, capture->publish p50 23.2 ms (mid-exposure of a 30 ms
 exposure), PV 24.3% of a core (SpectrumCamera 16.6%, VisionRunner 1.7%).
 
+
+Fast path vs native, same scene (Swyft, DARK, exposure 300, 12 s; `/dev/shm/b2-fast1` vs `b2-run3`):
+
+| | fast path (SPECTRUM_NATIVE_CAMERA=0) | native (no UsbCamera) |
+|---|---|---|
+| results / with targets | 397 / 388 | 397 / 387 |
+| tag quality matched by seq | 388/388 | 387/387 |
+| capture->publish p50/p95/p99 ms | 23.12 / 23.56 / 24.36 | 23.19 / 23.39 / 23.95 |
+| tag 10 distance (sd mm), ambiguity | 1.7617 m, 0.205 | 1.7622 m, 0.201 |
+| PV % of one core | 28.0 (SpectrumStream 16.2, VisionRunner 2.4) | 24.3 (SpectrumCamera 16.6, VisionRunner 1.7) |
+
+Dark numbers (33 fps at a 30 ms exposure) are not comparable with lit 120 fps runs.
+
+cscore handover + stream on demand (`stream-handover.sh` as EXTRA_CMD, `/dev/shm/b2-hand2`): input/output streams
+served (1181: 83 JPEG frames in 3 s, 1182: 80; the Java pipeline at 30 fps while watched, 5 fps otherwise), the
+handover test file closed the native capture and a temporary UsbCamera streamed (results continued from the Java
+path), removing it closed the UsbCamera and the native capture reopened, no crash. Two bugs fixed on the way: a
+stale native handle used after the close (fork 6f8bcb0e, PV aborted) and a double join in
+`spectrum_stream_release` (stream_decode.cc Reap, would abort on the reopen after cscore streamed).
+
+Not done / not verified yet: the real calibration pipeline switching (VisionRunner sets the handover when the
+pipeline is Calibrate3dPipeline; only the test file was exercised); passthrough stream (cameraLatestJpeg exists,
+the stream still re-encodes the Java frame); both cameras at once (Pi rule: single camera); lit-scene CPU.

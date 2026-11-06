@@ -1,0 +1,72 @@
+From 6f8bcb0e01921274c0363ee8f80d605135abadf2 Mon Sep 17 00:00:00 2001
+From: Allen Gregory <allengregoryiv@gmail.com>
+Date: Fri, 6 Nov 2026 04:44:48 -0600
+Subject: [PATCH 2/2] Native camera: no stale handle after a handover; native
+ publish counters follow a reopened camera
+
+Closing the native capture (calibration / handover) left NativePublish.cameraHandle pointing at the freed
+handle for the rest of that loop: NapaDetector then detected on it (use after free, PV aborted with
+std::system_error). It is cleared on the vision thread before the destroy. NativePublish restarts its
+published count when the camera's handle changes, so a reopened camera is seen as publishing again.
+Live (Swyft, dark): native -> cscore handover -> native, no crash; streams 1181/1182 served ~27 fps.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../vision/frame/provider/NativeFrameProvider.java       | 9 +++++++--
+ .../org/photonvision/vision/pipe/impl/NativePublish.java | 5 +++++
+ 2 files changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+index 8ab0bc70..8dca44de 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+@@ -49,7 +49,8 @@ public class NativeFrameProvider extends CpuImageProcessor {
+     private final String name;
+     private VisionSourceSettables settables;
+ 
+-    private long handle = 0;
++    // read by the health getters, which run on this camera's vision thread like every close
++    private volatile long handle = 0;
+     private VideoMode openMode = null;
+     private volatile boolean reopen = false;
+     private volatile boolean calibrating = false;
+@@ -128,8 +129,12 @@ public class NativeFrameProvider extends CpuImageProcessor {
+             rewind = null;
+         }
+         if (handle != 0) {
+-            NapaDetectorJNI.destroy(handle); // stops the camera thread, closes the capture fd
++            // this camera's NativePublish (this is its vision thread) must not use the handle again
++            var np = org.photonvision.vision.pipe.impl.NativePublish.current();
++            if (np != null && np.cameraHandle == handle) np.cameraHandle = 0;
++            long h = handle;
+             handle = 0;
++            NapaDetectorJNI.destroy(h); // stops the camera thread, closes the capture fd
+             openMode = null;
+         }
+     }
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+index 1641d346..1098643d 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+@@ -58,6 +58,7 @@ public final class NativePublish {
+     public volatile long midShiftNs = 0;
+     // native camera backend: the NAPA handle that owns this camera (0: not native)
+     public volatile long cameraHandle = 0;
++    private long lastNapaHandle = 0;
+     // from the camera's frame provider: its camera-clock stamp (PTS) -> mid-exposure (0: no camera
+     // clock)
+     public volatile long camShiftNs = 0;
+@@ -258,6 +259,10 @@ public final class NativePublish {
+      */
+     void update(long napaHandle) {
+         if (napaHandle == 0) return;
++        if (napaHandle != lastNapaHandle) { // a native camera reopened: its counters start over
++            lastNapaHandle = napaHandle;
++            published = 0;
++        }
+         long n =
+                 org.photonvision.jni.NapaDetectorJNI.setNativePublish(
+                         napaHandle,
+-- 
+2.55.0.windows.2
+
