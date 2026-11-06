@@ -165,7 +165,7 @@ Every frame has two timestamps:
   was connected (bench recordings).
 
 Both are arrival times. A result's timestamp is earlier: the middle of the exposure, half the
-exposure (plus `SPECTRUM_CAMERA_DELAY_US`: 180 µs by default from `09-robot-tuning.sh` since 2026-11-06, LED-measured; 2500 µs in recordings from 2026-11-01 to then; 0 before 2026-11-01) before arrival. PhotonVision logs the
+exposure (plus `SPECTRUM_CAMERA_DELAY_US`: 120 µs by default from `09-robot-tuning.sh` since 2026-11-06, LED-measured; 2500 µs in recordings from 2026-11-01 to then; 0 before 2026-11-01) before arrival. PhotonVision logs the
 shift for each camera when it starts ("Frame timestamps moved 2.5 ms earlier, to mid-exposure"). To
 find a result's frame, subtract that shift from the frame's time.
 

@@ -1634,10 +1634,18 @@ inside "N: name". Suite: 5 tests, 1.5 min, all passing.
 - **Camera delay, measured (2026-11-05/06, tests/camera-timing).** An LED test (an LED pulsed 0.3 ms at
   swept times, the Thriftiest watching it) put the camera's **PTS 0.045 ± 0.02 ms after the end of
   exposure**, and the first USB data packet 0.41 ± 0.05 ms after it.
-  - uvcvideo's conversion of the PTS lands 0.135 ms after it (measured on the SystemCore's uvcvideo 6.12
-    with the UVC metadata node). So end of exposure -> camera-clock timestamp is **0.18 ms**.
-  - `SPECTRUM_CAMERA_DELAY_US` is 180 µs by default (`09-robot-tuning.sh` step 17). It was 2500, Team
-    100's figure, which made every timestamp ~2.3 ms early. `health-check.sh` warns on 2500.
+  - **The `hwtimestamps=1` stamp sits one of two places.** It is 0.348 or 0.224 ms before the first data
+    packet, one 125 µs USB microframe apart. uvcvideo picks one at each stream start and keeps it (sd
+    0.007 ms within a session; builder's trace, 5 sessions, photonvision-112). So end of exposure ->
+    camera-clock timestamp is **0.06 or 0.19 ms**. The metadata method (`ts_vs_pts.py`) saw one session at
+    0.18.
+  - `SPECTRUM_CAMERA_DELAY_US` is **120 µs** by default (`09-robot-tuning.sh` step 17), the midpoint: off by
+    ±0.06 ms whichever value the session picked. It was 2500, Team 100's figure, which made every
+    timestamp ~2.3 ms early. `health-check.sh` warns on 2500.
+  - To remove the ±0.06 ms, measure the session's offset. Over the first few hundred frames, take the median
+    of (first data packet's URB completion - camera-clock stamp), then use the camera-clock stamp plus that
+    offset, minus 0.41 ms. That is the builder's combined timing in photonvision-112: camera-clock steadiness
+    plus a long-run first-sight offset, sd 0.04 ms.
   - The Jetson's own uvcvideo isn't LED-tested yet: tests/camera-timing/README.md, "LED test on a Jetson".
   - What else from the SystemCore work applies to the Jetson: [SYSTEMCORE-FINDINGS.md](SYSTEMCORE-FINDINGS.md).
   - The TXMAN1 rotation replay (tests/field-replay/RESULTS.md) can't separate the delay from the robot's
@@ -3005,7 +3013,7 @@ p50 from mid-exposure, 1 camera, GPU detector:
   1. Stream decoder, -2.5 ms measured
   2. Exposure, -2.25 ms
   3. `urb_packets=4`, done
-  4. Measure the camera delay (accuracy): done 2026-11-05, 0.41 ms to the first packet (LED test), default 180 us
+  4. Measure the camera delay (accuracy): done 2026-11-05, 0.41 ms to the first packet (LED test), default 120 us
 
   With 1 and 2, the estimate is about 11.8 ms.
 

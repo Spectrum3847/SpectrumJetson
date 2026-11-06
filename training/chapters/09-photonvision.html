@@ -240,7 +240,7 @@
 
     <article class="story" id="pv-s13">
       <div class="vis light"><svg id="pv-c13" viewBox="0 0 440 190" role="img" aria-label="Timeline of one frame: exposure, camera processing, USB transfer; the timestamp is moved from the first USB packet back to the middle of the exposure"></svg></div>
-      <div class="txt"><span class="pn">photonvision-13 · robot integration</span><h4>Timestamps at mid-exposure</h4><p>The robot needs to know <em>when</em> the picture was taken, so it can match it to where the robot was. The Linux driver stamps a frame when its first USB packet arrives. Our patch moves that back by half the exposure, to the middle of the time the sensor was collecting light. The robot code must not subtract it again. The camera's own delay before its first packet was measured with an LED, about 0.4 ms (so the camera-clock timestamp is 0.18 ms after the exposure ends; <a href="#latency">chapter 14</a>).</p></div>
+      <div class="txt"><span class="pn">photonvision-13 · robot integration</span><h4>Timestamps at mid-exposure</h4><p>The robot needs to know <em>when</em> the picture was taken, so it can match it to where the robot was. The Linux driver stamps a frame when its first USB packet arrives. Our patch moves that back by half the exposure, to the middle of the time the sensor was collecting light. The robot code must not subtract it again. The camera's own delay before its first packet was measured with an LED, about 0.4 ms (so the camera-clock timestamp is about 0.1 ms after the exposure ends; <a href="#latency">chapter 14</a>).</p></div>
     </article>
 
     <article class="story" id="pv-s29">

@@ -40,11 +40,11 @@ whole seconds of frames (the sweep keeps 480 per setting).
 |---|---|---|
 | the camera's PTS | **0.045 ± 0.02** | LED test, camera clock |
 | the frame's first USB data packet | **0.41 ± 0.05** | LED test, host clock (`uvc_timing --led`, `led_analyze.py --invert`) |
-| uvcvideo's buffer timestamp, `hwtimestamps=1` (the Jetson's setting) | **0.18 ± 0.1** | PTS + 0.135 ms uvcvideo conversion offset (`v4l2_ts --meta` + `ts_vs_pts.py`, SystemCore uvcvideo 6.12) |
+| uvcvideo's buffer timestamp, `hwtimestamps=1` (the Jetson's setting) | **0.06 or 0.19** | 0.41 minus the stamp's 0.348 or 0.224 ms lead over the first data packet. Two values, one USB microframe apart, picked per stream start (builder's kernel trace, 5 sessions). `v4l2_ts --meta` + `ts_vs_pts.py` saw 0.18 in one session |
 | uvcvideo's buffer timestamp, `hwtimestamps=0` (stock) | -0.34 | the frame's first packet is stamped: it's header-only, ~1 ms before the data |
 
 So `SPECTRUM_CAMERA_DELAY_US` (mid-exposure = timestamp - exposure/2 - delay) depends on the timestamp:
-- **180** for the Jetson's camera-clock timestamps.
+- **120** for the Jetson's camera-clock timestamps: the midpoint of 0.06 and 0.19, so off by ±0.06 ms either way.
 - **400** for a timestamp taken at the first data packet (sc-vision).
 
 The old 2500 (Team 100's figure) made every published timestamp ~2.3 ms too early.
@@ -69,8 +69,19 @@ The old 2500 (Team 100's figure) made every published timestamp ~2.3 ms too earl
 
 ### LED test on a Jetson (not done yet)
 
-The Jetson's 180 us comes from the same camera and the same uvcvideo algorithm, but on the SystemCore's kernel
-(6.12). The Jetson's kernel and its `urb_packets=4` uvcvideo may convert differently. To measure it:
+**The microframe ambiguity.** uvcvideo converts the PTS through its SOF clock. Which of two adjacent 125 us
+microframes the stamp lands on is decided at stream start and then holds for the session (sd 0.007 ms). To
+remove it, estimate the session's offset against the first data packet:
+- Take the median of (URB completion of each frame's first data packet - stamp) over a few hundred frames.
+- The URB phase varies, so the median converges. Use small URBs: urb_packets 2-4.
+- Then mid-exposure = stamp + offset - 0.41 - exposure/2.
+
+This is the builder's "camera-clock timing + long-run first-sight offset" (fork photonvision-112, 22579eea):
+sd 0.04 ms, in both modes.
+
+The Jetson's 120 us comes from the same camera and the same uvcvideo algorithm, but on the SystemCore's kernel
+(6.12). The Jetson's kernel and its `urb_packets=4` uvcvideo may convert differently. Each Jetson LED run
+measures one session's mode: repeat it with a stream restart in between. To measure it:
 
 1. Wire an LED + 330 ohm from a free 40-pin header GPIO to GND. Find its line with `gpioinfo` (e.g. header pin 7
    on the Orin Nano dev kit), and check that nothing else uses it.

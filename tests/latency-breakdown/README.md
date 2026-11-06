@@ -12,7 +12,7 @@ Measured 2026-11-02 on the bench Jetson (Orin Nano Super, clocks `full`, stock c
 
 - Cameras: two Thriftiest Cams, mono sensor, MJPEG 1280x800 at 122 fps.
 - Exposure: 50, which is 5.0 ms.
-- `SPECTRUM_CAMERA_DELAY_US=2500` (the assumption then; LED-measured since: 180 to the camera-clock timestamp, 0.41 ms to the first packet, tests/camera-timing).
+- `SPECTRUM_CAMERA_DELAY_US=2500` (the assumption then; LED-measured since: 120 (0.06 or 0.19 by session) to the camera-clock timestamp, 0.41 ms to the first packet, tests/camera-timing).
 - uvcvideo: `hwtimestamps=1`.
 - PhotonVision: AprilTagCuda with the GPU detector, or with "Tags on CPU (NAPA)".
 - **There were no tags on the bench**, so detection and pose solve are no-tag times.
@@ -273,7 +273,7 @@ PhotonVision A/B, 2 cameras, NVJPG, 16 then 4, 2 rounds:
 3. **`urb_packets=4`** (done, the new default): -0.5 to -0.7 ms at DQBUF, about -0.3 ms of tail
    with the stream decoder.
 4. **Measure the camera delay** (done 2026-11-05, LED test, tests/camera-timing: 0.41 ms to the
-   first packet, 0.18 ms to the camera-clock timestamp). This is about accuracy, not latency.
+   first packet, 0.06 or 0.19 ms to the camera-clock timestamp). This is about accuracy, not latency.
 5. Detection, pose and NT are already small: 1.0 ms or less together.
 
 With 1 to 3, the estimate is 14.0 - 2.25, about **11.8 ms**. Most of what's left is the sensor

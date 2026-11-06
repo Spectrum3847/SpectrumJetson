@@ -85,8 +85,8 @@ timestamp, the measured shift is **S = L − 2.5 − D**, so **D = L − 2.5 −
 to L − 13 ms (gyro). Time-sync error adds to L the same way.
 
 So the replay can't give D without the robot's log latency L, and the robot code isn't in this
-repo. (Update 2026-11-06: D is now LED-measured, 0.18 ms to the camera-clock timestamp
-(tests/camera-timing), and the default is 180 us; so L ≈ 11–13 ms.) D = 2.5 ms (Team 100's rotating-disc
+repo. (Update 2026-11-06: D is now LED-measured, 0.06 or 0.19 ms to the camera-clock timestamp
+(tests/camera-timing), and the default is 120 us; so L ≈ 11–13 ms.) D = 2.5 ms (Team 100's rotating-disc
 Thriftiest MJPEG figure, our default when this was written) fits if the
 pose lags its log timestamp by ~13–15 ms: plausible for a 10 ms logging loop plus CAN signal age,
 but unverified. D = 0 would need L ≈ 10.5–13. Nothing here contradicts 2.5 ms, and nothing here

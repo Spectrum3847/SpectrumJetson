@@ -355,11 +355,11 @@ if [[ $(cat /sys/module/uvcvideo/parameters/hwtimestamps 2>/dev/null) == 1 ]]; t
 else
   warn "frames timestamped on USB arrival (~1 ms jitter): 11-uvcvideo-payload-cap.sh --install sets hwtimestamps=1"
 fi
-# Camera delay (end of exposure -> frame timestamp): 180 us since the 2026-11-05 LED test (was Team 100's 2500).
+# Camera delay (end of exposure -> frame timestamp): 120 us since the 2026-11-05 LED test (was Team 100's 2500).
 delay_us=$(systemctl show photonvision -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^SPECTRUM_CAMERA_DELAY_US=//p')
 case ${delay_us:-unset} in
-  2500) warn "camera delay is the old assumed 2500 us (timestamps ~2.3 ms early): re-run 09-robot-tuning.sh (default 180 us, LED-measured)" ;;
-  unset) warn "camera delay not set (SPECTRUM_CAMERA_DELAY_US): 09-robot-tuning.sh sets 180 us" ;;
+  2500) warn "camera delay is the old assumed 2500 us (timestamps ~2.3 ms early): re-run 09-robot-tuning.sh (default 120 us, LED-measured)" ;;
+  unset) warn "camera delay not set (SPECTRUM_CAMERA_DELAY_US): 09-robot-tuning.sh sets 120 us" ;;
   *) pass "camera delay $delay_us us (end of exposure -> camera-clock timestamp)" ;;
 esac
 # A driver setting changed live but not saved is lost at the next boot (a 5th camera's 1280-byte
