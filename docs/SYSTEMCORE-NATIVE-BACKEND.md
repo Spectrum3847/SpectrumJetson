@@ -156,3 +156,25 @@ stale native handle used after the close (fork 6f8bcb0e, PV aborted) and a doubl
 Not done / not verified yet: the real calibration pipeline switching (VisionRunner sets the handover when the
 pipeline is Calibrate3dPipeline; only the test file was exercised); passthrough stream (cameraLatestJpeg exists,
 the stream still re-encodes the Java frame); both cameras at once (Pi rule: single camera); lit-scene CPU.
+
+Thriftiest, DARK (no tags in view), 120 fps, 12 s: native `/dev/shm/b2-thr1` vs the cscore fallback forced with
+`SPECTRUM_NATIVE_CAMERA_IDS=dead:beef` (`b2-thrfb`, = the fast path; this is also the non-matching-camera fallback
+check: the camera came up as USBCameraSource/USBFrameProvider and ran normally):
+
+| | fast path (fallback) | native |
+|---|---|---|
+| results/s | 121.2 | 121.5 (health/fps) |
+| capture->publish p50/p95/p99 ms | 8.368 / 8.480 / 8.506 | 8.372 / 8.474 / 8.507 |
+| PV % of one core | 22.3 (SpectrumStream 12.8, VisionRunner 1.7) | 18.3 (SpectrumCamera 11.8, VisionRunner 1.0) |
+
+The saved pipelines' video-mode index opened 1280x800 MJPEG 120 fps natively on both cameras, the same mode cscore
+set in the handover (mode lists in cscore's order); a full UI check of every control/mode was not done (no
+websocket client here).
+
+### Next steps (for whoever continues)
+1. Real calibration: start a calibration from the UI (Calibrate3dPipeline) and check the handover log lines,
+   the calibration frames at the calibration resolution, and the native reopen after it ends.
+2. Passthrough stream: the input stream could serve `cameraLatestJpeg` through a cscore `raw.RawSource` (MJPEG,
+   server compression -1) instead of re-encoding the Java gray frame; the output stream (overlays) re-encodes.
+3. Both cameras at once (when the Pi rules allow two-camera runs): ownership, per-camera CPU, pvboth.sh/nt_check.
+4. Lit-scene CPU vs sc-vision (~27%) and the UI controls check (exposure/gain/brightness sliders, extra controls).
