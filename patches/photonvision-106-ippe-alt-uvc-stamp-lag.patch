@@ -1,0 +1,139 @@
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+index 329e9d3d..590cfbfe 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+@@ -1030,6 +1030,24 @@ public class USBFrameProvider extends CpuImageProcessor {
+      */
+     private static final long CAMERA_DELAY_US = envLong("SPECTRUM_CAMERA_DELAY_US", 0);
+ 
++    /**
++     * Spectrum (sc/mjpeg-napa): how late the driver's buffer timestamp is after the frame's first USB packet,
++     * in microseconds. LimelightOS's uvcvideo (SystemCore) runs with hwtimestamps=0 and completes 32-packet
++     * (4 ms) isochronous URBs, and stamps a frame when it processes the URB that holds its first packet: 2.4 ms
++     * after the packet at the median (kernel trace, SpectrumJetson tests/systemcore-latency), 0-4 ms. This
++     * removes the median; the 0-4 ms spread (sd 1.26 ms) stays (sc-vision's 0.25 ms URBs: sd 0.04 ms).
++     * SPECTRUM_UVC_STAMP_LAG_US overrides; default 2400 with Limelight's uvcvideo (its ll_compressed_* module
++     * parameters), else 0 (our Jetson uvcvideo: urb_packets=4, hwtimestamps=1).
++     */
++    private static final long UVC_STAMP_LAG_US =
++            envLong(
++                    "SPECTRUM_UVC_STAMP_LAG_US",
++                    java.nio.file.Files.exists(
++                                    java.nio.file.Path.of(
++                                            "/sys/module/uvcvideo/parameters/ll_compressed_payload_fast"))
++                            ? 2400
++                            : 0);
++
+     private static long envLong(String name, long fallback) {
+         try {
+             String v = System.getenv(name);
+@@ -1053,8 +1071,8 @@ public class USBFrameProvider extends CpuImageProcessor {
+     private long toMidExposureNs(long captureTimeNs) {
+         if (captureTimeNs == 0) return 0;
+         double exposureUs = settables.getExposureTimeUs();
+-        if (exposureUs <= 0) return captureTimeNs - CAMERA_DELAY_US * 1000;
+-        long shiftNs = ((long) (exposureUs / 2) + CAMERA_DELAY_US) * 1000;
++        if (exposureUs <= 0) return captureTimeNs - (CAMERA_DELAY_US + UVC_STAMP_LAG_US) * 1000;
++        long shiftNs = ((long) (exposureUs / 2) + CAMERA_DELAY_US + UVC_STAMP_LAG_US) * 1000;
+         if (!loggedMidExposure) {
+             loggedMidExposure = true;
+             logger.info(
+@@ -1064,6 +1082,8 @@ public class USBFrameProvider extends CpuImageProcessor {
+                             + exposureUs / 1000.0
+                             + " ms, camera delay "
+                             + CAMERA_DELAY_US / 1000.0
++                            + " ms, driver stamp lag "
++                            + UVC_STAMP_LAG_US / 1000.0
+                             + " ms)");
+         }
+         return captureTimeNs - shiftNs;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagPoseEstimatorPipe.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagPoseEstimatorPipe.java
+index aa66de5e..3d3ec8c3 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagPoseEstimatorPipe.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/AprilTagPoseEstimatorPipe.java
+@@ -17,7 +17,19 @@
+ 
+ package org.photonvision.vision.pipe.impl;
+ 
++import java.util.ArrayList;
++import java.util.List;
+ import org.opencv.calib3d.Calib3d;
++import org.opencv.core.CvType;
++import org.opencv.core.Mat;
++import org.opencv.core.MatOfDouble;
++import org.opencv.core.MatOfPoint3f;
++import org.opencv.core.Point3;
++import org.wpilib.math.geometry.Rotation3d;
++import org.wpilib.math.geometry.Transform3d;
++import org.wpilib.math.geometry.Translation3d;
++import org.wpilib.math.linalg.MatBuilder;
++import org.wpilib.math.util.Nat;
+ import org.opencv.core.MatOfPoint2f;
+ import org.opencv.core.Point;
+ import org.photonvision.vision.calibration.CameraCalibrationCoefficients;
+@@ -80,7 +92,64 @@ public class AprilTagPoseEstimatorPipe
+                         in.getCenterY(),
+                         fixedCorners);
+ 
+-        return m_poseEstimator.estimateOrthogonalIteration(corrected, params.nIters());
++        var est = m_poseEstimator.estimateOrthogonalIteration(corrected, params.nIters());
++        return withAlternate(est, corners);
++    }
++
++    /**
++     * Spectrum (sc/mjpeg-napa): AprilTag's orthogonal iteration often finds only one minimum; it then returns an
++     * all-zero second pose with error 0, so PhotonVision published altCameraToTarget = (0,0,0) (the robot "at the
++     * tag") and poseAmbiguity 0 (passes every ambiguity gate). Fill the alternate from IPPE's two solutions for
++     * the square (the undistorted corners, AprilTag's tag coordinates) and set error2 so that getAmbiguity() =
++     * IPPE's best/alt reprojection-error ratio.
++     */
++    private AprilTagPoseEstimate withAlternate(AprilTagPoseEstimate est, Point[] undistorted) {
++        if (est.error2 > 0 && est.pose2.getTranslation().getNorm() > 1e-6) return est;
++        double h = params.config().tagSize / 2;
++        var obj = new MatOfPoint3f(
++                new Point3(-h, h, 0), new Point3(h, h, 0), new Point3(h, -h, 0), new Point3(-h, -h, 0));
++        var img = new MatOfPoint2f(undistorted);
++        var k = params.calibration().getCameraIntrinsicsMat();
++        var noDist = new MatOfDouble(0, 0, 0, 0, 0);
++        List<Mat> rvecs = new ArrayList<>(), tvecs = new ArrayList<>();
++        var errs = new Mat();
++        try {
++            int n = Calib3d.solvePnPGeneric(
++                    obj, img, k, noDist, rvecs, tvecs, false, Calib3d.SOLVEPNP_IPPE_SQUARE, new Mat(), new Mat(), errs);
++            if (n < 2 || errs.rows() < 2) return est;
++            double e0 = errs.get(0, 0)[0], e1 = errs.get(1, 0)[0];
++            int alt = e0 <= e1 ? 1 : 0;
++            double eb = Math.min(e0, e1), ea = Math.max(e0, e1);
++            Transform3d altPose = toAprilTagFrame(rvecs.get(alt), tvecs.get(alt));
++            // getAmbiguity() = min(error1, error2) / max(error1, error2): keep error1, scale error2
++            double amb = ea > 0 ? eb / ea : 0;
++            double error2 = amb > 0 ? est.error1 / amb : Double.MAX_VALUE;
++            return new AprilTagPoseEstimate(est.pose1, altPose, est.error1, error2);
++        } finally {
++            obj.release();
++            img.release();
++            noDist.release();
++            errs.release();
++            for (var m : rvecs) m.release();
++            for (var m : tvecs) m.release();
++        }
++    }
++
++    /** IPPE's pose (tag axes x right, y up as AprilTag's homography) in AprilTag's frame (y down, z into tag). */
++    private static Transform3d toAprilTagFrame(Mat rvec, Mat tvec) {
++        var R = new Mat();
++        Calib3d.Rodrigues(rvec, R);
++        double[] r = new double[9];
++        var Rd = new Mat();
++        R.convertTo(Rd, CvType.CV_64F);
++        Rd.get(0, 0, r);
++        R.release();
++        Rd.release();
++        // R_at = R_h * diag(1, -1, -1)
++        var m = MatBuilder.fill(Nat.N3(), Nat.N3(), r[0], -r[1], -r[2], r[3], -r[4], -r[5], r[6], -r[7], -r[8]);
++        double[] t = new double[3];
++        tvec.get(0, 0, t);
++        return new Transform3d(new Translation3d(t[0], t[1], t[2]), new Rotation3d(m));
+     }
+ 
+     @Override

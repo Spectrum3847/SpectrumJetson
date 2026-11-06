@@ -1,0 +1,24 @@
+Robot-side guard for 2026-FM-SystemCore (not committed there; apply by hand with `git apply`), against 827a91a
+(check-ns-replay-merge). OrinSolver.solveOne() picks the alternate pose when its heading is closer to the gyro's.
+PhotonVision's NAPA path published altCameraToTarget = (0,0,0) with poseAmbiguity 0 whenever AprilTag's orthogonal
+iteration found one minimum (fixed in the fork, photonvision-106, and never the case in sc-vision), which places the
+robot AT the tag; the alternate is then a wrong pose that can still win on heading. Ignore an alternate whose
+translation is under 1 cm, or that is the same pose as the best.
+
+--- a/src/main/java/frc/robot/subsystems/vision/OrinSolver.java
++++ b/src/main/java/frc/robot/subsystems/vision/OrinSolver.java
+@@ -212,7 +212,13 @@
+         Pose3d chosen = fromBest;
+         Transform3d chosenCameraToTag = best.bestCameraToTarget;
+         Rotation2d heading = headingAt == null ? null : headingAt.apply(timestamp);
+-        if (heading != null && best.altCameraToTarget != null) {
++        // An alternate with (almost) no translation is "no alternate" (older PhotonVision builds published a zero
++        // transform and ambiguity 0); one equal to the best adds nothing.
++        boolean altUsable =
++                best.altCameraToTarget != null
++                        && best.altCameraToTarget.getTranslation().getNorm() > 0.01
++                        && !best.altCameraToTarget.equals(best.bestCameraToTarget);
++        if (heading != null && altUsable) {
+             Pose3d fromAlt = robotFromTag(bestTagPose, best.altCameraToTarget);
+             double bestErr =
+                     Math.abs(fromBest.toPose2d().getRotation().minus(heading).getRadians());

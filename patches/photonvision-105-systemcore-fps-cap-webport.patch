@@ -1,0 +1,139 @@
+diff --git a/photon-core/src/main/java/org/photonvision/common/hardware/metrics/SystemMonitorRaspberryPi.java b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/SystemMonitorRaspberryPi.java
+index cd241447..5d28e976 100644
+--- a/photon-core/src/main/java/org/photonvision/common/hardware/metrics/SystemMonitorRaspberryPi.java
++++ b/photon-core/src/main/java/org/photonvision/common/hardware/metrics/SystemMonitorRaspberryPi.java
+@@ -23,9 +23,16 @@ import org.photonvision.common.util.ShellExec;
+ public class SystemMonitorRaspberryPi extends SystemMonitor {
+     private final ShellExec runCommand = new ShellExec(true, true);
+ 
++    // Spectrum: the SystemCore (a Pi 5 / CM5 under LimelightOS) has no vcgencmd. Without this every
++    // metrics poll forked a shell several times a second and logged an error each time.
++    private static final boolean HAS_VCGENCMD =
++            java.util.stream.Stream.of(System.getenv().getOrDefault("PATH", "/usr/bin").split(":"))
++                    .anyMatch(d -> new java.io.File(d, "vcgencmd").canExecute());
++
+     @Override
+     public String getCpuThrottleReason() {
+         int state = 0;
++        if (!HAS_VCGENCMD) return "None";
+         String output = vcgencmd("get_throttled");
+         try {
+             state = Integer.decode(output);
+@@ -63,7 +70,7 @@ public class SystemMonitorRaspberryPi extends SystemMonitor {
+     }
+ 
+     private String vcgencmd(String cmd) {
+-        if (cmd.isBlank()) {
++        if (cmd.isBlank() || !HAS_VCGENCMD) {
+             return "";
+         }
+         String command = "vcgencmd " + cmd;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java b/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java
+index c8a4cef0..2b140403 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java
+@@ -222,6 +222,7 @@ public class AprilTagPipeline extends CVPipeline<CVPipelineResult, AprilTagPipel
+         // AprilTag 3).
+         boolean useNapa = settings.napa && !half && NapaDetector.usable();
+         List<AprilTagDetection> detections;
++        org.photonvision.vision.processes.LatencyTrace.mark(org.photonvision.vision.processes.LatencyTrace.DET0); // Spectrum: per-frame latency trace (photonvision-103)
+         if (useNapa) {
+             long t0 = System.nanoTime();
+             napaDetector.configure(
+@@ -239,6 +240,7 @@ public class AprilTagPipeline extends CVPipeline<CVPipelineResult, AprilTagPipel
+             sumPipeNanosElapsed += tagDetectionPipeResult.nanosElapsed;
+             detections = tagDetectionPipeResult.output;
+         }
++        org.photonvision.vision.processes.LatencyTrace.mark(org.photonvision.vision.processes.LatencyTrace.DET1);
+         if (half) {
+             double sx = frameStaticProperties.imageWidth / (double) in.cols();
+             double sy = frameStaticProperties.imageHeight / (double) in.rows();
+@@ -359,6 +361,7 @@ public class AprilTagPipeline extends CVPipeline<CVPipelineResult, AprilTagPipel
+             targetList = targetList.subList(0, Packet.MAX_ARRAY_LEN);
+         }
+ 
++        org.photonvision.vision.processes.LatencyTrace.mark(org.photonvision.vision.processes.LatencyTrace.POSE1);
+         var fpsResult = calculateFPSPipe.run(null);
+         var fps = fpsResult.output;
+ 
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
+index 519201ac..d85acc6e 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
+@@ -185,30 +185,6 @@ public class VisionRunner implements AutoCloseable {
+         return future;
+     }
+ 
+-    /**
+-     * Waits until the next time this VisionRunner should run its pipeline, based on current FPS limit
+-     */
+-    private void waitUntilNextTick(long startNanos) {
+-        // Spectrum (photonvision-98): capped on the SystemCore
+-        int fpsLimit = SystemCoreProfile.fpsLimit(fpsLimitSupplier.get());
+-
+-        if (fpsLimit > 0) {
+-            // SpectrumJetson (photonvision-65): a monotonic clock. The date can jump when the Jetson
+-            // takes the robot's (RobotClockSync), and a jump back here slept this camera for as long.
+-            long sleepTime = 1000 / fpsLimit - (System.nanoTime() - startNanos) / 1_000_000;
+-
+-            if (sleepTime > 0) {
+-                try {
+-                    Thread.sleep(sleepTime);
+-                } catch (InterruptedException e) {
+-                }
+-            }
+-            return;
+-        } else {
+-            // Fall through to no limit
+-            return;
+-        }
+-    }
+ 
+     // Spectrum: where each loop's time goes, logged every 10 s (frame = grab incl. decode,
+     // pipeline = pipeline.run, consumers = pipelineResultConsumer: NT, UI, health, ...).
+@@ -288,6 +264,12 @@ public class VisionRunner implements AutoCloseable {
+                 // SpectrumJetson (photonvision-100): the pipeline's own cap (Tag/Object FPS max),
+                 // combined with idle mode's; without one, idle mode alone, as before.
+                 long capNanos = FrameRateCap.capPeriodNanos(pipelineSupplier.get());
++                // Spectrum (sc/mjpeg-napa): the camera's FPS limit (and the SystemCore profile's cap)
++                // is applied here, before the grab, like Tag FPS max. It used to sleep in
++                // waitUntilNextTick() after the frame was grabbed, which aged every frame by up to a
++                // period (median latency ~43 ms at the SystemCore's 50 fps cap).
++                int fpsLimit = SystemCoreProfile.fpsLimit(fpsLimitSupplier.get());
++                if (fpsLimit > 0) capNanos = Math.max(capNanos, 1_000_000_000L / fpsLimit);
+                 if (capNanos > 0) {
+                     if (!frameRateCap.await(capNanos)) return;
+                 } else if (IdleMode.active() && !IdleMode.waitForNextFrame(lastGrabNanos)) return;
+@@ -351,7 +333,7 @@ public class VisionRunner implements AutoCloseable {
+ 
+                     // If we have an FPS limit, check if it's 0, in which case we skip processing and
+                     // just send a blank frame, otherwise we sleep until the next tick
+-                    waitUntilNextTick(start);
++                    // (the FPS limit is applied before the grab: capNanos above)
+                     try {
+                         var pipelineResult = pipeline.run(frame, cameraQuirks);
+                         long n3 = System.nanoTime();
+diff --git a/photon-server/src/main/java/org/photonvision/Main.java b/photon-server/src/main/java/org/photonvision/Main.java
+index b18e66c8..258b1b4a 100644
+--- a/photon-server/src/main/java/org/photonvision/Main.java
++++ b/photon-server/src/main/java/org/photonvision/Main.java
+@@ -352,7 +352,18 @@ public class Main implements Callable<Integer> {
+ 
+         logger.info("Starting server...");
+         HardwareManager.getInstance().setError(Optional.empty());
+-        Server.initialize(DEFAULT_WEBPORT);
++        // SPECTRUM_WEBPORT: another port for the UI, e.g. on a SystemCore, where Limelight's visionserver
++        // owns 5800 (SpectrumJetson scripts/systemcore).
++        int webPort = DEFAULT_WEBPORT;
++        String portEnv = System.getenv("SPECTRUM_WEBPORT");
++        if (portEnv != null && !portEnv.isBlank()) {
++            try {
++                webPort = Integer.parseInt(portEnv.trim());
++            } catch (NumberFormatException e) {
++                logger.warn("SPECTRUM_WEBPORT is not a number: " + portEnv + "; using " + DEFAULT_WEBPORT);
++            }
++        }
++        Server.initialize(webPort);
+         return -1; // Don't exit, the server is running
+     }
+ 
