@@ -210,6 +210,56 @@ The partition table is never changed, so a rollback can't break booting.
   logs can stay on USB, separate from this.
 - If FIRST or Limelight ship their own data partition later, use it instead.
 
+## Why the bench Pi reset 4 times on 2026-11-06 (read-only investigation)
+
+Pi clock: ~14:00, ~14:55, ~19:03 and ~19:27. None was a clean reboot: no shutdown target in any boot's journal,
+and every journal ends abruptly.
+
+**The 19:27 reset was a kernel panic caused by a stalled SD card, not power.**
+- pstore kept the panic (`/var/lib/systemd/pstore/dmesg-ramoops-0`, `console-ramoops-0`):
+  ```
+  [1475.555131] INFO: task kworker/2:1:3408 blocked for more than 30 seconds.
+  Workqueue: events_freezable mmc_rescan ... __mmc_claim_host <- mmc_get_card <- mmc_sd_detect <- mmc_rescan
+  [1475.555212] Kernel panic - not syncing: hung_task: blocked tasks
+  ```
+  The SD host was held by an I/O that didn't complete for over 30 s.
+- LimelightOS turns such stalls into panics: `/etc/sysctl.d/90-halt-forensics.conf` sets `hung_task_panic=1`,
+  `hung_task_timeout_secs=30`, and the cmdline has `panic=10`. That gives a reboot 10 s later.
+- The journal of that boot stops 45 s before the panic (1430 s vs 1475 s): nothing could be written to the card.
+- The bootloader's reset status for this boot (`/proc/device-tree/chosen/bootloader/rsts`) is `0x20`, a
+  watchdog/software reset. A power loss or brownout shows a power-on reset (`0x1000`).
+- That boot logged one under-voltage, at 5 s, and none in the 24 minutes before the hang.
+
+**The three earlier resets left no pstore record**, so they were not panics. Two explanations fit:
+- A stall of more than 15 s blocking systemd, so the 15 s hardware watchdog (`RuntimeWatchdogSec=15`) reset the
+  SoC silently. LimelightOS's own comment in that sysctl file describes exactly this case.
+- A real power loss.
+
+Under-voltage was frequent in those boots (81-397 events each; the 19:05 boot's journal ends on one), so for
+those three the supply can't be excluded. It may also be what makes the card stall.
+
+**Not the cause:**
+- Limelight's `periwatchdog` can reboot, but it has no events or `last_reason` in `/var/lib/periwatchdog`.
+- `canbuswatchdog` only manages CAN links.
+- Temperatures were ~50-55 °C, and no thermal events were logged.
+
+**Most likely cause: the SD card stalls for over 15-30 s under write load.**
+- The resets came during heavy writes: the camera captures, and the scp.
+- The card reports a 2014 date and an empty product name (`00000`).
+- It was up to 90% full.
+
+**What would confirm it:**
+1. **After each reset**, before anything else: `od -An -tx1 /proc/device-tree/chosen/bootloader/rsts`
+   (`00 00 00 20` is a watchdog or panic reset, `00 00 10 00` is power-on) and `sudo ls /var/lib/systemd/pstore`.
+2. **Make the silent case leave a record** (a temporary change, at the bench): `sudo sysctl -w
+   kernel.hung_task_timeout_secs=10`, below the 15 s watchdog, so a stall panics into pstore with its stack.
+3. **Stress the card with someone present** (it may reset the Pi): `dd if=/dev/zero of=/home/systemcore/t
+   bs=1M count=2000 oflag=direct status=progress`, with `dmesg -w` alongside. Then run it on a new card.
+4. **Swap the card** for a new high-endurance one (the provisioning plan above recommends it anyway). If the
+   resets stop under the same load and supply, it was the card.
+
+The data area in this plan doesn't fix a stalling card: it moves the writes, not the medium.
+
 ## Open points
 
 - Things to verify while applying:
