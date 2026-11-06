@@ -215,12 +215,20 @@ int pose_ippe_square(const cam_model *cam, const double corners[8], double size_
       for (int j = 0; j < 3; j++) R[i * 3 + j] = Rv[0 * 3 + i] * Rt[0 * 3 + j] + Rv[1 * 3 + i] * Rt[1 * 3 + j] +
                                                  Rv[2 * 3 + i] * Rt[2 * 3 + j];
     if (translation(R, obj, img, sol[k].t)) return -1;
-    if (pose_refine) refine(cam, obj, corners, &sol[k]);
     sol[k].err = reproj_err(cam, R, sol[k].t, obj, corners);
   }
+  // The two IPPE solutions and their errors decide best vs alt and the ambiguity (as PhotonVision's
+  // best/alt). Only the best is refined: refining the alt from its own start can slide it into the best's
+  // minimum, which made best_err/alt_err ~1 and every single-tag frame look ambiguous (tester entry 11).
   int bi = sol[0].err <= sol[1].err ? 0 : 1;
   *best = sol[bi];
   if (alt) *alt = sol[1 - bi];
+  if (pose_refine) {
+    refine(cam, obj, corners, best);
+    double e = reproj_err(cam, best->R, best->t, obj, corners);
+    if (e <= best->err) best->err = e;
+    else *best = sol[bi];  // (never seen) refinement made it worse: keep IPPE's
+  }
   return 0;
 }
 

@@ -329,11 +329,19 @@ int main(int argc, char **argv) {
     for (int k = 0; lfd >= 0 && k < 300 && (got = flock(lfd, LOCK_EX | LOCK_NB)) != 0 && !g_stop; k++) usleep(100000);
     if (got != 0) {
       fprintf(stderr, "camera lock %s is held by another program\n", lock_path);
+      g_stop = true;
+      if (chk.th.joinable()) chk.th.join();
+      if (pub) nt_pub_destroy(pub);
       return 1;
     }
   }
   uvc_usb *u = uvc_open(&uc);
-  if (!u) return 1;
+  if (!u) {
+    g_stop = true;  // the checker thread must be joined before exit
+    if (chk.th.joinable()) chk.th.join();
+    if (pub) nt_pub_destroy(pub);
+    return 1;
+  }
   const int W = uc.width, H = uc.height;
   const size_t FB = 4 << 20;
   std::vector<uint8_t> fb(FB + 64), Y((size_t)W * H + 64);
@@ -346,7 +354,7 @@ int main(int argc, char **argv) {
   if (out)
     fprintf(out,
             "seq,t_first,t_eof_reap,t_dec,t_det,t_pose,t_pub,bytes,dec_cpu_us,napa_cpu_us,pose_us,frame_cpu_us,"
-            "ntags,id,margin,hamming,c0x,c0y,c1x,c1y,c2x,c2y,c3x,c3y,tx,ty,tz,err,alt_err,uvc_flags,pts,scr_stc,scr_sof\n");
+            "ntags,id,margin,hamming,c0x,c0y,c1x,c1y,c2x,c2y,c3x,c3y,tx,ty,tz,err,alt_err,uvc_flags,pts,scr_stc,scr_sof,t_tag_row\n");
   uvc_chunk ch[256];
   int64_t t_start = mono_ns();
   // frame state
@@ -358,6 +366,8 @@ int main(int argc, char **argv) {
   FILE *save_f = nullptr;
   unsigned f_flags = 0, f_pts = 0, f_stc = 0, f_sof = 0;
   // Decode the bytes in so far and feed NAPA the rows that became final.
+  int64_t band_t[512];  // reap time of the URB that completed each 8-row band (rolling-shutter row times)
+  int64_t cur_tr = 0;
   auto feed = [&]() {
     if (bad || rows_dec >= H) return;
     int64_t c0 = cpu_ns();
@@ -368,6 +378,7 @@ int main(int argc, char **argv) {
       bad = 1;
       return;
     }
+    for (int b = rows_dec / 8; b < r / 8 && b < 512; b++) band_t[b] = cur_tr;
     rows_dec = r;
     if (!no_napa && !whole && rows_dec > rows_fed) {
       napa_stream_feed(ns, rows_dec);
@@ -400,12 +411,20 @@ int main(int argc, char **argv) {
         napa_to_apriltag_order(dets[i].corners, c);
         pose_ippe_square(&cam, c, tag_size, &poses[i], &alts[i]);
       }
+    // Each tag's own capture time: when the band holding its centre row arrived (the camera streams rows as it
+    // reads them out, so this is the rolling shutter's time for that tag, not the frame's first row).
+    int64_t tag_t[64];
+    for (int i = 0; i < nt; i++) {
+      double yc = (dets[i].corners[1] + dets[i].corners[3] + dets[i].corners[5] + dets[i].corners[7]) / 4;
+      int b = std::min(std::max((int)(yc / 8), 0), std::min(H / 8, 512) - 1);
+      tag_t[i] = band_t[b];
+    }
     int64_t t_pose = mono_ns();
     int64_t pose_ns = cpu_ns() - p0;
     if (nt) ndet++;
     int64_t t_pub = t_pose;
     if (pub) {
-      nt_pub_result(pub, t_first, dets.data(), have_cam ? poses : nullptr, have_cam ? alts : nullptr, nt);
+      nt_pub_result(pub, t_first, dets.data(), have_cam ? poses : nullptr, have_cam ? alts : nullptr, nt, tag_t);
       t_pub = mono_ns();
     }
     int64_t frame_cpu = cpu_ns() - c_frame0;
@@ -428,7 +447,7 @@ int main(int argc, char **argv) {
         fprintf(out, ",,,,,,,,,,,,,,,,");
       }
       // the frame's first UVC payload header: PTS / SCR (camera clock), for timestamp work
-      fprintf(out, ",%u,%u,%u,%u\n", f_flags, f_pts, f_stc, f_sof);
+      fprintf(out, ",%u,%u,%u,%u,%lld\n", f_flags, f_pts, f_stc, f_sof, nt ? (long long)tag_t[0] : 0LL);
     }
     if (save && ndone <= 600) {
       if (!save_f) save_f = fopen(save, "wb");
@@ -478,6 +497,7 @@ int main(int argc, char **argv) {
       }
       if (c.flags & 2) {  // EOF: finish this frame now; the URB's later packets belong to the next one
         if (process) {
+          cur_tr = tr;
           feed();
           finish(tr);
         }
@@ -485,7 +505,10 @@ int main(int argc, char **argv) {
         done_fid = f;
       }
     }
-    if (in_frame && process) feed();
+    if (in_frame && process) {
+      cur_tr = tr;
+      feed();
+    }
   }
   if (save_f) fclose(save_f);
   uvc_close(u);

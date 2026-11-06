@@ -35,6 +35,7 @@ int main(int argc, char **argv) {
   std::vector<double> lat;
   double csum[8] = {0}, csq[8] = {0};
   long ncorn = 0;
+  double amb_sum = 0, altx_sum = 0;
   long n = 0, tagged = 0;
   int64_t end = mono_ns() + (int64_t)secs * 1000000000LL;
   std::string type;
@@ -54,6 +55,9 @@ int main(int argc, char **argv) {
         tagged++;
         // first target's detectedCorners: after 2 TargetCorner lists' headers; minAreaRect list at q + 108
         const uint8_t *q0 = b.data() + 33;
+        double amb, altx;
+        memcpy(&amb, q0 + 156, 8), memcpy(&altx, q0 + 100, 8);
+        amb_sum += amb, altx_sum += altx;
         size_t off = 164;  // yaw..skew 32, ids+conf 12, two Transform3d 112, poseAmbiguity 8
         int nmin = (int8_t)q0[off];
         off += 1 + 16 * (size_t)nmin;
@@ -86,6 +90,7 @@ int main(int argc, char **argv) {
   auto P = [&](double q) { return lat.empty() ? 0.0 : lat[std::min(lat.size() - 1, (size_t)(lat.size() * q))]; };
   printf("rawBytes type '%s': %ld results (%ld with tags) in %d s; capture -> received here p50 %.3f p95 %.3f p99 %.3f ms\n",
          type.c_str(), n, tagged, secs, P(.5), P(.95), P(.99));
+  if (tagged) printf("poseAmbiguity mean %.4f, altCameraToTarget x mean %.4f m\n", amb_sum / tagged, altx_sum / tagged);
   if (ncorn) {
     printf("detectedCorners mean (sd) over %ld results:", ncorn);
     for (int k = 0; k < 8; k++) {
