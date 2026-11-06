@@ -43,3 +43,16 @@ The SystemCore stack (WPILib HAL, `can_sender`/`robot_heartbeat` kernel modules,
 - Replug at runtime: slcand recreates `can_s0`, but `can_sender` bound the old device at load. Not yet verified
   whether unplug blocks or the heartbeat follows the new device; reboot after a replug until it is.
 - `iodaemon`'s "Failed to open USB device" is the SystemCore IO board, unrelated to this adapter.
+
+## Verified after reboot (bench, beta18, WPILib 2027 alpha 8, Phoenix 6 26.70.0-alpha-2)
+
+- `can_s0` = slcan, 1 Mbps, up; `can_s1..s4` vcan. The robot's frames leave on it: `candump -n 12 can_s0` shows
+  `02041D41` every 10 ms plus Phoenix `0004xxxx` frames (~186 frames/s TX), RX 0 with nothing else on the bus.
+- `CANBus.getStatus()` in the DIYsystemcore-TestRobot prints `status=InvalidNetwork util=~216%` both with the
+  vcan `can_s0` (before) and with the adapter (after): it is Phoenix 6's status query on a SystemCore bus in this
+  alpha, not the interface. Use `talon.isConnected()` / RX counters as the health signal instead.
+- slcan can't report the bus error state or the error counters: `ip -d link` always shows ERROR-ACTIVE, and REC/TEC
+  are 0. Unacked frames aren't visible from Linux.
+- Talons need a real bus: at least one powered device, plus 120 ohm at each end (the adapter's termination
+  switch/jumper on, and the far device or a terminator on the other end). Without an ACKing node the adapter just
+  retransmits and RX stays 0.

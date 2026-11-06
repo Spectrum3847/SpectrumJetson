@@ -10,6 +10,11 @@
 # /etc/default/sc-vision. Switch: sc-vision native | photonvision | limelight | off.
 # While it runs, uvcvideo is detached from the camera (no /dev/video0); it is given back when it stops.
 set -euo pipefail
+# SSH_OPTS: extra ssh/scp options, e.g. "-o HostKeyAlias=172.26.0.1" when reaching the SystemCore by another address
+# shellcheck disable=SC2086
+ssh() { command ssh ${SSH_OPTS:-} "$@"; }
+# shellcheck disable=SC2086
+scp() { command scp ${SSH_OPTS:-} "$@"; }
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 B=${1:-$HOME/builder/sc-vision}
 HOST=${2:-systemcore@172.26.0.1}

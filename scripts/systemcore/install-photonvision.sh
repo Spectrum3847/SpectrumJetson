@@ -27,6 +27,11 @@
 # Switch (on the SystemCore):  sc-vision photonvision | limelight | off | status
 # Streaming NAPA etc. are environment switches in /etc/systemd/system/photonvision.service.d/10-spectrum.conf.
 set -euo pipefail
+# SSH_OPTS: extra ssh/scp options, e.g. "-o HostKeyAlias=172.26.0.1" when reaching the SystemCore by another address
+# shellcheck disable=SC2086
+ssh() { command ssh ${SSH_OPTS:-} "$@"; }
+# shellcheck disable=SC2086
+scp() { command scp ${SSH_OPTS:-} "$@"; }
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 JAR=${1:?usage: install-photonvision.sh JAR [NAPA_OUT] [HOST]}
 NAPA=${2:-$HOME/builder/sc-napa}
