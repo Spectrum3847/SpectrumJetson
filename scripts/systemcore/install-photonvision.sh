@@ -48,7 +48,7 @@ ssh "$HOST" 'mkdir -p /dev/shm/pv-install'
 scp -q "$JAR" "$HOST:/dev/shm/pv-install/photonvision.jar"
 scp -q "$NAPA/libspectrum-napa-apriltag.so" "$NAPA/libspectrum-stream.so" "$NAPA/napa_test" \
   "$REPO/scripts/systemcore/sc-vision" "$REPO/scripts/systemcore/photonvision-run.sh" \
-  "$REPO/scripts/systemcore/performance-governor.sh" "$HOST:/dev/shm/pv-install/"
+  "$REPO/scripts/systemcore/performance-governor.sh" "$REPO/scripts/systemcore/sd-quiet.sh" "$HOST:/dev/shm/pv-install/"
 UVC=${UVC:-1}
 if [[ $UVC == 1 && -f $UVC_KO ]]; then
   scp -q "$UVC_KO" "$HOST:/dev/shm/pv-install/uvcvideo-sc.ko"
@@ -162,6 +162,11 @@ if [[ ${GOVERNOR:-1} == 1 ]]; then
   sed -i 's/\r$//' "$S/performance-governor.sh"
   bash "$S/performance-governor.sh" enable >/dev/null
   echo "governor: $(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor) (enabled at boot)"
+fi
+# Logs in RAM (sd-quiet.sh: journald volatile, tmpfs over PV's logs dir): SD stalls reset the Pi. SDQUIET=0 skips
+if [[ ${SDQUIET:-1} == 1 ]]; then
+  sed -i 's/\r$//' "$S/sd-quiet.sh"
+  sudo sh "$S/sd-quiet.sh"
 fi
 # Native cameras (docs/SYSTEMCORE-NATIVE-BACKEND.md) are on by default for verified cameras; NATIVE=0 turns them off
 # with its own drop-in (20-native-camera.conf: SPECTRUM_NATIVE_CAMERA=0). Older installs' 20-native-camera.conf
