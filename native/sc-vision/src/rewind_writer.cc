@@ -1,9 +1,11 @@
-// Rewind video writer (rewind_writer.h).
+// Rewind video writer (rewind_writer.h). The camera thread and the writer share no lock: a single-producer /
+// single-consumer byte ring plus a ring of frame records, with acquire/release counters, so a slow writer (the
+// SD card can stall for seconds) can only make the producer drop frames, never wait.
 #include "rewind_writer.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
-#include <sched.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/resource.h>
@@ -13,8 +15,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <condition_variable>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -31,26 +31,31 @@ double thread_cpu_ms() {
   return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
 }
 struct Rec {  // a frame in the ring
-  size_t off, len;
+  uint64_t pos;  // its first byte, as a running byte count
+  size_t len;
   int width, height;
   int64_t t_us, robot_us;
 };
 constexpr int64_t kFileUs = 5LL * 60 * 1000000;  // a new file every 5 min
 constexpr int64_t kSyncUs = 2000000;             // force to disk every 2 s
 constexpr size_t kChunk = 1 << 20;               // write in ~1 MB pieces
+constexpr uint32_t kRecs = 4096;                 // frame records in flight (34 s of a 120 fps camera)
 }  // namespace
 
 struct RewindWriter {
   std::string prefix;
-  std::vector<uint8_t> ring;
-  size_t head = 0, tail = 0, used = 0;  // bytes; head: next write position, tail: oldest unwritten
-  std::vector<Rec> recs;                // queued frames, oldest first
-  std::mutex mu;
-  std::condition_variable cv;
-  bool stop = false;
+  std::vector<uint8_t> ring;  // default 32 MB per camera (rewind_open's ring_bytes)
+  std::vector<Rec> recs = std::vector<Rec>(kRecs);
+  // producer-owned counters (written by the camera thread only), read by the writer
+  std::atomic<uint64_t> head{0};   // bytes ever pushed
+  std::atomic<uint32_t> rhead{0};  // records ever pushed
+  // writer-owned counters, read by the producer
+  std::atomic<uint64_t> tail{0};   // bytes ever released (written or dropped by the writer)
+  std::atomic<uint32_t> rtail{0};  // records ever consumed
+  std::atomic<bool> stop{false}, failed{false};
   double record_fps;
-  int64_t last_keep_us = 0;
-  std::atomic<long> queued{0}, written{0}, dropped_full{0}, dropped_fps{0};
+  int64_t last_keep_us = 0;  // producer only
+  std::atomic<long> queued{0}, written{0}, dropped_full{0}, dropped_fps{0}, lost{0};
   std::atomic<long long> bytes{0};
   std::atomic<double> max_fsync_ms{0}, cpu_ms{0};
   std::thread th;
@@ -62,7 +67,7 @@ struct RewindWriter {
   long long file_off = 0;
   int64_t file_start_us = 0, last_sync_us = 0;
 
-  void open_next(int64_t now) {
+  bool open_next(int64_t now) {
     close_files();
     file_no++;
     char p[512];
@@ -70,21 +75,21 @@ struct RewindWriter {
     fd = ::open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     snprintf(p, sizeof p, "%s_%04d.csv", prefix.c_str(), file_no);
     csv = fopen(p, "w");
-    if (csv) fprintf(csv, "frame,offset,size,width,height,jetson_us,robot_us\n");
+    if (fd < 0 || !csv) return false;
+    fprintf(csv, "# frame,offset,size,width,height,jetson_us,robot_us\n");  // as RewindRecorder's
     file_off = 0;
     file_start_us = now;
     last_sync_us = now;
+    return true;
   }
   void sync() {
     if (fd < 0) return;
-    const double t0 = thread_cpu_ms();
     const int64_t w0 = mono_us();
     if (csv) fflush(csv);
     fdatasync(fd);
     if (csv) fdatasync(fileno(csv));
     const double ms = (mono_us() - w0) / 1e3;
     if (ms > max_fsync_ms.load()) max_fsync_ms = ms;
-    (void)t0;
   }
   void close_files() {
     if (fd >= 0) {
@@ -97,64 +102,84 @@ struct RewindWriter {
       csv = nullptr;
     }
   }
+  // Writes all of buf; returns the bytes actually written (short only on an error other than EINTR).
+  size_t write_all(const uint8_t *buf, size_t n) {
+    size_t done = 0;
+    while (done < n) {
+      const ssize_t k = ::write(fd, buf + done, n - done);
+      if (k > 0) {
+        done += (size_t)k;
+      } else if (k < 0 && errno == EINTR) {
+        continue;
+      } else {
+        break;  // ENOSPC, EIO, ...
+      }
+    }
+    return done;
+  }
   void run() {
     pthread_setname_np(pthread_self(), "RewindWriter");
-    setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);  // below everything that matters
-    sched_param sp{};
-    sched_setscheduler(0, SCHED_IDLE, &sp);
+    // Below everything that matters, but an ordinary CFS thread (not SCHED_IDLE): it holds no lock anyone waits on.
+    setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
     std::vector<uint8_t> out;
     out.reserve(kChunk + 512 * 1024);
     std::vector<Rec> batch;
     for (;;) {
-      size_t take_bytes = 0;
-      {
-        std::unique_lock<std::mutex> l(mu);
-        cv.wait_for(l, std::chrono::milliseconds(200), [&] { return stop || used >= kChunk / 2; });
-        if (recs.empty() && stop) break;
-        batch.clear();
-        for (const Rec &r : recs) {  // up to ~1 MB, oldest first
-          if (!batch.empty() && take_bytes + r.len > kChunk) break;
-          batch.push_back(r);
-          take_bytes += r.len;
-        }
-        recs.erase(recs.begin(), recs.begin() + batch.size());
-      }
-      // Copy out without the lock (the producer only writes past `used`, which still covers these bytes), so a
-      // push never waits on this copy; then give the space back.
-      out.clear();
-      for (const Rec &r : batch) {
-        const size_t first = std::min(r.len, ring.size() - r.off);
-        out.insert(out.end(), ring.begin() + r.off, ring.begin() + r.off + first);
-        out.insert(out.end(), ring.begin(), ring.begin() + (r.len - first));
-      }
-      if (take_bytes) {
-        std::lock_guard<std::mutex> l(mu);
-        tail = (tail + take_bytes) % ring.size();
-        used -= take_bytes;
-      }
-      const int64_t now = mono_us();
-      if (batch.empty()) {
+      const uint32_t rh = rhead.load(std::memory_order_acquire);
+      uint32_t rt = rtail.load(std::memory_order_relaxed);
+      if (rh == rt) {
+        if (stop.load()) break;
+        const int64_t now = mono_us();
         if (fd >= 0 && now - last_sync_us > kSyncUs) last_sync_us = now, sync();
+        timespec ts{0, 20000000};  // 20 ms
+        nanosleep(&ts, nullptr);
         continue;
       }
-      if (fd < 0 || now - file_start_us > kFileUs) open_next(now);
-      size_t done = 0;
-      while (done < out.size()) {
-        const ssize_t n = ::write(fd, out.data() + done, out.size() - done);
-        if (n <= 0) break;
-        done += (size_t)n;
+      batch.clear();
+      out.clear();
+      size_t take = 0;
+      while (rt != rh && (batch.empty() || take + recs[rt % kRecs].len <= kChunk)) {
+        const Rec &r = recs[rt % kRecs];
+        const size_t off = (size_t)(r.pos % ring.size()), first = std::min(r.len, ring.size() - off);
+        out.insert(out.end(), ring.begin() + off, ring.begin() + off + first);
+        out.insert(out.end(), ring.begin(), ring.begin() + (r.len - first));
+        batch.push_back(r);
+        take += r.len;
+        rt++;
       }
+      // the copied frames' space and records go back to the producer
+      tail.store(batch.back().pos + batch.back().len, std::memory_order_release);
+      rtail.store(rt, std::memory_order_release);
+      if (failed.load()) {
+        lost += (long)batch.size();
+        continue;
+      }
+      const int64_t now = mono_us();
+      if ((fd < 0 || now - file_start_us > kFileUs) && !open_next(now)) {
+        failed = true;
+        lost += (long)batch.size();
+        continue;
+      }
+      const size_t done = write_all(out.data(), out.size());
+      // index only the frames written whole
       size_t o = 0;
+      long whole = 0;
       for (const Rec &r : batch) {
-        if (csv)
-          fprintf(csv, "%ld,%lld,%zu,%d,%d,%lld,%lld\n", frame_no, file_off + (long long)o, r.len, r.width, r.height,
-                  (long long)r.t_us, (long long)r.robot_us);
+        if (o + r.len > done) break;
+        fprintf(csv, "%ld,%lld,%zu,%d,%d,%lld,%lld\n", frame_no, file_off + (long long)o, r.len, r.width, r.height,
+                (long long)r.t_us, (long long)r.robot_us);
         frame_no++;
         o += r.len;
+        whole++;
       }
-      file_off += (long long)out.size();
-      bytes += (long long)out.size();
-      written += (long)batch.size();
+      file_off += (long long)done;
+      bytes += (long long)done;
+      written += whole;
+      if (done < out.size()) {  // the disk refused (full, error): stop recording, count what's lost
+        failed = true;
+        lost += (long)batch.size() - whole;
+        fprintf(stderr, "Rewind writer %s: write failed (%s); recording stopped\n", prefix.c_str(), strerror(errno));
+      }
       if (now - last_sync_us > kSyncUs) last_sync_us = now, sync();
       cpu_ms = thread_cpu_ms();
     }
@@ -166,7 +191,7 @@ struct RewindWriter {
 RewindWriter *rewind_open(const char *prefix, size_t ring_bytes, double record_fps) {
   auto *w = new RewindWriter;
   w->prefix = prefix;
-  w->ring.resize(std::max<size_t>(ring_bytes, 2 * kChunk));
+  w->ring.resize(std::max<size_t>(ring_bytes ? ring_bytes : (size_t)32 << 20, 2 * kChunk));
   w->record_fps = record_fps;
   w->th = std::thread([w] { w->run(); });
   return w;
@@ -175,49 +200,41 @@ RewindWriter *rewind_open(const char *prefix, size_t ring_bytes, double record_f
 int rewind_push(RewindWriter *w, const uint8_t *jpeg, size_t len, int width, int height, int64_t t_us,
                 int64_t robot_us) {
   if (!w || !len) return 0;
-  // One producer per writer (the camera's thread). The locks are only held for bookkeeping (the writer never
-  // holds it across a copy or a write), and the frame is copied into the reserved space without it.
-  size_t off;
-  {
-    std::lock_guard<std::mutex> l(w->mu);
-    if (w->record_fps > 0 && w->last_keep_us && t_us - w->last_keep_us < (int64_t)(1e6 / w->record_fps) - 2000) {
-      w->dropped_fps++;
-      return 0;
-    }
-    if (w->used + len > w->ring.size()) {  // the writer is behind: drop, never wait
-      w->dropped_full++;
-      return 0;
-    }
-    off = w->head;
-    w->head = (off + len) % w->ring.size();
-    w->used += len;  // reserved: the writer's copies stay behind it
-    w->last_keep_us = t_us;
+  if (w->record_fps > 0 && w->last_keep_us && t_us - w->last_keep_us < (int64_t)(1e6 / w->record_fps) - 2000) {
+    w->dropped_fps++;
+    return 0;
   }
-  const size_t first = std::min(len, w->ring.size() - off);
+  if (w->failed.load(std::memory_order_relaxed)) {
+    w->lost++;
+    return 0;
+  }
+  const uint64_t h = w->head.load(std::memory_order_relaxed);
+  const uint32_t rh = w->rhead.load(std::memory_order_relaxed);
+  if (h + len - w->tail.load(std::memory_order_acquire) > w->ring.size() ||
+      rh - w->rtail.load(std::memory_order_acquire) >= kRecs) {
+    w->dropped_full++;  // the writer is behind: drop, never wait
+    return 0;
+  }
+  const size_t off = (size_t)(h % w->ring.size()), first = std::min(len, w->ring.size() - off);
   memcpy(w->ring.data() + off, jpeg, first);
   memcpy(w->ring.data(), jpeg + first, len - first);
-  {
-    std::lock_guard<std::mutex> l(w->mu);
-    w->recs.push_back(Rec{off, len, width, height, t_us, robot_us});
-    w->queued++;
-    if (w->used >= kChunk / 2) w->cv.notify_one();
-  }
+  w->recs[rh % kRecs] = Rec{h, len, width, height, t_us, robot_us};
+  w->head.store(h + len, std::memory_order_relaxed);
+  w->rhead.store(rh + 1, std::memory_order_release);  // publishes the bytes and the record
+  w->last_keep_us = t_us;
+  w->queued++;
   return 1;
 }
 
 void rewind_get_stats(RewindWriter *w, rewind_stats *s) {
   s->queued = w->queued, s->written = w->written, s->dropped_full = w->dropped_full;
   s->dropped_fps = w->dropped_fps, s->bytes = w->bytes, s->max_fsync_ms = w->max_fsync_ms;
-  s->writer_cpu_ms = w->cpu_ms;
+  s->writer_cpu_ms = w->cpu_ms, s->lost = w->lost;
 }
 
 void rewind_close(RewindWriter *w) {
   if (!w) return;
-  {
-    std::lock_guard<std::mutex> l(w->mu);
-    w->stop = true;
-  }
-  w->cv.notify_one();
+  w->stop = true;
   w->th.join();
   delete w;
 }

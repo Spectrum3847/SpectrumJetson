@@ -25,13 +25,23 @@ HOST=${3:-systemcore@172.26.0.1}
 for f in "$JAR" "$NAPA/libspectrum-napa-apriltag.so" "$NAPA/libspectrum-stream.so" "$NAPA/napa_test"; do
   [[ -f $f ]] || { echo "missing $f" >&2; exit 1; }
 done
-ssh "$HOST" 'mkdir -p ~/builder/pv-install'
-scp -q "$JAR" "$HOST:builder/pv-install/photonvision.jar"
+# Staged in RAM (/dev/shm): the SystemCore's old SD card stalls under heavy writes (a >30 s I/O hang panicked the
+# kernel at 19:27); only the final copies touch it, each to a temporary name, synced, then renamed (reset-safe).
+ssh "$HOST" 'mkdir -p /dev/shm/pv-install'
+scp -q "$JAR" "$HOST:/dev/shm/pv-install/photonvision.jar"
 scp -q "$NAPA/libspectrum-napa-apriltag.so" "$NAPA/libspectrum-stream.so" "$NAPA/napa_test" \
-  "$REPO/scripts/systemcore/sc-vision" "$HOST:builder/pv-install/"
+  "$REPO/scripts/systemcore/sc-vision" "$HOST:/dev/shm/pv-install/"
 ssh "$HOST" ENABLE="${ENABLE:-0}" 'bash -s' <<'REMOTE'
 set -euo pipefail
-S=~/builder/pv-install
+S=/dev/shm/pv-install
+trap 'rm -rf /dev/shm/pv-install' EXIT
+# put SRC at DST: a temporary name next to it, synced, renamed, then checked against the staged copy
+put() {
+  sudo install -m "$3" "$1" "$2.new"
+  sync -f "$2.new" 2>/dev/null || sync
+  sudo mv -f "$2.new" "$2"
+  [[ $(sha256sum < "$1") == $(sudo sha256sum < "$2") ]] || { echo "install: $2 differs from $1" >&2; exit 1; }
+}
 chmod +x "$S/napa_test"
 "$S/napa_test" >/dev/null || { echo "napa_test failed on this machine" >&2; exit 1; }
 # A truncated jar would crash-loop the service.
@@ -43,11 +53,10 @@ exec 9>/tmp/camera.lock
 flock -w 600 9 || { echo "camera lock busy for 10 min: not installing" >&2; exit 1; }
 sudo systemctl stop photonvision 2>/dev/null || true
 sudo mkdir -p /opt/photonvision/lib
-[[ -f /opt/photonvision/photonvision.jar ]] && sudo cp /opt/photonvision/photonvision.jar /opt/photonvision/photonvision.jar.prev
-sudo install -m 644 "$S/photonvision.jar" /opt/photonvision/photonvision.jar.new
-sudo mv -f /opt/photonvision/photonvision.jar.new /opt/photonvision/photonvision.jar
-sudo install -m 755 "$S/libspectrum-napa-apriltag.so" "$S/libspectrum-stream.so" /opt/photonvision/lib/
-sudo install -m 755 "$S/sc-vision" /usr/local/bin/sc-vision
+put "$S/photonvision.jar" /opt/photonvision/photonvision.jar 644
+put "$S/libspectrum-napa-apriltag.so" /opt/photonvision/lib/libspectrum-napa-apriltag.so 755
+put "$S/libspectrum-stream.so" /opt/photonvision/lib/libspectrum-stream.so 755
+put "$S/sc-vision" /usr/local/bin/sc-vision 755
 sudo tee /etc/systemd/system/photonvision.service >/dev/null <<'EOF'
 [Unit]
 Description=PhotonVision (Spectrum fork, SpectrumJetson scripts/systemcore)

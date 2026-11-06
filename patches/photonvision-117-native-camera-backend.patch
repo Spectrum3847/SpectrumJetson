@@ -1,0 +1,335 @@
+diff --git a/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java b/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
+index 76741603..bcd4ec85 100644
+--- a/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
++++ b/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
+@@ -122,6 +122,41 @@ public final class NapaDetectorJNI {
+      */
+     public static native byte[][] drainNativeResults(long handle);
+ 
++    // Spectrum (sc/mjpeg-napa) native camera backend (SpectrumJetson
++    // docs/SYSTEMCORE-NATIVE-BACKEND.md)
++
++    /**
++     * Opens the camera (its /dev/video path) natively: MJPEG width x height at fps, its own capture
++     * thread; decode, streaming NAPA, pose and publish there. Returns a NAPA handle (the setNative*
++     * calls, setParams, detect and destroy work on it; destroy closes the camera), or 0.
++     */
++    public static native long cameraOpen(String dev, int width, int height, int fps, String family);
++
++    /** Sets a V4L2 control, reading it first: 1 written, 0 already that value, -1 error. */
++    public static native int cameraSetControl(long handle, int id, int value);
++
++    /** A V4L2 control's value, or Integer.MIN_VALUE. */
++    public static native int cameraGetControl(long handle, int id);
++
++    /**
++     * The latest full-size gray image into dataAddr (width x height, stride width). Returns its
++     * camera stamp (ns), or 0 when none is ready yet.
++     */
++    public static native long cameraLatestGray(long handle, long dataAddr, int width, int height);
++
++    /**
++     * {frames, bad frames, skipped by the policy, ms since the last frame (-1: none), Rewind frames
++     * kept}.
++     */
++    public static native long[] cameraStats(long handle);
++
++    /**
++     * Rewind video from the camera's own thread: prefix (path without _NNNN; null stops), ring MB (32
++     * if <= 0), record fps (0: every frame). True when recording.
++     */
++    public static native boolean cameraRecord(
++            long handle, String prefix, int ringMb, double recordFps);
++
+     /**
+      * Spectrum (sc/mjpeg-napa): this camera's frame policy for streamed frames: decode scale 1, 2 or
+      * 4, every fullEvery-th processed frame at full scale (0: never), process 1 frame in
+diff --git a/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java b/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java
+index ac46a9ab..910b9c1c 100644
+--- a/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java
++++ b/photon-core/src/main/java/org/photonvision/rewind/RewindRecorder.java
+@@ -95,6 +95,63 @@ public class RewindRecorder {
+     private long fpsWindowStartNs = 0;
+     private int fpsWindowFrames = 0;
+ 
++    // Spectrum (sc/mjpeg-napa) native camera backend: the camera's own thread writes the video (a
++    // ring + a
++    // low-priority writer, NapaDetectorJNI.cameraRecord); this only follows the sessions.
++    private long nativeHandle = 0;
++
++    private RewindRecorder(long nativeHandle, Supplier<String> nickname) {
++        this.camera = null;
++        this.nickname = nickname;
++        this.nativeHandle = nativeHandle;
++        this.logger = new Logger(RewindRecorder.class, nickname.get(), LogGroup.Camera);
++        this.sink = null;
++        this.thread = new Thread(this::runNative, "Rewind-native-" + nickname.get());
++        this.thread.setDaemon(true);
++        this.thread.start();
++        RewindManager.getInstance().register(this);
++    }
++
++    /** For a camera captured natively (SPECTRUM_NATIVE_CAMERA): the native side records it. */
++    public static RewindRecorder forNative(long nativeHandle, Supplier<String> nickname) {
++        return new RewindRecorder(nativeHandle, nickname);
++    }
++
++    private static final int NATIVE_RING_MB =
++            Integer.parseInt(System.getenv().getOrDefault("SPECTRUM_REWIND_RING_MB", "32"));
++
++    private void runNative() {
++        RewindManager.Session recording = null;
++        while (running) {
++            RewindManager.Session s = RewindManager.getInstance().currentSession();
++            if (s != recording) {
++                if (s == null) {
++                    org.photonvision.jni.NapaDetectorJNI.cameraRecord(nativeHandle, null, 0, 0);
++                    logger.info("Rewind: native recording stopped");
++                } else {
++                    try {
++                        Path dir = s.dir().resolve(RewindManager.safeName(nickname.get()));
++                        Files.createDirectories(dir);
++                        long minIntervalNs = RewindManager.getInstance().minFrameIntervalNs();
++                        double fps = minIntervalNs > 0 ? 1e9 / minIntervalNs : 0;
++                        String prefix =
++                                dir.resolve(s.name() + "_" + dir.getFileName() + "_n" + nextSegmentIndex(dir))
++                                        .toString();
++                        boolean ok =
++                                org.photonvision.jni.NapaDetectorJNI.cameraRecord(
++                                        nativeHandle, prefix, NATIVE_RING_MB, fps);
++                        logger.info("Rewind: native recording to " + prefix + (ok ? "" : " FAILED"));
++                    } catch (IOException e) {
++                        logger.error("Rewind: native recording failed", e);
++                    }
++                }
++                recording = s;
++            }
++            sleep(100);
++        }
++        org.photonvision.jni.NapaDetectorJNI.cameraRecord(nativeHandle, null, 0, 0);
++    }
++
+     public RewindRecorder(UsbCamera camera, Supplier<String> nickname) {
+         this.camera = camera;
+         this.nickname = nickname;
+@@ -121,7 +178,7 @@ public class RewindRecorder {
+         } catch (InterruptedException e) {
+             Thread.currentThread().interrupt();
+         }
+-        sink.close();
++        if (sink != null) sink.close();
+     }
+ 
+     private void run() {
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+index 66d5b2a1..a8d7262c 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+@@ -94,8 +94,107 @@ public class USBFrameProvider extends CpuImageProcessor {
+     private long stuckTestCheckedNs = 0;
+     private boolean stuckTest = false;
+ 
++    // ---- Spectrum (sc/mjpeg-napa) native camera backend (SpectrumJetson
++    // docs/SYSTEMCORE-NATIVE-BACKEND.md) ----
++    // SPECTRUM_NATIVE_CAMERA=1 (with SPECTRUM_NATIVE_PUBLISH=1): this camera's frames are captured,
++    // decoded,
++    // detected, posed and published by a native thread that owns the V4L2 queue; cscore keeps the
++    // device open only
++    // for its controls (no sink enabled, so it never streams). The Java pipeline gets the latest
++    // image at its own
++    // low rate (UI, stream, settings). Any failure: this camera stays on the cscore path (the fast
++    // path).
++    private static final boolean NATIVE_CAMERA =
++            "1".equals(System.getenv("SPECTRUM_NATIVE_CAMERA"))
++                    && org.photonvision.vision.pipe.impl.NativePublish.ENABLED;
++
++    private long nativeHandle = 0;
++    private boolean nativeFailed = false;
++    private org.opencv.core.Mat nativeGray;
++    private RewindRecorder nativeRewind;
++
++    /** The native camera's NAPA handle (0: not native). */
++    public long nativeCameraHandle() {
++        return nativeHandle;
++    }
++
++    private boolean openNative() {
++        if (nativeFailed) return false;
++        try {
++            var mode = settables.getCurrentVideoMode();
++            if (mode == null || mode.pixelFormat != PixelFormat.MJPEG) {
++                logger.info("Native camera: not an MJPEG mode; staying on cscore");
++                nativeFailed = true;
++                return false;
++            }
++            // cscore: keep the device open (controls) but stream nothing
++            camera.setConnectionStrategy(VideoSource.ConnectionStrategy.KEEP_OPEN);
++            cvSink.setEnabled(false);
++            synchronized (this) {
++                if (graySink != null) graySink.setEnabled(false);
++            }
++            if (rewind != null) {
++                rewind.stop(); // its cscore sink would start cscore streaming
++                rewind = null;
++            }
++            String dev = camera.getPath();
++            long h = 0;
++            for (int attempt = 0;
++                    attempt < 20 && h == 0;
++                    attempt++) { // cscore stops its stream asynchronously
++                h =
++                        org.photonvision.jni.NapaDetectorJNI.cameraOpen(
++                                dev, mode.width, mode.height, mode.fps, "tag36h11");
++                if (h == 0) Thread.sleep(100);
++            }
++            if (h == 0) {
++                logger.error("Native camera: could not open " + dev + "; staying on cscore");
++                nativeFailed = true;
++                cvSink.setEnabled(!useGray);
++                synchronized (this) {
++                    if (graySink != null) graySink.setEnabled(useGray);
++                }
++                camera.setConnectionStrategy(VideoSource.ConnectionStrategy.AUTO_MANAGE);
++                return false;
++            }
++            nativeHandle = h;
++            nativeGray = new org.opencv.core.Mat(mode.height, mode.width, org.opencv.core.CvType.CV_8UC1);
++            nativeRewind = RewindRecorder.forNative(h, () -> settables.getConfiguration().nickname);
++            logger.info(
++                    "Native camera: " + dev + " captured natively (" + mode.width + "x" + mode.height + ")");
++            return true;
++        } catch (UnsatisfiedLinkError | InterruptedException e) {
++            nativeFailed = true;
++            return false;
++        }
++    }
++
++    private CapturedFrame nativeFrame() {
++        long end = System.nanoTime() + 200_000_000L;
++        while (System.nanoTime() < end) {
++            long stamp =
++                    org.photonvision.jni.NapaDetectorJNI.cameraLatestGray(
++                            nativeHandle, nativeGray.dataAddr(), nativeGray.cols(), nativeGray.rows());
++            if (stamp != 0) {
++                lastTime = stamp;
++                return new CapturedFrame(
++                        new CVMat(nativeGray.clone()),
++                        settables.getFrameStaticProperties(),
++                        toMidExposureNs(stamp));
++            }
++            try {
++                Thread.sleep(2);
++            } catch (InterruptedException e) {
++                Thread.currentThread().interrupt();
++                break;
++            }
++        }
++        return new CapturedFrame(new CVMat(), settables.getFrameStaticProperties(), 0);
++    }
++
+     @Override
+     public CapturedFrame getInputMat() {
++        if (NATIVE_CAMERA && (nativeHandle != 0 || openNative())) return nativeFrame();
+         if (restartIfCameraThreadDead()) {
+             // photonvision-88: the module is being rebuilt; don't grab from (or reset) this camera.
+             try {
+@@ -1428,6 +1527,19 @@ public class USBFrameProvider extends CpuImageProcessor {
+ 
+     @Override
+     public void release() {
++        if (nativeRewind != null) {
++            nativeRewind.stop();
++            nativeRewind = null;
++        }
++        if (nativeHandle != 0) {
++            org.photonvision.jni.NapaDetectorJNI.destroy(
++                    nativeHandle); // stops the camera thread, closes it
++            nativeHandle = 0;
++        }
++        if (nativeGray != null) {
++            nativeGray.release();
++            nativeGray = null;
++        }
+         if (rewind != null) {
+             rewind.stop();
+             rewind = null;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NapaDetector.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NapaDetector.java
+index d1dd3dc2..eae73616 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NapaDetector.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NapaDetector.java
+@@ -78,7 +78,28 @@ public class NapaDetector implements Releasable {
+             NapaDetectorJNI.setParams(handle, minTagPx, maxHamming, far, 32, farMinTagPx, sweeps);
+             sent = want;
+             sentSweeps = sweeps;
++            sentCam = 0; // the native camera's detector gets them too (below)
+         }
++        lastParams = new Object[] {minTagPx, maxHamming, far, farMinTagPx, sweeps};
++    }
++
++    private Object[] lastParams;
++    private long sentCam = 0;
++
++    /**
++     * Spectrum (sc/mjpeg-napa) native camera backend: its detector follows this pipeline's settings.
++     */
++    private void configureCamera(long cam) {
++        if (cam == sentCam || lastParams == null) return;
++        NapaDetectorJNI.setParams(
++                cam,
++                (int) lastParams[0],
++                (int) lastParams[1],
++                (boolean) lastParams[2],
++                32,
++                (int) lastParams[3],
++                (double) lastParams[4]);
++        sentCam = cam;
+     }
+ 
+     private static Boolean streamOn = null;
+@@ -116,6 +137,21 @@ public class NapaDetector implements Releasable {
+     public List<AprilTagDetection> detect(Mat gray) {
+         if (handle == 0 || gray == null || gray.empty() || gray.type() != CvType.CV_8UC1)
+             return List.of();
++        // Spectrum (sc/mjpeg-napa) native camera backend: the camera's own thread detects and publishes
++        // every
++        // frame; this (the UI's / Java pipeline's low-rate frame) is detected whole on the camera's
++        // handle, and
++        // the handle gets this camera's settings, calibration and time-sync state.
++        var nativePubCam = NativePublish.current();
++        if (nativePubCam != null && nativePubCam.cameraHandle != 0) {
++            long cam = nativePubCam.cameraHandle;
++            configureCamera(cam);
++            var r =
++                    NapaDetectorJNI.detect(
++                            cam, gray.dataAddr(), gray.cols(), gray.rows(), (int) gray.step1());
++            nativePubCam.update(cam);
++            return r == null ? List.of() : List.of(r);
++        }
+         var ret =
+                 streamEnabled()
+                         ? NapaDetectorJNI.detectStreamed(
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+index d54dc55c..1641d346 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+@@ -56,6 +56,8 @@ public final class NativePublish {
+     public volatile long sincePongNs = 0;
+     // from the camera's frame provider: the frame's first bytes -> mid-exposure (exposure/2 + delay)
+     public volatile long midShiftNs = 0;
++    // native camera backend: the NAPA handle that owns this camera (0: not native)
++    public volatile long cameraHandle = 0;
+     // from the camera's frame provider: its camera-clock stamp (PTS) -> mid-exposure (0: no camera
+     // clock)
+     public volatile long camShiftNs = 0;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
+index 3006d5c0..9b5b609e 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionRunner.java
+@@ -288,6 +288,7 @@ public class VisionRunner implements AutoCloseable {
+                                 instanceof org.photonvision.vision.frame.provider.USBFrameProvider usb) {
+                     nativePublish.midShiftNs = usb.nativeMidShiftNs;
+                     nativePublish.camShiftNs = usb.nativeCamShiftNs;
++                    nativePublish.cameraHandle = usb.nativeCameraHandle();
+                 }
+                 boolean nativeOn =
+                         nativePublish != null

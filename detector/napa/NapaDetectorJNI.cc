@@ -30,13 +30,22 @@
 //       none): when the camera's frame-rate cap next takes a frame, so frames it skips aren't fed.
 //       The streaming decoder must be running (SPECTRUM_JPEG_DECODER=stream on the Jetson).
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <jni.h>
+#include <linux/videodev2.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <time.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <pthread.h>
+
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
+#include <cstdint>
 #include <deque>
 #include <cmath>
 #include <chrono>
@@ -51,8 +60,10 @@
 
 #include "../stream_decode.h"
 #include "napa_far.h"
+#include "../../native/sc-vision/src/rewind_writer.h"
 extern "C" {
 #include "../../native/sc-vision/src/pose.h"  // poseSquare (sc/mjpeg-napa)
+#include "../../native/sc-vision/src/mjdec.h"  // the native camera backend's decoder
 }
 #include "../../native/sc-vision/src/pv_pack.h"  // native publish (sc/mjpeg-napa)
 
@@ -150,6 +161,7 @@ struct StreamSink {
   PublishCfg pub;              // (cfg_mu)
   int64_t t_begin = 0;         // CLOCK_MONOTONIC when the frame's first bytes were seen
   int64_t t_cam = 0;           // the frame's predicted camera-clock stamp (0: unknown)
+  int64_t t_cam_direct = 0;    // native camera backend: the frame's dequeued V4L2 stamp (camera clock), else 0
   std::atomic<long> cam_stamped{0};
   std::atomic<int64_t> taken_sight{0};  // t_begin of the frame detectStreamed last handed to Java
   // Camera clock (hwtimestamps=1). The first sight of a frame's bytes is noisy (sd ~0.07 ms: URB boundary and
@@ -324,8 +336,11 @@ struct StreamSink {
       std::lock_guard<std::mutex> l(cam_mu);
       bias = sight_off_slow;
     }
-    const bool by_cam = t_cam > 0 && p.cam_shift_ns > 0 && bias != 0;
-    const int64_t capture = by_cam ? t_cam + std::llround(bias) - p.mid_shift_ns : t_begin - p.mid_shift_ns;
+    const bool direct = t_cam_direct > 0 && p.cam_shift_ns > 0;  // the native backend owns the queue
+    const bool by_cam = direct || (t_cam > 0 && p.cam_shift_ns > 0 && bias != 0);
+    const int64_t capture = direct ? t_cam_direct - p.cam_shift_ns
+                            : by_cam ? t_cam + std::llround(bias) - p.mid_shift_ns
+                                     : t_begin - p.mid_shift_ns;
     if (by_cam) cam_stamped++;
     const int64_t this_seq = ++seq;
     // photonvision-61's tagQuality for these tags, with this result's sequence ID, just before the result
@@ -367,6 +382,221 @@ struct StreamSink {
   }
 };
 
+// ---- native camera backend (docs/SYSTEMCORE-NATIVE-BACKEND.md) ----
+// One camera owned natively: its V4L2 queue (our uvcvideo: small URBs, camera-clock stamps), each frame decoded as
+// its bytes land (mjdec), streaming NAPA, pose, publish (the StreamSink above, unchanged), tag quality, health
+// counters, Rewind video (a ring + writer thread) and the latest image for PhotonVision's UI/stream on request.
+struct sj_wait_arg {
+  uint32_t seq;
+  uint32_t timeout_us;
+};
+#define SJ_WAIT_IOC _IOWR('u', 0x40, struct sj_wait_arg)
+
+struct NativeCam {
+  StreamSink *sink = nullptr;
+  std::string dev;
+  int fd = -1, w = 0, h = 0, nbuf = 0;
+  uint8_t *buf[8] = {};
+  size_t blen[8] = {};
+  std::thread th;
+  std::atomic<bool> stop{false};
+  std::atomic<long> frames{0}, bad{0}, skipped{0}, rec_kept{0};
+  std::atomic<int64_t> last_frame_ns{0};
+  bool sj_wait = false;
+  // the latest full-size image for Java (copied only while Java asks, at most once per request)
+  std::mutex gmu;
+  std::vector<uint8_t> gray;
+  int64_t gray_capture_ns = 0;
+  std::atomic<bool> want_gray{false};
+  // Rewind
+  std::mutex rmu;
+  RewindWriter *rw = nullptr;
+
+  static int64_t mono() {
+    timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return static_cast<int64_t>(t.tv_sec) * 1000000000LL + t.tv_nsec;
+  }
+  int xioctl(unsigned long req, void *arg) {
+    int r;
+    do r = ioctl(fd, req, arg);
+    while (r < 0 && errno == EINTR);
+    return r;
+  }
+  bool open_dev(const std::string &path, int width, int height, int fps) {
+    dev = path, w = width, h = height;
+    fd = ::open(path.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return false;
+    v4l2_format f{};
+    f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    f.fmt.pix.width = width, f.fmt.pix.height = height, f.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
+    f.fmt.pix.field = V4L2_FIELD_NONE;
+    if (xioctl(VIDIOC_S_FMT, &f) || (int)f.fmt.pix.width != width || (int)f.fmt.pix.height != height) return false;
+    v4l2_streamparm sp{};
+    sp.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    sp.parm.capture.timeperframe.numerator = 1, sp.parm.capture.timeperframe.denominator = fps > 0 ? fps : 120;
+    xioctl(VIDIOC_S_PARM, &sp);
+    v4l2_requestbuffers rb{};
+    rb.count = 4, rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, rb.memory = V4L2_MEMORY_MMAP;
+    if (xioctl(VIDIOC_REQBUFS, &rb) || rb.count < 2) return false;
+    nbuf = std::min<int>(rb.count, 8);
+    for (int i = 0; i < nbuf; i++) {
+      v4l2_buffer b{};
+      b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, b.memory = V4L2_MEMORY_MMAP, b.index = i;
+      if (xioctl(VIDIOC_QUERYBUF, &b)) return false;
+      void *m = mmap(nullptr, b.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, b.m.offset);
+      if (m == MAP_FAILED) return false;
+      buf[i] = static_cast<uint8_t *>(m), blen[i] = b.length;
+      wipe(i);
+      if (xioctl(VIDIOC_QBUF, &b)) return false;
+    }
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (xioctl(VIDIOC_STREAMON, &type)) return false;
+    sj_wait_arg a{0, 0};
+    sj_wait = xioctl(SJ_WAIT_IOC, &a) == 0;  // our uvcvideo: sleep until the driver copied more bytes
+    return true;
+  }
+  void wipe(int i) { std::memset(buf[i], 0xFF, std::min<size_t>(blen[i], 256 * 1024)); }
+  void wait_bytes() {
+    if (sj_wait) {
+      sj_wait_arg a{0, 2000};
+      xioctl(SJ_WAIT_IOC, &a);
+    } else {
+      timespec ts{0, 100000};
+      nanosleep(&ts, nullptr);
+    }
+  }
+  // How many bytes of the frame have landed: the driver writes the wiped (0xFF) buffer front to back, and JPEG
+  // data never holds 16 0xFF bytes in a row; trailing 0xFF bytes are held back (they may be wipe).
+  static size_t landed(const uint8_t *p, size_t from, size_t cap) {
+    size_t q = from & ~static_cast<size_t>(15);
+    static const uint8_t ff[16] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    while (q + 16 <= cap && std::memcmp(p + q, ff, 16) != 0) q += 16;
+    while (q > from && p[q - 1] == 0xFF) q--;
+    return q;
+  }
+  // Dequeue the buffer the driver finished (blocking up to timeout_ms). Its index, or -1.
+  int dqbuf(v4l2_buffer &b, int timeout_ms) {
+    const int64_t end = mono() + static_cast<int64_t>(timeout_ms) * 1000000;
+    for (;;) {
+      b = v4l2_buffer{};
+      b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, b.memory = V4L2_MEMORY_MMAP;
+      if (xioctl(VIDIOC_DQBUF, &b) == 0) return static_cast<int>(b.index);
+      if (errno != EAGAIN || mono() > end) return -1;
+      timespec ts{0, 50000};
+      nanosleep(&ts, nullptr);
+    }
+  }
+  void requeue(int i) {
+    wipe(i);
+    v4l2_buffer b{};
+    b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, b.memory = V4L2_MEMORY_MMAP, b.index = i;
+    xioctl(VIDIOC_QBUF, &b);
+  }
+  void loop() {
+    pthread_setname_np(pthread_self(), "SpectrumCamera");
+    std::unique_ptr<mjdec, void (*)(mjdec *)> mj(mjdec_create(), mjdec_destroy);
+    std::vector<uint8_t> img(static_cast<size_t>(w) * h);
+    int next = 0;  // the driver fills the queued buffers in queue order
+    while (!stop) {
+      uint8_t *p = buf[next];
+      // the frame's first bytes
+      const int64_t wait0 = mono();
+      while (!stop && !(p[0] == 0xFF && p[1] == 0xD8)) {
+        v4l2_buffer b;
+        if (mono() - wait0 > 300000000LL) {  // nothing for 300 ms: resynchronise on whatever completes
+          const int i = dqbuf(b, 0);
+          if (i >= 0) requeue(i), next = (i + 1) % nbuf;
+          if (mono() - wait0 > 2000000000LL) break;
+        }
+        wait_bytes();
+      }
+      if (stop || !(p[0] == 0xFF && p[1] == 0xD8)) continue;
+      const int64_t t_sight = mono();
+      int scale = sink->c.plan ? sink->c.plan(sink) : 1;
+      bool fed = false;
+      int rows = 0, hs = h;
+      if (scale != 0) {
+        hs = h / scale;
+        mjdec_set_scale(mj.get(), scale);
+        if (mjdec_begin(mj.get(), p, blen[next], img.data(), w, h, w / scale) == 0)
+          fed = sink->c.begin(sink, img.data(), w / scale, hs, w / scale) != 0;
+        sink->t_begin = t_sight;
+        size_t got = 0;
+        bool ok = true;
+        while (!stop && rows < hs) {
+          const size_t a = landed(p, got, blen[next]);
+          if (a > got) {
+            got = a;
+            const int r = mjdec_feed(mj.get(), got);
+            if (r < 0) {
+              ok = false;
+              break;
+            }
+            if (r > rows) {
+              rows = r;
+              if (fed) sink->c.feed(sink, rows);
+            }
+            continue;
+          }
+          if (mono() - t_sight > 50000000LL) {  // stuck mid-frame
+            ok = false;
+            break;
+          }
+          wait_bytes();
+        }
+        if (!ok) bad++;
+      } else {
+        skipped++;
+      }
+      // the finished buffer, with its camera-clock stamp
+      v4l2_buffer b;
+      const int i = dqbuf(b, 30);
+      if (i < 0) {
+        if (fed) sink->c.free_result(sink->c.finish(sink));
+        continue;
+      }
+      const int64_t stamp = static_cast<int64_t>(b.timestamp.tv_sec) * 1000000000LL + b.timestamp.tv_usec * 1000LL;
+      if (fed) {
+        sink->t_cam_direct = (b.flags & V4L2_BUF_FLAG_ERROR) ? 0 : stamp;
+        sink->c.free_result(sink->c.finish(sink));  // publishes (pose, result, quality, health counters)
+        sink->t_cam_direct = 0;
+      }
+      if (i == next && !(b.flags & V4L2_BUF_FLAG_ERROR) && rows >= hs) {
+        frames++;
+        last_frame_ns = mono();
+        if (scale == 1 && want_gray.load()) {  // Java's UI / stream: the latest image, when it asks
+          std::lock_guard<std::mutex> l(gmu);
+          gray.assign(img.begin(), img.end());
+          gray_capture_ns = stamp;
+          want_gray = false;
+        }
+      }
+      {
+        std::lock_guard<std::mutex> l(rmu);
+        if (rw && b.bytesused > 0 && !(b.flags & V4L2_BUF_FLAG_ERROR))
+          rec_kept += rewind_push(rw, buf[i], b.bytesused, w, h, stamp / 1000, 0);
+      }
+      requeue(i);
+      next = (i + 1) % nbuf;
+    }
+  }
+  ~NativeCam() {
+    stop = true;
+    if (th.joinable()) th.join();
+    if (fd >= 0) {
+      int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      xioctl(VIDIOC_STREAMOFF, &type);
+      for (int i = 0; i < nbuf; i++)
+        if (buf[i]) munmap(buf[i], blen[i]);
+      ::close(fd);
+    }
+    std::lock_guard<std::mutex> l(rmu);
+    if (rw) rewind_close(rw);
+  }
+};
+
 // One camera's handle: the whole-frame detector, and the streaming side once detectStreamed is used.
 struct Napa {
   napa_far::Detector det;
@@ -377,8 +607,10 @@ struct Napa {
   long streamed = 0, fallback = 0, not_streamed = 0, check_due = 0;
   std::atomic<long> check_ok{0}, check_differ{0}, check_skipped{0};
   std::chrono::steady_clock::time_point next_log{};
+  std::unique_ptr<NativeCam> cam;  // the native camera backend, when this handle owns the camera
   explicit Napa(const std::string &family) : det(family) {}
   ~Napa() {
+    cam.reset();  // stops its thread before the sink goes
     if (sink && Stream()) Stream()->detach(sink->c.ctx);
     if (check_thread.joinable()) check_thread.join();
   }
@@ -494,6 +726,11 @@ JNIEXPORT void JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setParams(JNIEn
   c.far_min_tag_px = std::clamp<int>(farMinTagPx, 8, 30000);
   c.sweeps_per_s = sweepsPerSecond;
   d->SetConfig(c);
+  if (n->sink) {  // the streaming side (fast path / native camera) takes it at its next frame
+    std::lock_guard<std::mutex> l(n->sink->cfg_mu);
+    n->sink->cfg = c;
+    n->sink->cfg_new = true;
+  }
 }
 
 JNIEXPORT void JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setEarlySlack(JNIEnv *, jclass, jlong h,
@@ -670,6 +907,119 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_drainNa
     env->DeleteLocalRef(ba);
   }
   return arr;
+}
+
+// ---- native camera backend JNI (docs/SYSTEMCORE-NATIVE-BACKEND.md) ----
+// Opens the camera (a /dev/video path, e.g. /dev/v4l/by-id/...-index0) natively: MJPEG width x height at fps, its own
+// capture thread, decode + streaming NAPA + pose + publish on it. Returns a NAPA handle (all the setNative* calls,
+// setParams, nativeLatencyMs and drainNativeResults work on it; destroy() closes the camera), or 0.
+JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraOpen(JNIEnv *env, jclass, jstring jdev,
+                                                                            jint width, jint height, jint fps,
+                                                                            jstring family) {
+  const char *d = env->GetStringUTFChars(jdev, nullptr);
+  const char *f = env->GetStringUTFChars(family, nullptr);
+  std::string dev(d), fam(f);
+  env->ReleaseStringUTFChars(jdev, d);
+  env->ReleaseStringUTFChars(family, f);
+  auto *n = new Napa(fam);
+  n->sink = std::make_unique<StreamSink>(fam);
+  {
+    std::lock_guard<std::mutex> l(n->sink->cfg_mu);
+    n->sink->cfg = n->det.GetConfig();
+    n->sink->cfg_new = true;
+  }
+  n->sink->log_last = std::chrono::steady_clock::now();
+  auto cam = std::make_unique<NativeCam>();
+  cam->sink = n->sink.get();
+  if (!cam->open_dev(dev, width, height, fps)) {
+    std::cout << "native camera: cannot open " << dev << " (" << std::strerror(errno) << ")" << std::endl;
+    delete n;
+    return 0;
+  }
+  auto *c = cam.get();
+  c->th = std::thread([c] { c->loop(); });
+  n->cam = std::move(cam);
+  std::cout << "native camera: " << dev << " " << width << "x" << height << " MJPEG, "
+            << (c->sj_wait ? "driver wake per URB" : "polling") << std::endl;
+  return reinterpret_cast<jlong>(n);
+}
+
+// Sets a V4L2 control on the native camera, read first: 1 written, 0 already that value, -1 error.
+JNIEXPORT jint JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraSetControl(JNIEnv *, jclass, jlong h, jint id,
+                                                                                 jint value) {
+  auto *n = Handle(h);
+  if (!n || !n->cam) return -1;
+  v4l2_control c{};
+  c.id = static_cast<uint32_t>(id);
+  if (n->cam->xioctl(VIDIOC_G_CTRL, &c) == 0 && c.value == value) return 0;  // the Swyft writes controls to flash
+  c.value = value;
+  return n->cam->xioctl(VIDIOC_S_CTRL, &c) == 0 ? 1 : -1;
+}
+
+// A V4L2 control's value, or Integer.MIN_VALUE.
+JNIEXPORT jint JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraGetControl(JNIEnv *, jclass, jlong h, jint id) {
+  auto *n = Handle(h);
+  if (!n || !n->cam) return INT32_MIN;
+  v4l2_control c{};
+  c.id = static_cast<uint32_t>(id);
+  return n->cam->xioctl(VIDIOC_G_CTRL, &c) == 0 ? c.value : INT32_MIN;
+}
+
+// The latest full-size gray image into dataAddr (width x height, stride width), for the UI / stream / Java pipeline
+// at its own low rate. Returns its camera stamp (ns), or 0 when none is ready yet (the next frame provides one).
+JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraLatestGray(JNIEnv *, jclass, jlong h,
+                                                                                  jlong data, jint width,
+                                                                                  jint height) {
+  auto *n = Handle(h);
+  if (!n || !n->cam || !data) return 0;
+  auto *c = n->cam.get();
+  std::lock_guard<std::mutex> l(c->gmu);
+  if (c->gray.size() != static_cast<size_t>(width) * height || c->gray_capture_ns == 0) {
+    c->want_gray = true;
+    return 0;
+  }
+  std::memcpy(reinterpret_cast<uint8_t *>(data), c->gray.data(), c->gray.size());
+  const int64_t t = c->gray_capture_ns;
+  c->gray_capture_ns = 0;  // used: the next request waits for a newer frame
+  c->want_gray = true;
+  return t;
+}
+
+// {frames, bad frames, frames skipped by the policy, ms since the last frame (-1: none), Rewind frames kept}.
+JNIEXPORT jlongArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraStats(JNIEnv *env, jclass, jlong h) {
+  auto *n = Handle(h);
+  if (!n || !n->cam) return nullptr;
+  auto *c = n->cam.get();
+  const int64_t last = c->last_frame_ns.load();
+  jlong v[5] = {c->frames.load(), c->bad.load(), c->skipped.load(),
+                last ? (NativeCam::mono() - last) / 1000000 : -1, c->rec_kept.load()};
+  jlongArray a = env->NewLongArray(5);
+  if (a) env->SetLongArrayRegion(a, 0, 5, v);
+  return a;
+}
+
+// Rewind video from the native thread: prefix (path without _NNNN; null stops), ring MB (default 32), record fps
+// (0: every frame; independent of the frame policy). Returns true when recording.
+JNIEXPORT jboolean JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraRecord(JNIEnv *env, jclass, jlong h,
+                                                                                 jstring prefix, jint ringMb,
+                                                                                 jdouble recordFps) {
+  auto *n = Handle(h);
+  if (!n || !n->cam) return JNI_FALSE;
+  auto *c = n->cam.get();
+  RewindWriter *old = nullptr;
+  RewindWriter *nw = nullptr;
+  if (prefix) {
+    const char *p = env->GetStringUTFChars(prefix, nullptr);
+    nw = rewind_open(p, static_cast<size_t>(ringMb > 0 ? ringMb : 32) << 20, recordFps);
+    env->ReleaseStringUTFChars(prefix, p);
+  }
+  {
+    std::lock_guard<std::mutex> l(c->rmu);
+    old = c->rw;
+    c->rw = nw;
+  }
+  if (old) rewind_close(old);  // drains and syncs, off the camera thread
+  return nw ? JNI_TRUE : JNI_FALSE;
 }
 
 // sc/mjpeg-napa frame policy for this camera's streamed frames (docs/FRAME-POLICY.md): decode scale 1, 2 or 4

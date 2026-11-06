@@ -36,8 +36,11 @@ for f in napa_far NapaDetectorJNI; do
 done
 # the native single-tag pose (NapaDetectorJNI.poseSquare): native/sc-vision/src/pose.c
 timeout 300 $CC $CF -std=gnu11 -c "$REPO/native/sc-vision/src/pose.c" -o "$OUT/pose.o"
+# the native camera backend (NapaDetectorJNI.cameraOpen): mjdec and the Rewind writer from native/sc-vision
+timeout 300 $CC $CF -std=gnu11 -c "$REPO/native/sc-vision/src/mjdec.c" -o "$OUT/mjdec_napa.o"
+timeout 300 $CXX $CF -std=c++17 -c "$REPO/native/sc-vision/src/rewind_writer.cc" -o "$OUT/rewind_writer.o"
 $CXX -shared -Wl,-z,defs -o "$OUT/libspectrum-napa-apriltag.so" "$OUT/napa_core.o" "$OUT/napa_far.o" \
-  "$OUT/NapaDetectorJNI.o" "$OUT/pose.o" -lm -lpthread -ldl
+  "$OUT/NapaDetectorJNI.o" "$OUT/pose.o" "$OUT/mjdec_napa.o" "$OUT/rewind_writer.o" -lm -lpthread -ldl
 # The streaming decoder, libspectrum-stream.so (detector/stream_decode.cc; libjpeg-turbo only), which streaming
 # NAPA opens at run time (no link dependency: the NAPA library works without it). The Jetson's GPU build
 # (07-build-gpu-detector.sh) makes the same library; on a CPU-only machine install this one:

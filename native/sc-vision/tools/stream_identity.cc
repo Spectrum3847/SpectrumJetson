@@ -1,7 +1,8 @@
 // stream_identity: offline "fake camera" for the native backend's per-frame core (docs/SYSTEMCORE-NATIVE-BACKEND.md).
 // Each frame of a recorded MJPEG arrives in USB-sized pieces (CHUNK bytes, 2 x 1600 by default: one 2-packet URB),
 // is decoded as it lands (mjdec) and fed to streaming NAPA band by band, exactly as the backend will; the result
-// must equal libjpeg-turbo + whole-frame napa_detect on the same frame (ids, order, corners bit for bit). With
+// must equal libjpeg-turbo + whole-frame napa_detect on the same frame (ids, order, hamming, decision margin,
+// corners bit for bit). With
 // --scale 2 the streamed side decodes at half size and its corners are mapped back (x = 2x' + 0.5): then it
 // reports agreement (ids found by both, corner differences) instead of identity.
 //   stream_identity FILE.mjpeg [--min-tag 32] [--chunk 3200] [--scale 1|2] [--max N]
@@ -12,6 +13,7 @@
 #include <time.h>
 
 #include <jpeglib.h>
+#include <setjmp.h>
 
 #include <algorithm>
 #include <cmath>
@@ -28,10 +30,23 @@ static double cpu_ms() {
   return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
 }
 
+struct JErr {
+  jpeg_error_mgr m;
+  jmp_buf j;
+};
+static void jerr_exit(j_common_ptr c) { longjmp(reinterpret_cast<JErr *>(c->err)->j, 1); }
+static void jerr_msg(j_common_ptr, int) {}
+
 static bool turbo(const uint8_t *j, size_t n, std::vector<uint8_t> &y, int w, int h) {
   jpeg_decompress_struct c;
-  jpeg_error_mgr e;
-  c.err = jpeg_std_error(&e);
+  JErr e;
+  c.err = jpeg_std_error(&e.m);
+  e.m.error_exit = jerr_exit;
+  e.m.emit_message = jerr_msg;
+  if (setjmp(e.j)) {  // a corrupt frame: libjpeg's default would exit()
+    jpeg_destroy_decompress(&c);
+    return false;
+  }
   jpeg_create_decompress(&c);
   jpeg_mem_src(&c, j, n);
   if (jpeg_read_header(&c, TRUE) != JPEG_HEADER_OK) return jpeg_destroy_decompress(&c), false;
@@ -93,6 +108,9 @@ int main(int argc, char **argv) {
     const int na = std::max(0, napa_detect(dw, ref.data(), W, H, W, &pw, a, 64));
     // the fake camera: the frame's bytes land CHUNK at a time in a "V4L2 buffer"; decode + NAPA as they arrive
     memset(buf.data(), 0xFF, std::min(buf.size(), len + 65536));
+    // the decoded image starts as marker values (0 / 255, alternating per frame), so a row NAPA reads before it
+    // was decoded shows up as a difference instead of reusing the previous frame's pixels
+    std::fill(img.begin(), img.end(), (same + differ) % 2 ? 0 : 255);
     const double c0 = cpu_ms();
     mjdec_begin(dec, buf.data(), buf.size(), img.data(), W, H, Ws);
     napa_stream_begin(ns, img.data(), Ws, Hs, Ws, &ps);
@@ -120,7 +138,9 @@ int main(int argc, char **argv) {
         for (double &v : b[i].corners) v = v * scale + (scale - 1) * 0.5;
     tags_a += na, tags_b += nb;
     bool eq = na == nb;
-    for (int i = 0; eq && i < na; i++) eq = a[i].id == b[i].id && !memcmp(a[i].corners, b[i].corners, sizeof a[i].corners);
+    for (int i = 0; eq && i < na; i++)
+      eq = a[i].id == b[i].id && a[i].hamming == b[i].hamming && a[i].decision_margin == b[i].decision_margin &&
+           !memcmp(a[i].corners, b[i].corners, sizeof a[i].corners);
     for (int i = 0; i < na; i++)
       for (int k = 0; k < nb; k++)
         if (a[i].id == b[k].id)

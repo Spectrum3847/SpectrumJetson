@@ -54,7 +54,7 @@ int main(int argc, char **argv) {
   for (int c = 0; c < cams; c++)
     th.emplace_back([&, c] {
       std::string prefix = std::string(argv[2]) + "/bench_cam" + std::to_string(c);
-      RewindWriter *w = rewind_open(prefix.c_str(), 16u << 20, rec_fps);
+      RewindWriter *w = rewind_open(prefix.c_str(), 0, rec_fps);
       std::vector<double> push_us;
       const int64_t t0 = mono_ns(), period = (int64_t)(1e9 / fps);
       long n = 0;
@@ -81,7 +81,7 @@ int main(int argc, char **argv) {
              "%.1f ms\n",
              c, n, s.queued, s.dropped_full, s.dropped_fps, P(.5), P(.99), push_us.back(),
              s.bytes / 1e6 / ((t1 - t0) / 1e9), s.writer_cpu_ms, s.writer_cpu_ms / ((t1 - t0) / 1e6) * 100,
-             s.max_fsync_ms);
+             s.max_fsync_ms, s.lost);
     });
   for (auto &t : th) t.join();
   return 0;

@@ -153,7 +153,8 @@ struct Watcher {
   double frame_ms = 8;                     // SOI -> EOI of the last frame (for the skip rule)
   std::vector<double> sink_tails;          // finish() ms
   long sink_fed = 0, sink_skipped = 0, plan_skipped = 0;
-  long identical_boots = 0;  // buffers wiped after 60 ms of identical refills (uniform scene)
+  long identical_boots = 0;  // buffers wiped after staying still two buffer cycles (identical refills)
+  double period_ms = 8.33;   // SOI to SOI (EMA; the camera's frame period while frames are seen)
   // the cores of the thread that takes this watcher's frames (SPECTRUM_STREAM_CPUS=camera)
   std::mutex cpu_mu;
   std::string consumer_cpus;
@@ -443,7 +444,10 @@ void WatchLoop(Watcher *w) {
           if (std::memcmp(snap[i], p + 1024, kSample) != 0) {
             st[i] = kBootChanging;
             due[i] = now + std::chrono::milliseconds(12);
-          } else if (now - still_since[i] > std::chrono::milliseconds(60)) {  // refilled with identical bytes
+          } else if (now - still_since[i] >
+                     std::chrono::microseconds(static_cast<long>(std::max(60.0, 2 * w->period_ms * w->n) * 1000))) {
+            // still for two whole buffer cycles (each buffer is refilled once per n frame periods): identical
+            // refills. Wiping can cost the frame being written into it right then (counted, logged).
             w->identical_boots++;
             st[i] = kBootChanging;
             due[i] = now;
@@ -459,6 +463,10 @@ void WatchLoop(Watcher *w) {
         case kWiped:
           if (p[0] == 0xFF && p[1] == 0xD8 && w->active < 0) {
             last_frame = now;
+            if (t_soi != Clock::time_point{}) {
+              const double d = Ms(now - t_soi);
+              if (d > 2 && d < 200) w->period_ms += 0.1 * (d - w->period_ms);
+            }
             t_soi = now;
             // the sink's plan for this frame (skip / scale), when it has one and the frame won't be copied
             fscale = 1;
@@ -657,6 +665,11 @@ void WatchLoop(Watcher *w) {
           w->dev.c_str(), w->frames, pc(.5), pc(.95), pc(.99),
           w->frames ? w->cpu_ns / 1e6 / w->frames : 0.0, w->cpu_ns / 1e8, w->aborted,
           g_hit.load(), g_miss.load(), g_waited.load(), g_check_ok.load(), g_check_differ.load());
+      if (w->identical_boots) {
+        std::printf("stream decode %s: %ld buffers wiped after identical refills (a uniform scene); each may have "
+                    "cost one frame\n", w->dev.c_str(), w->identical_boots);
+        w->identical_boots = 0;
+      }
       if (w->sink_fed || w->sink_skipped) {
         std::vector<double> s;
         s.swap(w->sink_tails);
