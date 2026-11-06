@@ -35,6 +35,29 @@ PATCHES = {
         (0x1EF3, "44", "22"), (0x1EF7, "40", "20"),   # idx6 HTS 0x4440 -> 0x2220
         (0x1F0F, "88", "44"), (0x1F13, "80", "40"),   # idx7 HTS 0x8880 -> 0x4440
     ]),
+    # EXPERIMENT (docs/CAMERA-FIRMWARE-OPTIMIZATION.md): the full-res sensor table (0x1810, used by
+    # 1280x800, 1280x720 and the scaled modes) reads a 400-row band at full pitch instead of 800 rows:
+    # Y start 0 -> 200, Y end 815 -> 615, output height 808 -> 408. HTS/VTS unchanged (120 fps).
+    # Descriptors still say 800 rows: this shows what the bridge does with a short sensor frame
+    # (ends the frame early? pads? stalls?) before any descriptor work. Spare cameras only.
+    "window400-test": ("EXPERIMENT: full-res table reads rows 200..615 (408) at full pitch", [
+        (0x18CB, "00", "c8"),                          # 0x3803 Y start lo: 0 -> 200
+        (0x18D7, "03", "02"), (0x18DB, "2f", "67"),    # 0x3806/07 Y end 0x32F -> 0x267
+        (0x18E7, "03", "01"), (0x18EB, "28", "98"),    # 0x380A/0B output height 0x328 -> 0x198
+    ]),
+    # EXPERIMENT, stacked on window400-test: the 1280x720 MJPEG mode becomes 1280x400.
+    # Bridge per-mode records (0x7270 and the copy at 0x7400; 26 bytes each, in descriptor order):
+    # [09 00 00 00][flags][sensor out W,H][crop x,y][crop W,H][scaler W,H][output W,H], big-endian.
+    # The 720 record crops 1284x724 at y 42 from the 1288x808 sensor frame; here 1284x404 at y 2 of
+    # 1288x408. Descriptor (same length, values only): frame 3 wHeight 720 -> 400,
+    # dwMaxVideoFrameBufferSize 1843200 -> 1024000, still-image size list 720 -> 400.
+    "window400-mode": ("EXPERIMENT: 1280x720 mode -> 1280x400 full-pitch band (needs window400-test)", [
+        (0x72B4, "0328", "0198"), (0x72B9, "2a", "02"), (0x72BC, "02d4", "0194"),
+        (0x72C0, "02d4", "0194"), (0x72C4, "02d0", "0190"),
+        (0x7444, "0328", "0198"), (0x7449, "2a", "02"), (0x744C, "02d4", "0194"),
+        (0x7450, "02d4", "0194"), (0x7454, "02d0", "0190"),
+        (0x5A3C, "d002", "9001"), (0x5A46, "00201c00", "00a00f00"), (0x5ADA, "d002", "9001"),
+    ]),
 }
 
 

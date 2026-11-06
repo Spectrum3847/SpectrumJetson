@@ -55,6 +55,32 @@ Swyft's tool flashed it, so the laptop's own USB port presumably cuts power when
 identity (0bda:3035 to 5842 and back); the Jetson's hub can't. Without a replug it would take a hub
 that really switches port power, or flashing from a laptop.
 
+**The SystemCore (Raspberry Pi 5) can't cut port power either** (tested 2026-11-05 on LimelightOS beta18).
+Both USB 2 root hubs report `wHubCharacteristics 0x0009` ("per-port power switching"), and writing 1 to
+`/sys/bus/usb/devices/1-0:1.0/usb1-port1/disable` detaches the port logically: a streaming Swyft
+re-enumerates and streams at 120 fps after a plain cycle, and the Thriftiest on bus 3 isn't affected. But
+VBUS stays on. After a read-only `swyft-fw.py dump --port 1-1` (a boot-loader trip) the Swyft came back
+with 0 frames, and disabling the port for 3 s and for 15 s didn't bring the video back. A replug did.
+The dump is `~/swyft-backups/sj-sw01-pi-20251015-144328.bin` on the Pi (SJ-SW01, low-exposure firmware,
+exposure min 2). It equals the low-exposure image except for the serial record at `0xAE00` and the
+settings block below.
+
+**The camera saves its control values to flash.** The settings block at `0x1F000` (a 4 KiB sector with a
+`55 AA` tag at `0x1F03E`) holds big-endian 16-bit control values. In the low-exposure image they are the
+defaults: contrast 40, saturation 64, sharpness 50, gamma 300, white balance 4600. In SJ-SW01's dump they
+are the values our software had set: brightness 64, sharpness 0, gamma 100, white balance 2800,
+60 Hz, manual exposure, exposure 2. So the Realtek firmware writes control changes back to this sector.
+When it does (on every SET_CUR, or later) isn't known, and neither is whether gain is saved (128 wasn't
+in the dump). Two consequences, both unverified:
+- Controls may survive a power cycle, unlike the Thriftiest's.
+- Software that sets controls often (PhotonVision at every start, an auto-exposure loop) erases and
+  rewrites one flash sector each time: wear (~100k cycles for SPI NOR), and a power cut mid-write could
+  corrupt the sector.
+
+Check before relying on either: read the controls straight after a power cycle (no software running),
+and compare a later dump. A dump needs the boot loader, so it costs a replug. Setting controls only when
+they differ from the camera's current value avoids most writes.
+
 **Never send the Swyft a command it doesn't support.** On 2026-10-30 three of CameraDump's commands
 this chip doesn't have (`00 c5`, `02 c1`, `00 09`) left its command handler refusing everything
 until a port power toggle, *and* its video stopped (03:18) until it was replugged an hour later. A
