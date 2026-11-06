@@ -130,6 +130,7 @@ static double Pct(std::vector<double> v, double q) {
 
 int main(int argc, char **argv) {
   std::string host = "127.0.0.1", cam = "thrifty";
+  FILE *csv_out = nullptr;
   double secs = 10;
   int dump = 1;
   for (int i = 1; i + 1 < argc; i += 2) {
@@ -138,6 +139,10 @@ int main(int argc, char **argv) {
     else if (a == "--camera") cam = argv[i + 1];
     else if (a == "--secs") secs = atof(argv[i + 1]);
     else if (a == "--dump") dump = atoi(argv[i + 1]);
+    else if (a == "--csv") {  // one row per result: seq, capture ns, publish ns, received ns (CLOCK_MONOTONIC), targets
+      csv_out = std::fopen(argv[i + 1], "w");
+      if (csv_out) std::fprintf(csv_out, "seq,capture_ns,publish_ns,received_ns,ntargets\n");
+    }
   }
   auto inst = wpi::nt::NetworkTableInstance::Create();
   inst.StartClient("nt_check");
@@ -189,6 +194,7 @@ int main(int argc, char **argv) {
       if (last_seq >= 0 && seq != last_seq + 1) gaps++;
       last_seq = seq;
       const double cap = d["metadata.captureTimestampNanos"], pub = d["metadata.publishTimestampNanos"];
+      if (csv_out) std::fprintf(csv_out, "%.0f,%.0f,%.0f,%lld,%d\n", seq, cap, pub, (long long)now, (int)d["targets#"]);
       rx_lat.push_back((now - cap) / 1e6);
       pub_lat.push_back((pub - cap) / 1e6);
       pub_rx.push_back((now - pub) / 1e6);
@@ -282,5 +288,6 @@ int main(int argc, char **argv) {
     else if (e.IsString()) std::printf("  %s = '%s'\n", t, std::string(e.GetString()).c_str());
   }
   for (auto &t : inst.GetTopics(base)) std::printf("  topic %s [%s]\n", t.GetName().c_str(), t.GetTypeString().c_str());
+  if (csv_out) std::fclose(csv_out);
   return 0;
 }
