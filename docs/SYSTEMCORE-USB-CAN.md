@@ -1,4 +1,4 @@
-# USB CAN adapter on the SystemCore (can0)
+# USB CAN adapter on the SystemCore (robot CAN bus 0 = can_s0)
 
 Adapter: Jhoinrch "CAN FD Isolator RH02 PRO" (CANable 2.0 based). On the bench Pi 5 it enumerates as
 `16d0:117e MCS CANable2 b158aa7 github.com/normaldotcom/canable2.git`, i.e. the **CANable 2.0 slcan firmware**:
@@ -10,29 +10,36 @@ a USB CDC-ACM serial port (`cdc_acm` -> `/dev/ttyACM0`), not `gs_usb`. The kerne
 `scripts/systemcore/usb-can/install-usb-can.sh` (run with sudo on the device):
 
 - `/etc/udev/rules.d/90-sc-usb-can.rules`: tty with 16d0:117e -> `/dev/canable` symlink, wants `sc-usb-can@canable.service`.
-- `/etc/systemd/system/sc-usb-can@.service`: `slcand -o -c /dev/canable can0`, then bitrate, txqueuelen 1000, up.
+- `/etc/systemd/system/sc-usb-can@.service`: `slcand -o -c /dev/canable can_s0`, then bitrate, txqueuelen 1000, up.
+- `/etc/systemd/system/can-bringup.service.d/usb-s0.conf`: with the adapter plugged in, `can-bringup.service` waits
+  (up to 15 s) for the slcan `can_s0` before `diy-can-setup.sh` runs. That script only makes a vcan when the name is
+  free, and loads `robot_heartbeat`/`can_sender` (which bind `can_s*` at load) after it, so the adapter is bus 0
+  and `can_s1..can_s4` stay vcan. No adapter at boot: vcan `can_s0` as before.
   Bound to the device: unplug stops it, plug-in (or boot) starts it.
-- `/opt/sc-usb-can/usb-can-up.sh`, `/etc/sc-usb-can.conf` (`IFACE=can0 BITRATE=1000000 TXQLEN=1000 UP=1`),
+- `/opt/sc-usb-can/usb-can-up.sh`, `/etc/sc-usb-can.conf` (`IFACE=can_s0 BITRATE=1000000 TXQLEN=1000 UP=1`),
   `/etc/modules-load.d/sc-usb-can.conf` (`slcan`).
 
 ## Bring up / change rate
 
 ```
-ip -details link show can0          # driver slcan, bitrate 1000000
-sudo ip link set can0 down
-sudo ip link set can0 type can bitrate 1000000   # slcan rates only: 10k..1M
-sudo ip link set can0 up
-candump can0 / cansend can0 123#DEADBEEF
+ip -details link show can_s0        # slcan, not vcan, bitrate 1000000
+sudo ip link set can_s0 down
+sudo ip link set can_s0 type can bitrate 1000000   # slcan rates only: 10k..1M
+sudo ip link set can_s0 up
+candump can_s0 / cansend can_s0 123#DEADBEEF
 ```
 
 **No CAN FD** with this firmware: Linux slcan is classic CAN only (mtu 16, no `dbitrate`/`fd on`). For FD, flash
 the CANable 2.0 candleLight/gs_usb FD firmware (STM32G431 DFU via the boot jumper); `gs_usb` then gives a native
 `canX` with `dbitrate`. Then replace this udev/slcand setup with a plain rename rule.
 
-## SystemCore names
+## SystemCore names and caveats
 
-The SystemCore stack (WPILib HAL, `can_sender` kernel module, Limelight canbus services) uses `can_s0`..`can_s4`,
-created by `can-bringup.service` (`/usr/local/sbin/diy-can-setup.sh`) as SPI-HAT netdevs or `vcan` placeholders.
-`can0` is outside that set, so robot code does not see it; to make it a robot bus, set `IFACE=can_sX` in
-`/etc/sc-usb-can.conf` after deleting that vcan placeholder (the `can_sender` module binds `can_s*` at its load time).
-`iodaemon`'s "Failed to open USB device" is the SystemCore IO board, unrelated to this adapter.
+The SystemCore stack (WPILib HAL, `can_sender`/`robot_heartbeat` kernel modules, Limelight canbus services) uses
+`can_s0`..`can_s4`; HAL bus 0 = `can_s0`. The DIY-SC robot log line `[DIY-SC] alive ... can_s0 status=...` shows it.
+
+- The swap happens at boot only. A live vcan `can_s0` is held by `can_sender`/`robot_heartbeat` (opened by system
+  daemons), so the installer doesn't delete it; deleting a referenced netdev can hang in unregister_netdevice.
+- Replug at runtime: slcand recreates `can_s0`, but `can_sender` bound the old device at load. Not yet verified
+  whether unplug blocks or the heartbeat follows the new device; reboot after a replug until it is.
+- `iodaemon`'s "Failed to open USB device" is the SystemCore IO board, unrelated to this adapter.
