@@ -6,6 +6,9 @@
 #     NAPA_OUT  scripts/systemcore/build-napa.sh's output (default ~/builder/sc-napa)
 #     HOST      default systemcore@172.26.0.1 (USB link; or robot.local)
 #   NATIVE=0 skips the 20-native-camera.conf drop-in (native publish + native cameras are on by default)
+#   UVC_KO=path  our uvcvideo (build-uvcvideo.sh; default ~/builder/uvcvideo-sc/uvcvideo.ko): installed to
+#            /opt/sc-vision/modules with sc-uvcvideo.service, which loads it at boot (stock on any failure;
+#            /etc/sc-vision/uvcvideo.conf ENABLED=0 opts out). UVC=0 skips it.
 #
 # What it changes on the SystemCore (nothing else):
 #   /opt/photonvision/photonvision.jar, /opt/photonvision/lib/*.so  (no files in /usr)
@@ -28,6 +31,7 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd)
 JAR=${1:?usage: install-photonvision.sh JAR [NAPA_OUT] [HOST]}
 NAPA=${2:-$HOME/builder/sc-napa}
 HOST=${3:-systemcore@172.26.0.1}
+UVC_KO=${UVC_KO:-$HOME/builder/uvcvideo-sc/uvcvideo.ko}
 for f in "$JAR" "$NAPA/libspectrum-napa-apriltag.so" "$NAPA/libspectrum-stream.so" "$NAPA/napa_test"; do
   [[ -f $f ]] || { echo "missing $f" >&2; exit 1; }
 done
@@ -37,7 +41,15 @@ ssh "$HOST" 'mkdir -p /dev/shm/pv-install'
 scp -q "$JAR" "$HOST:/dev/shm/pv-install/photonvision.jar"
 scp -q "$NAPA/libspectrum-napa-apriltag.so" "$NAPA/libspectrum-stream.so" "$NAPA/napa_test" \
   "$REPO/scripts/systemcore/sc-vision" "$REPO/scripts/systemcore/photonvision-run.sh" "$HOST:/dev/shm/pv-install/"
-ssh "$HOST" ENABLE="${ENABLE:-0}" NATIVE="${NATIVE:-1}" AOT="${AOT:-1}" AOT_TRAIN_S="${AOT_TRAIN_S:-45}" 'bash -s' <<'REMOTE'
+UVC=${UVC:-1}
+if [[ $UVC == 1 && -f $UVC_KO ]]; then
+  scp -q "$UVC_KO" "$HOST:/dev/shm/pv-install/uvcvideo-sc.ko"
+  scp -q "$REPO/scripts/systemcore/uvcvideo-boot.sh" "$REPO/scripts/systemcore/sc-uvcvideo.service" "$HOST:/dev/shm/pv-install/"
+elif [[ $UVC == 1 ]]; then
+  echo "no $UVC_KO (scripts/systemcore/build-uvcvideo.sh): boot-time uvcvideo not installed" >&2
+  UVC=0
+fi
+ssh "$HOST" ENABLE="${ENABLE:-0}" NATIVE="${NATIVE:-1}" UVC="$UVC" AOT="${AOT:-1}" AOT_TRAIN_S="${AOT_TRAIN_S:-45}" 'bash -s' <<'REMOTE'
 set -euo pipefail
 S=/dev/shm/pv-install
 TRAIN_DROPIN=/etc/systemd/system/photonvision.service.d/zz-aot-train.conf
@@ -67,6 +79,24 @@ put "$S/libspectrum-napa-apriltag.so" /opt/photonvision/lib/libspectrum-napa-apr
 put "$S/libspectrum-stream.so" /opt/photonvision/lib/libspectrum-stream.so 755
 put "$S/sc-vision" /usr/local/bin/sc-vision 755
 put "$S/photonvision-run.sh" /opt/photonvision/run.sh 755
+# our uvcvideo at boot (sc-uvcvideo.service; stock on any failure). Takes effect at the next boot; nothing is
+# swapped now.
+if [[ ${UVC:-0} == 1 ]]; then
+  sed -i 's/\r$//' "$S/uvcvideo-boot.sh" "$S/sc-uvcvideo.service"
+  sudo mkdir -p /opt/sc-vision/modules /etc/sc-vision
+  put "$S/uvcvideo-sc.ko" /opt/sc-vision/modules/uvcvideo-sc.ko 644
+  sha256sum "$S/uvcvideo-sc.ko" | awk '{print $1}' > "$S/uvcvideo-sc.ko.sha256"
+  put "$S/uvcvideo-sc.ko.sha256" /opt/sc-vision/modules/uvcvideo-sc.ko.sha256 644
+  put "$S/uvcvideo-boot.sh" /opt/sc-vision/uvcvideo-boot.sh 755
+  put "$S/sc-uvcvideo.service" /etc/systemd/system/sc-uvcvideo.service 644
+  if [[ ! -f /etc/sc-vision/uvcvideo.conf ]]; then
+    printf '%s\n' '# sc-uvcvideo.service (/opt/sc-vision/uvcvideo-boot.sh): our uvcvideo at boot, stock on any failure' \
+      'ENABLED=1' 'URB_PACKETS=2' 'HWTIMESTAMPS=1' 'CAMERA_WAIT_S=10' | sudo tee /etc/sc-vision/uvcvideo.conf >/dev/null
+  fi
+  sudo systemctl daemon-reload
+  sudo systemctl enable sc-uvcvideo.service 2>&1 | tail -1
+  echo "boot uvcvideo: $(/opt/sc-vision/uvcvideo-boot.sh status)"
+fi
 sudo tee /etc/systemd/system/photonvision.service >/dev/null <<'EOF'
 [Unit]
 Description=PhotonVision (Spectrum fork, SpectrumJetson scripts/systemcore)

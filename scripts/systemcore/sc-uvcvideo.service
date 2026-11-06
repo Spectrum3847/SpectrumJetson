@@ -1,0 +1,16 @@
+[Unit]
+Description=Spectrum uvcvideo (urb_packets, camera-clock stamps, progress wait); stock uvcvideo on any failure
+Documentation=file:///opt/sc-vision/uvcvideo-boot.sh
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service systemd-modules-load.service
+Before=photonvision.service limelight_visionserver.service sc-vision-native.service multi-user.target
+Wants=systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/sc-vision/uvcvideo-boot.sh start
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
