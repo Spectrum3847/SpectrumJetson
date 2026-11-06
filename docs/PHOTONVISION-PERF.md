@@ -2,8 +2,9 @@
 
 Where PhotonVision's own cost goes on the SystemCore (Pi 5 / CM5, 4x Cortex-A76, LimelightOS, Java 25 Temurin,
 G1, `-Xmx512m`) when it runs the fast path (`docs/SYSTEMCORE-PV-FASTPATH.md`: streaming luma decode + streaming NAPA
-+ native pose + native publish), what was changed, and what to do next. Fork branch `sc/pv-perf` (on
-`sc/mjpeg-napa` at 22579eea = photonvision-112), mirrored as `patches/photonvision-120..124`.
++ native pose + native publish), what was changed, and what to do next. photonvision-120..124 are merged: fork
+`sc/mjpeg-napa` 1d2b5021, mirrored in SpectrumJetson `sc/mjpeg-napa` f8327b0. The later items (stream preview,
+idle Java rate, Rewind) are on fork `sc/pv-perf` only; see "Round 2" at the end.
 
 ## How it was measured
 
@@ -146,3 +147,90 @@ rAF throttled to 1 fps).
 | Fully native camera backend with Java for UI only (usbfs capture as in sc-vision) | to sc-vision's ~26-27% from ~42%: ~15 points per camera, and its p99 | high; the design in SYSTEMCORE-PV-FASTPATH.md |
 
 Needs from the user: none. No tools were downloaded (JFR, jcmd, `/proc` only; async-profiler wasn't needed).
+
+The first round's "recommended next" list above was worked through in round 2 (below): the native-side items
+(tag quality, dark frames, native backend) went to the builder, the rest were tried here.
+
+## Round 2 (2026-11-06 evening): merged, the recommended items, Rewind, AOT cache
+
+Bench state: dark scene (lights off, user remote), so all runs use the **Swyft** (its watcher works in the dark;
+the Thriftiest's didn't until the builder's 84a229d), one camera at 120 fps, native publish, ondemand, 25-30 s,
+no web UI open (PhotonVision on port 5881), detection-free. The SystemCore rebooted twice during the evening (an
+under-voltage at 19:03 during a two-camera run; a kernel panic from the old SD card hanging I/O at 19:27); after
+that, test jars, logs and Rewind recordings were kept in RAM (`/dev/shm`).
+
+### Merged
+
+photonvision-120..124 fast-forwarded onto fork `sc/mjpeg-napa` (1d2b5021) and mirrored in SpectrumJetson
+`sc/mjpeg-napa` (f8327b0). Dark A/B, installed build (fork 54922480) vs the same plus 120-124 and the round-2
+items: **32.7 / 32.6% -> 29.1-29.5% of a core, 6340 -> 4880-4965 wake-ups/s**, capture -> received p99
+10.88-11.00 -> 10.82-10.88 ms (`tests/pv-perf/ab.sh`, `dC-*`). 120-124 alone: 29.3%.
+
+### The round-2 items (fork `sc/pv-perf`, not merged)
+
+| Item | Commit | Measured | Verdict |
+|---|---|---|---|
+| Identity checks every 1024th frame (stream re-decode, NAPA re-detect; `SPECTRUM_STREAM_CHECK_EVERY`, `SPECTRUM_NAPA_CHECK_EVERY`) | SpectrumJetson sc/pv-perf (`stream_decode.cc`, `NapaDetectorJNI.cc`) | 29.3 -> 29.5% (noise) in the dark, where a whole-frame decode is cheap | keep; ~1 point lit by the first round's estimate, unmeasured lit |
+| Java pipeline at 10 fps while no UI and no stream viewer (`SPECTRUM_NATIVE_PUBLISH_IDLE_FPS`) | f9868494 | 29.5 -> 29.1% (noise; C2 alone moves 1-4 points) | small; merge only if the legacy NT entries at 10 Hz are fine |
+| Stream preview: a 1/2 or 1/4-size picture from the decoder for a watched stream instead of the 1 MB copy | 2bc0e468 + SpectrumJetson `spectrum_stream_preview` | two viewers: 33.8 / 34.3% without, 34.2 / 33.7% with; decoder 1.5 -> 1.2%, stream thread 1.25 -> 1.05% | **not worth it**: after 124 the copy happens 30 times a second (~0.3% of a core); most of a viewer's cost is cscore's MJPEG encode/serve (2.4%) and the stream thread. Leave unmerged |
+| Dashboard: back off failed stream retries (0.1 s doubling to 5 s) | bce4e514 | client lint/prettier clean | merge (client only) |
+| Rewind recorder: grab only around kept frames, fdatasync | 340af6cc | Rewind thread 1.2% / 155 wake-ups/s -> 1.0% / 113 (one run each) | small; merge with the native Rewind writer in mind |
+| Rewind defaults scaled to a small disk | 5509a54e | functional (below) | **merge**: without it Rewind never records on the SystemCore |
+
+With a stream viewer the first round's +6-7 points (lit Thriftiest) are now ~+4.5 points (dark Swyft: 29.5 ->
+~34%), most of it cscore's encode and serve; a cheaper picture doesn't change that much.
+
+### Rewind on the SystemCore
+
+- **Storage:** this bench SystemCore records to `/opt/photonvision/rewind` on `/` = `mmcblk0p5`, a 6.8 GB ext4
+  root (A/B layout, p5/p6 7 GB each) on a **32 GB SD card** (`/sys/block/mmcblk0/device/type` = SD, so no eMMC
+  `life_time`/`pre_eol_info` wear estimate); ~15 GB of the card is unpartitioned. Free space varied 0.9-2.6 GB
+  during the day. The SD card is slow: with nothing recording it was busy writing 63% of the time for 0.46 MB/s
+  (journald, logs; 17 KB writes), and it hung I/O > 30 s once (the 19:27 panic). Rewind on a real SystemCore
+  needs its eMMC (and ideally a partition of its own); measure that device again.
+- **Defaults:** quota 100 GB, keep 15 GB free, stop below 7.5 GB: on a 6.8 GB root Rewind refuses to record at all
+  ("Rewind: disk nearly full, recording stopped" at every start). 5509a54e scales the defaults when there is no
+  settings.json: quota = half the filesystem, keep 10% (at least 0.5 GB) free -> 3.4 GB / 0.68 GB (stop below
+  0.34 GB) on this root. A 1280x800 lit Thriftiest frame is ~50-60 KB: one camera at 30 fps is ~1.6 MB/s, two are
+  ~3.3 MB/s, ~0.5 GB for a 2.5 min match, so a 3.4 GB quota holds ~6 matches of two cameras. Pull after every match.
+- **Cost (dark Swyft, 30 fps kept of 120, recordings in RAM, 25 s, `tests/pv-perf/rewind-ab.sh`):** off 32.3% of a
+  core; on 35.0% (the `Rewind-swyft` thread 1.2%, the rest JIT noise); on with 340af6cc 30.1% (thread 1.0%).
+  0.95 MB/s written (31 KB dark frames, 30.0 fps kept, 0 dropped). Latency p99 10.89 (off) / 11.04 / 10.85 ms:
+  no effect on the native publish. fdatasync every 2 s per camera (video, then index).
+- **Write pattern:** one `write()` per kept frame (the whole JPEG, 20-200 KB) plus a ~60-byte index line through a
+  BufferedWriter; both fsync'd every 2 s, so the device sees the page cache's writeback: large sequential writes
+  every 2 s per camera. Not measured on the SD itself (kept in RAM for the card's sake).
+- **Cheap wins left:** the recorder runs at nice 10 already; cscore still copies each kept JPEG once into the
+  recorder's buffer (unavoidable from Java). The builder's native backend can write the JPEG straight from the
+  V4L2 buffer (its Rewind ring writer, e0c8ca2) and drop the Java thread.
+
+### Java 25 AOT cache (JEP 483/514/515; `tests/pv-perf/aot.sh`)
+
+PhotonVision runs `/usr/bin/java -Xmx512m -jar /opt/photonvision/photonvision.jar -n` (Temurin 25.0.2). A
+training run (`-XX:AOTMode=record -XX:AOTConfiguration=pv.aotconf`, 40 s with the camera, written at JVM exit), then
+`-XX:AOTMode=create` (no camera; 42.5 MB cache), then start-up with and without `-XX:AOTCache=pv.aot`, the first
+25 s from 1 s after `systemctl start` (2 runs each):
+
+| | without | with the cache |
+|---|---|---|
+| PhotonVision CPU, first 25 s | 40.4%, 40.4% | 29.9%, 30.3% |
+| JIT (C1 + C2) | 7.9%, 7.9% | 2.6%, 3.0% |
+| main thread (class loading, start-up) | 5.3%, 5.2% | 0.4%, 0.5% |
+| web server up | 2.86, 2.82 s | 1.63, 1.65 s |
+| first decoded frame | 2.74, 2.71 s | 1.92, 2.03 s |
+| results published in the window | 2826 | 2913 |
+
+The cache belongs to one jar and one JVM build (a different jar or JDK makes the JVM ignore it with a warning, not
+fail). Install: after copying a new jar, run the training run (or a short headless start) and the create step, put
+the cache next to the jar (`/opt/photonvision/photonvision.aot`, ~43 MB) and add `-XX:AOTCache=...` to ExecStart.
+Not measured: steady state after minutes (the JIT finishes either way).
+
+### Next
+
+- Builder: the native camera backend (owns `USBFrameProvider`, `VisionSourceManager`, `NativeCameraSource`), its
+  Rewind writer, and a proper eMMC/partition plan for recordings.
+- Merge into `sc/mjpeg-napa` (with the builder's OK on the files it owns): bce4e514 (client), 5509a54e (Rewind
+  defaults), the identity-check interval; optionally 340af6cc and f9868494. Not 2bc0e468 (preview).
+- AOT cache in `install-photonvision.sh` (training + create per jar).
+- Lights on: the lit A/B for the identity-check interval and the idle Java rate, and nt_check identity of the
+  merged build.

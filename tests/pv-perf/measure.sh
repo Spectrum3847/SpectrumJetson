@@ -51,6 +51,7 @@ done
 before=""
 [[ -n ${CLEAN_NEW_IN:-} ]] && before=$(sudo -n ls -1 "$CLEAN_NEW_IN" 2>/dev/null)
 cleanup() {
+  [[ -n ${POST_CMD:-} ]] && { sudo -n systemctl stop photonvision 2>/dev/null; bash -c "$POST_CMD"; }
   sudo -n systemctl stop photonvision 2>/dev/null
   for f in "${!saved[@]}"; do
     if [[ ${saved[$f]} == 1 ]]; then sudo -n cp -p "$OUT/restore.$$.$(basename "$f")" "$f"; sudo -n rm -f "$OUT/restore.$$.$(basename "$f")"
@@ -68,6 +69,8 @@ cleanup() {
   echo "restored: settings DB, drop-in, driver"
 }
 trap cleanup EXIT
+# PRE_CMD / POST_CMD: run (bash -c) before PhotonVision starts / after it stopped, under the lock
+[[ -n ${PRE_CMD:-} ]] && bash -c "$PRE_CMD"
 sudo -n python3 "$HERE/tests/systemcore-latency/pv-camera-config.py" only "$CAM" "$NICK" ${PVCFG:-} >/dev/null
 # CAM2/NICK2: a second camera active at the same time (the probe reads NICK's results)
 [[ -n ${CAM2:-} ]] && sudo -n python3 "$HERE/tests/systemcore-latency/pv-camera-config.py" add "$CAM2" "${NICK2:?}" \
