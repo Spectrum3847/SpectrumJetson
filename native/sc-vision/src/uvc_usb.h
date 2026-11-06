@@ -29,7 +29,7 @@ typedef struct {
 typedef struct {
   int vid, pid;          // 0: the first UVC MJPEG device (default 0x1bcf:0x28c5, the Thriftiest Cam)
   int width, height, fps;
-  int alt;               // streaming alt setting; -1: the smallest that fits the camera's max payload
+  int alt;               // streaming alt setting; -1: smallest with >= min(request, 1600 B); -2: the camera's request
   int pkts_per_urb;      // default 4 (0.5 ms)
   int nurbs;             // URBs in flight, default 32
   int verbose;

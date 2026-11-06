@@ -267,8 +267,12 @@ uvc_usb *uvc_open(const uvc_config *cfg) {
   }
   int alt = cfg->alt;
   if (alt < 0) {
+    // The Thriftiest asks for 3060 B/microframe (the whole high-bandwidth isochronous budget of a USB 2 bus) but
+    // sends ~1 KB/microframe; LimelightOS's uvcvideo caps compressed formats at 1600 (alt 8). Do the same, so a
+    // second camera can share the bus. -2: the camera's own request.
+    uint32_t want = (cfg->alt == -2 || maxpay < 1600) ? maxpay : 1600;
     for (int a = 1; a < nalt; a++)
-      if (alt_bytes[a] >= (int)maxpay) {
+      if (alt_bytes[a] >= (int)want) {
         alt = a;
         break;
       }
