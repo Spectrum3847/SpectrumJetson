@@ -13,7 +13,11 @@ mkdir -p "$OUT"
 exec 9>/tmp/camera.lock
 flock -w 300 9 || { echo "camera lock busy" >&2; exit 1; }
 orig=$(v4l2-ctl -d ${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0} -C exposure_time_absolute,gain | tr -d ' ')
-trap 'for kv in $orig; do v4l2-ctl -d ${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0} -c "${kv/:/=}"; done' EXIT  # put the camera back
+restore() {  # put the camera back
+  local kv
+  for kv in $orig; do v4l2-ctl -d "${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0}" -c "${kv/:/=}"; done
+}
+trap restore EXIT
 v4l2-ctl -d ${SCMN_THR:-/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0} -c sharpness=1 -c gamma=100 -c backlight_compensation=0
 for e in $EXPS; do
   for g in $GAINS; do
