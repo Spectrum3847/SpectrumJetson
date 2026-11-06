@@ -32,8 +32,10 @@
 #include <wpi/nt/ntcore_cpp.hpp>
 #include <wpi/util/json.hpp>
 
+#include "pv_pack.h"
+
 namespace {
-const char *kUuid = "fd353b11f3a818e9c5b457c7dc5a8f5c";
+using pvpack::kUuid;
 struct Schema {
   const char *name, *uuid, *schema;
 };
@@ -56,66 +58,6 @@ const Schema kSchemas[] = {
      "Transform3d best;Transform3d alt;float64 bestReprojErr;float64 altReprojErr;float64 ambiguity;"},
 };
 
-struct Packet {
-  std::vector<uint8_t> b;
-  template <class T>
-  void put(T v) {
-    uint8_t x[sizeof(T)];
-    memcpy(x, &v, sizeof(T));  // aarch64 is little-endian, as PhotonVision's Packet
-    b.insert(b.end(), x, x + sizeof(T));
-  }
-};
-
-// Rotation matrix -> quaternion (w, x, y, z), as WPILib's Rotation3d(Matrix).
-void quat(const double R[9], double q[4]) {
-  double tr = R[0] + R[4] + R[8];
-  if (tr > 0) {
-    double s = 0.5 / sqrt(tr + 1.0);
-    q[0] = 0.25 / s, q[1] = (R[7] - R[5]) * s, q[2] = (R[2] - R[6]) * s, q[3] = (R[3] - R[1]) * s;
-  } else if (R[0] > R[4] && R[0] > R[8]) {
-    double s = 2.0 * sqrt(1.0 + R[0] - R[4] - R[8]);
-    q[0] = (R[7] - R[5]) / s, q[1] = 0.25 * s, q[2] = (R[1] + R[3]) / s, q[3] = (R[2] + R[6]) / s;
-  } else if (R[4] > R[8]) {
-    double s = 2.0 * sqrt(1.0 + R[4] - R[0] - R[8]);
-    q[0] = (R[2] - R[6]) / s, q[1] = (R[1] + R[3]) / s, q[2] = 0.25 * s, q[3] = (R[5] + R[7]) / s;
-  } else {
-    double s = 2.0 * sqrt(1.0 + R[8] - R[0] - R[4]);
-    q[0] = (R[3] - R[1]) / s, q[1] = (R[2] + R[6]) / s, q[2] = (R[5] + R[7]) / s, q[3] = 0.25 * s;
-  }
-}
-
-// IPPE's pose (tag frame = AprilTag's homography coordinates, x right, y up) -> PhotonVision's published
-// camera-to-target Transform3d (NWU), translation + quaternion.
-void to_photon(const tag_pose &p, double t[3], double q[4]) {
-  // R = R_h * Rz(180): negate the first two columns
-  double R[9] = {-p.R[0], -p.R[1], p.R[2], -p.R[3], -p.R[4], p.R[5], -p.R[6], -p.R[7], p.R[8]};
-  // EDN -> NWU: C = [[0,0,1],[-1,0,0],[0,-1,0]]; t' = C t, R' = C R C^T
-  static const double C[9] = {0, 0, 1, -1, 0, 0, 0, -1, 0};
-  double CR[9], Rn[9];
-  for (int i = 0; i < 3; i++)
-    for (int j = 0; j < 3; j++) {
-      CR[i * 3 + j] = 0;
-      for (int k = 0; k < 3; k++) CR[i * 3 + j] += C[i * 3 + k] * R[k * 3 + j];
-    }
-  for (int i = 0; i < 3; i++)
-    for (int j = 0; j < 3; j++) {
-      Rn[i * 3 + j] = 0;
-      for (int k = 0; k < 3; k++) Rn[i * 3 + j] += CR[i * 3 + k] * C[j * 3 + k];
-    }
-  // and the tag frame turned 180 degrees about its (NWU) y axis, matching PhotonVision's published rotation
-  // (checked live against the fork on the same frames: same quaternion within the IPPE vs orthogonal-iteration
-  // difference)
-  for (int i = 0; i < 3; i++) Rn[i * 3 + 0] = -Rn[i * 3 + 0], Rn[i * 3 + 2] = -Rn[i * 3 + 2];
-  for (int i = 0; i < 3; i++) t[i] = C[i * 3] * p.t[0] + C[i * 3 + 1] * p.t[1] + C[i * 3 + 2] * p.t[2];
-  quat(Rn, q);
-}
-
-void put_transform(Packet &k, const tag_pose *p) {
-  double t[3] = {0, 0, 0}, q[4] = {1, 0, 0, 0};
-  if (p) to_photon(*p, t, q);
-  for (double v : t) k.put(v);
-  for (double v : q) k.put(v);
-}
 }  // namespace
 
 struct NtPub {
@@ -131,6 +73,7 @@ struct NtPub {
   int64_t mid_offset_ns = 5000000;  // first packet -> mid-exposure (exposure/2 + camera delay)
   int64_t seq = 0, last_ns = 0;
   double fps_ema = 0;
+  int width = 1280, height = 800;
   // PhotonVision's /photonvision/<camera>/health/* (CameraHealthPublisher), once a second
   wpi::nt::DoublePublisher h_fps, h_pipe, h_pipe_max, h_lat;
   wpi::nt::StringPublisher h_state, h_problem;
@@ -221,76 +164,23 @@ static int64_t mono_ns() {
 
 void nt_pub_result(NtPub *p, int64_t t_first_ns, const napa_detection *d, const tag_pose *best, const tag_pose *alt,
                    int n, const int64_t * /*tag_row_ns: not published (global shutter)*/) {
-  static const int perm[4] = {1, 0, 3, 2};
   const int64_t now = mono_ns();
   const int64_t capture = t_first_ns - p->mid_offset_ns;
-  Packet k;
-  k.b.reserve(1024);
-  k.put<int64_t>(++p->seq);
-  k.put<int64_t>(capture);
-  k.put<int64_t>(now);
-  k.put<int64_t>(0);  // timeSinceLastPong: same machine and clock as the robot's time sync server
-  if (n > 127) n = 127;
-  k.put<int8_t>((int8_t)n);
-  double yaw0 = 0, pitch0 = 0, area0 = 0;
+  if (n > 64) n = 64;
+  int ids[64];
+  double corners[64 * 8];
   for (int i = 0; i < n; i++) {
-    double c[8];
-    for (int j = 0; j < 4; j++) c[2 * j] = d[i].corners[2 * perm[j]], c[2 * j + 1] = d[i].corners[2 * perm[j] + 1];
-    double yaw = 0, pitch = 0;
-    if (p->have_cam) {
-      // tag centre: intersection of the diagonals (the homography's image of the centre)
-      double x1 = c[0], y1 = c[1], x2 = c[4], y2 = c[5], x3 = c[2], y3 = c[3], x4 = c[6], y4 = c[7];
-      double den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
-      double cx = (x1 + x2 + x3 + x4) / 4, cy = (y1 + y2 + y3 + y4) / 4;
-      if (fabs(den) > 1e-9) {
-        double a = x1 * y2 - y1 * x2, b = x3 * y4 - y3 * x4;
-        cx = (a * (x3 - x4) - (x1 - x2) * b) / den;
-        cy = (a * (y3 - y4) - (y1 - y2) * b) / den;
-      }
-      // undistort the centre (same model as pose.c), back to pixels with the camera matrix
-      double ux, uy;
-      {
-        const cam_model &m = p->cam;
-        double x0 = (cx - m.cx) / m.fx, y0 = (cy - m.cy) / m.fy, x = x0, y = y0;
-        for (int it = 0; it < 30; it++) {
-          double r2 = x * x + y * y;
-          double ic = (1 + ((m.k[7] * r2 + m.k[6]) * r2 + m.k[5]) * r2) /
-                      (1 + ((m.k[4] * r2 + m.k[1]) * r2 + m.k[0]) * r2);
-          double dx = 2 * m.k[2] * x * y + m.k[3] * (r2 + 2 * x * x);
-          double dy = m.k[2] * (r2 + 2 * y * y) + 2 * m.k[3] * x * y;
-          x = (x0 - dx) * ic, y = (y0 - dy) * ic;
-        }
-        ux = x * m.fx + m.cx, uy = y * m.fy + m.cy;
-      }
-      yaw = atan((ux - p->cam.cx) / p->cam.fx);
-      pitch = atan((p->cam.cy - uy) / (p->cam.fy / cos(yaw)));
-      yaw *= 180 / M_PI, pitch *= 180 / M_PI;
-    }
-    double area = 0;
-    for (int j = 0; j < 4; j++) {
-      int q = (j + 1) % 4;
-      area += c[2 * j] * c[2 * q + 1] - c[2 * q] * c[2 * j + 1];
-    }
-    area = fabs(area) / 2 / (1280.0 * 800.0) * 100;
-    if (i == 0) yaw0 = yaw, pitch0 = pitch, area0 = area;
-    k.put<double>(yaw);
-    k.put<double>(pitch);
-    k.put<double>(area);
-    k.put<double>(0.0);  // skew
-    k.put<int32_t>(d[i].id);
-    k.put<int32_t>(-1);
-    k.put<float>(-1.0f);
-    put_transform(k, best ? &best[i] : nullptr);
-    put_transform(k, alt ? &alt[i] : nullptr);
-    double amb = (best && alt && alt[i].err > 0) ? best[i].err / alt[i].err : -1;
-    k.put<double>(amb);
-    for (int rep = 0; rep < 2; rep++) {  // minAreaRectCorners, detectedCorners
-      k.put<int8_t>(4);
-      for (int j = 0; j < 8; j++) k.put<double>(c[j]);
-    }
+    ids[i] = d[i].id;
+    napa_to_apriltag_order(d[i].corners, corners + 8 * i);
   }
-  k.put<int8_t>(0);  // no multitag result
-  p->raw.Set(k.b);
+  std::vector<uint8_t> buf;
+  buf.reserve(1024);
+  double first[3];
+  // timeSinceLastPong 0: same machine and clock as the robot's time sync server
+  pvpack::pack_result(buf, ++p->seq, capture, now, 0, p->have_cam ? &p->cam : nullptr, p->width, p->height, n, ids,
+                      corners, best, alt, first);
+  const double yaw0 = first[0], pitch0 = first[1], area0 = first[2];
+  p->raw.Set(buf);
   if (p->last_ns) {
     double f = 1e9 / (double)(now - p->last_ns);
     p->fps_ema = p->fps_ema ? 0.95 * p->fps_ema + 0.05 * f : f;

@@ -52,6 +52,7 @@
 extern "C" {
 #include "../../native/sc-vision/src/pose.h"  // poseSquare (sc/mjpeg-napa)
 }
+#include "../../native/sc-vision/src/pv_pack.h"  // native publish (sc/mjpeg-napa)
 
 namespace {
 jclass detectionCls = nullptr;
@@ -90,17 +91,61 @@ int64_t NowUs() {
       .count();
 }
 
+// sc/mjpeg-napa native publish: ntcore's C API from the copy PhotonVision's JVM already loaded (no second ntcore).
+struct NtApi {
+  int (*set_raw)(unsigned, int64_t, const uint8_t *, size_t) = nullptr;
+  void (*flush)(unsigned) = nullptr;
+};
+const NtApi *Nt() {
+  static const NtApi *api = []() -> const NtApi * {
+    void *h = dlopen("libntcore.so", RTLD_NOW | RTLD_NOLOAD);
+    auto *a = new NtApi;
+    a->set_raw = reinterpret_cast<decltype(a->set_raw)>(h ? dlsym(h, "NT_SetRaw") : dlsym(RTLD_DEFAULT, "NT_SetRaw"));
+    a->flush = reinterpret_cast<decltype(a->flush)>(h ? dlsym(h, "NT_Flush") : dlsym(RTLD_DEFAULT, "NT_Flush"));
+    if (!a->set_raw || !a->flush) {
+      std::cout << "NAPA: native publish unavailable (ntcore's C API not found in this process)" << std::endl;
+      return nullptr;
+    }
+    return a;
+  }();
+  return api;
+}
+
+int64_t MonoNs() {
+  timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return static_cast<int64_t>(t.tv_sec) * 1000000000LL + t.tv_nsec;
+}
+
+// What the watcher needs to publish a frame's result itself (set from Java, every frame).
+struct PublishCfg {
+  unsigned pub = 0, inst = 0;  // ntcore handles: PhotonVision's rawBytes publisher and its instance
+  cam_model cam{};
+  bool have_cam = false;
+  double tag_size = 0.1651;
+  int64_t mid_shift_ns = 0;    // frame's first bytes -> mid-exposure
+  int64_t nt_offset_ns = 0;    // PhotonVision's time-sync offset
+  int64_t since_pong = 0;
+};
+
 // The camera watcher's side of streaming NAPA: its own detector, fed band by band on the watcher thread.
 struct StreamSink {
   napa_far::Detector det;
   std::mutex cfg_mu;
   napa_far::Config cfg;
   bool cfg_new = true;
+  PublishCfg pub;              // (cfg_mu)
+  int64_t t_begin = 0;         // CLOCK_MONOTONIC when the frame's first bytes were seen
+  int width = 0, height = 0;
+  std::atomic<int64_t> seq{0};
+  std::atomic<long> published{0};
   spectrum_band_sink c{};
   explicit StreamSink(const std::string &family) : det(family) {
     c.ctx = this;
     c.begin = [](void *x, const uint8_t *img, int w, int h, int stride) -> int {
       auto *s = static_cast<StreamSink *>(x);
+      s->t_begin = MonoNs();
+      s->width = w, s->height = h;
       {
         std::lock_guard<std::mutex> l(s->cfg_mu);
         if (s->cfg_new) s->det.SetConfig(s->cfg);
@@ -109,8 +154,45 @@ struct StreamSink {
       return s->det.Begin(img, w, h, stride, NowUs()) ? 1 : 0;
     };
     c.feed = [](void *x, int rows) { static_cast<StreamSink *>(x)->det.Feed(rows); };
-    c.finish = [](void *x) -> void * { return new std::vector<napa_far::Tag>(static_cast<StreamSink *>(x)->det.Finish()); };
+    c.finish = [](void *x) -> void * {
+      auto *s = static_cast<StreamSink *>(x);
+      auto *tags = new std::vector<napa_far::Tag>(s->det.Finish());
+      s->Publish(*tags);
+      return tags;
+    };
     c.free_result = [](void *r) { delete static_cast<std::vector<napa_far::Tag> *>(r); };
+  }
+  // On the watcher thread, the moment the tags are known: pose + PhotonPipelineResult + NT, as PhotonVision's
+  // Java pipeline would (pv_pack.h), so the Java pipeline is off the per-frame path.
+  void Publish(const std::vector<napa_far::Tag> &tags) {
+    PublishCfg p;
+    {
+      std::lock_guard<std::mutex> l(cfg_mu);
+      p = pub;
+    }
+    const NtApi *nt = p.pub ? Nt() : nullptr;
+    if (!nt) return;
+    const int n = static_cast<int>(std::min<size_t>(tags.size(), 64));
+    int ids[64];
+    double corners[64 * 8];
+    tag_pose best[64], alt[64];
+    for (int i = 0; i < n; i++) {
+      ids[i] = tags[i].id;
+      std::memcpy(corners + 8 * i, tags[i].p.data(), sizeof(double) * 8);
+      if (p.have_cam && pose_ippe_square(&p.cam, corners + 8 * i, p.tag_size, &best[i], &alt[i])) {
+        std::memset(&best[i], 0, sizeof best[i]);
+        alt[i] = best[i];
+      }
+    }
+    std::vector<uint8_t> buf;
+    buf.reserve(1024);
+    const int64_t now = MonoNs();
+    pvpack::pack_result(buf, ++seq, t_begin - p.mid_shift_ns + p.nt_offset_ns, now + p.nt_offset_ns, p.since_pong,
+                        p.have_cam ? &p.cam : nullptr, width, height, n, ids, corners, p.have_cam ? best : nullptr,
+                        p.have_cam ? alt : nullptr, nullptr);
+    nt->set_raw(p.pub, 0, buf.data(), buf.size());
+    nt->flush(p.inst);
+    published++;
   }
 };
 
@@ -317,6 +399,39 @@ JNIEXPORT jdoubleArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_poseSqu
   jdoubleArray arr = env->NewDoubleArray(26);
   if (arr) env->SetDoubleArrayRegion(arr, 0, 26, out);
   return arr;
+}
+
+// sc/mjpeg-napa native publish: the watcher publishes each streamed frame's PhotonPipelineResult on PhotonVision's
+// rawBytes publisher (pub, an ntcore handle; 0 = off) the moment its tags are known. k/dist: calibration (null:
+// no pose); midShiftNs: first bytes -> mid-exposure; ntOffsetNs: PhotonVision's time-sync offset. Call every
+// frame (cheap). Returns frames published so far, or -1 when ntcore's C API isn't reachable / not streaming yet.
+JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_setNativePublish(
+    JNIEnv *env, jclass, jlong h, jint pub, jint inst, jdoubleArray jk, jdoubleArray jd, jdouble size, jlong midShiftNs,
+    jlong ntOffsetNs, jlong sincePongNs) {
+  auto *n = Handle(h);
+  if (!n || !n->sink) return -1;
+  if (pub && !Nt()) return -1;
+  PublishCfg p;
+  p.pub = static_cast<unsigned>(pub);
+  p.inst = static_cast<unsigned>(inst);
+  if (jk && env->GetArrayLength(jk) >= 9) {
+    double k[9], d[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    env->GetDoubleArrayRegion(jk, 0, 9, k);
+    const jsize nd = jd ? std::min<jsize>(8, env->GetArrayLength(jd)) : 0;
+    if (nd > 0) env->GetDoubleArrayRegion(jd, 0, nd, d);
+    p.cam.fx = k[0], p.cam.cx = k[2], p.cam.fy = k[4], p.cam.cy = k[5];
+    for (int i = 0; i < 8; i++) p.cam.k[i] = d[i];
+    p.have_cam = true;
+  }
+  p.tag_size = size;
+  p.mid_shift_ns = midShiftNs;
+  p.nt_offset_ns = ntOffsetNs;
+  p.since_pong = sincePongNs;
+  {
+    std::lock_guard<std::mutex> l(n->sink->cfg_mu);
+    n->sink->pub = p;
+  }
+  return n->sink->published.load();
 }
 
 // Whether streamDecodeGray copies the decoded image (false: only when nobody watches the stream; the tags come from
