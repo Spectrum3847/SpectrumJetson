@@ -64,6 +64,10 @@ Published summary: https://claude.ai/artifact/2UXdwMdQXJ4XqfPSzuviP9 (private; s
   Open: our small-URB uvcvideo isn't loaded at boot (stock driver: 46.4% CPU, 10.9 ms vs 39.2%, 8.4 ms);
   0.23 ms Thriftiest offset with two cameras; lit CPU; UI controls pass. One more Pi reset (SD/undervoltage).
 
+- **Our uvcvideo loads at boot** (`sc-uvcvideo.service` + `scripts/systemcore/uvcvideo-boot.sh`, falls back to stock;
+  9f8e903, 7ee3a5e). Survived a controlled reboot. Lit, both cameras native: 121/120 fps, tag quality 100% matched,
+  capture → publish 8.44 / 8.69 ms p50, PV 67.3% of one core for both (~25-30% per camera).
+
 ## In progress / next
 
 1. Native backend leftovers: real calibration from the UI, passthrough stream (camera JPEG, no re-encode), both
