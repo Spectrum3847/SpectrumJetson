@@ -46,9 +46,22 @@ Published summary: https://claude.ai/artifact/2UXdwMdQXJ4XqfPSzuviP9 (private; s
 - Pi 5 per-port USB power switching does not cut VBUS: a Swyft after its boot loader needs a physical replug.
 - `limelight_visionserver` must be stopped while PV/sc-vision use the cameras (restarts at boot).
 
+## Update (2026-11-06 morning)
+
+- **Native cameras without cscore work** (fork 97cc032e, 0c39517d, 6f8bcb0e = photonvision-128..130; SpectrumJetson
+  de88259, 73359df, 9c542ff; status in `docs/SYSTEMCORE-NATIVE-BACKEND.md`). Thriftiest/Swyft go native automatically
+  when `SPECTRUM_NATIVE_PUBLISH=1` (`SPECTRUM_NATIVE_CAMERA=0` opts out); other cameras stay on cscore.
+  Dark, single camera: same latency as the fast path, CPU Thriftiest 22.3 → 18.3%, Swyft 28.0 → 24.3% of a core.
+  Handover (native → temporary cscore → native) and stream-on-demand verified via a test hook; fallback verified.
+- **PV-perf all merged:** photonvision-120..127 on fork sc/mjpeg-napa; identity checks every 1024th frame (49d42c1);
+  installer builds a Java AOT cache, PV starts via `/opt/photonvision/run.sh` (d6ed364). Status: `docs/PHOTONVISION-PERF.md`.
+- **Pi:** PV installed with native backend, AOT=0, PV stopped, limelight_visionserver stopped, DB restored (both cameras), Swyft exp 10.
+
 ## In progress / next
 
-1. Native camera backend option #1 (no cscore UsbCamera for verified cameras; per-camera fallback; calibration handover).
+1. Native backend leftovers: real calibration from the UI, passthrough stream (camera JPEG, no re-encode), both
+   cameras at once, lit CPU vs sc-vision, full UI controls check, 21 tag-quality seq mismatches during handover,
+   enable `SPECTRUM_NATIVE_PUBLISH=1` in the installed drop-in, first AOT-cache install.
 2. Lights-on checks: PV min 16 with two cameras, tag 3 decision margin, half-scale CPU, PV-perf lit A/Bs.
 3. Apply the data-area plan on the bench Pi when someone is there; provision training Pis from that plan.
 4. Port to the Jetson: photonvision-106, mjdec, fast path (see `docs/SYSTEMCORE-FINDINGS.md`).
