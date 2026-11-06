@@ -30,6 +30,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/file.h>
+#include <dirent.h>
+#include <sys/syscall.h>
 
 #include <algorithm>
 #include <atomic>
@@ -320,21 +322,38 @@ int main(int argc, char **argv) {
   if (brightness > -1000 && uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_BRIGHTNESS, brightness))
     fprintf(stderr, "brightness: not set\n");
   mlockall(MCL_CURRENT | MCL_FUTURE);
+  // Helper threads first (ntcore's network threads, the checker), while this thread still has every core and normal
+  // scheduling: they inherit that. Only the vision thread is then pinned and made SCHED_FIFO. (Before, NT's threads
+  // inherited the pin + FIFO and starved behind a never-yielding vision thread on an overloaded core: a client got
+  // 6 results/s, up to 850 ms late; tester finding.) They are also kept off the vision core explicitly.
+  NtPub *pub = nt_host ? nt_pub_create(nt_host, cam_name) : nullptr;
+  Checker chk;
+  chk.napa_on = !no_napa;
+  if (check > 0) chk.start();  // nice 19
   if (cpu >= 0) {
+    cpu_set_t others;
+    CPU_ZERO(&others);
+    for (int c = 0; c < CPU_SETSIZE && c < 64; c++)
+      if (c != cpu) CPU_SET(c, &others);
+    // every other thread of the process (ntcore's, the checker) off the vision core
+    if (DIR *td = opendir("/proc/self/task")) {
+      const pid_t self = (pid_t)syscall(SYS_gettid);
+      while (struct dirent *e = readdir(td)) {
+        pid_t tid = (pid_t)atoi(e->d_name);
+        if (tid > 0 && tid != self) sched_setaffinity(tid, sizeof others, &others);
+      }
+      closedir(td);
+    }
     cpu_set_t s;
     CPU_ZERO(&s);
     CPU_SET(cpu, &s);
     sched_setaffinity(0, sizeof s, &s);
   }
-  Checker chk;
-  chk.napa_on = !no_napa;
-  if (check > 0) chk.start();  // started before SCHED_FIFO: it inherits normal scheduling, nice 19
   if (fifo > 0) {
     sched_param sp{};
     sp.sched_priority = fifo;
     if (sched_setscheduler(0, SCHED_FIFO, &sp)) perror("SCHED_FIFO");
   }
-  NtPub *pub = nt_host ? nt_pub_create(nt_host, cam_name) : nullptr;
   // first packet -> mid-exposure: half the exposure (exposure_time_absolute is 0.1 ms steps) + the camera's delay
   // from exposure end to its first packet (default 2.5 ms, Team 100's figure; the firmware analysis measured
   // ~0.35 ms from the payload PTS, to be confirmed with an LED test before the default changes)
@@ -377,7 +396,8 @@ int main(int argc, char **argv) {
   // frame state
   size_t flen = 0;
   int fid = -1, done_fid = -1, in_frame = 0, process = 0, rows_dec = 0, rows_fed = 0, bad = 0;
-  long seq = 0, nframes = 0, ndone = 0, nbad = 0, ndet = 0;
+  long seq = 0, nframes = 0, ndone = 0, nbad = 0, ndet = 0, nskip = 0;
+  int64_t last_frame_cpu_ns = 0;
   int64_t t_first = 0, c_frame0 = 0, c_dec = 0, c_napa = 0, last_proc_start = 0;
   std::vector<double> lat;  // eof reap -> results, ms
   FILE *save_f = nullptr;
@@ -446,6 +466,7 @@ int main(int argc, char **argv) {
       t_pub = mono_ns();
     }
     int64_t frame_cpu = cpu_ns() - c_frame0;
+    last_frame_cpu_ns = frame_cpu;
     ndone++;
     if (pub) nt_pub_health(pub, t_pub, ndone, nbad, frame_cpu / 1e6, 1);
     lat.push_back((t_det - tr) / 1e6);
@@ -501,6 +522,14 @@ int main(int argc, char **argv) {
         if (process && fps_max > 0 && last_proc_start &&
             t_first - last_proc_start < (int64_t)(1e9 / fps_max) - 2000000)
           process = 0;
+        // Overload (e.g. min tag 16 on a busy frame costing more than a frame period): newest-frame semantics.
+        // Skip this frame if we are working behind the USB stream (this URB was reaped > 2 ms after it completed) or
+        // the last processed frame took most of a period, instead of falling further and further behind.
+        if (process && (mono_ns() - tr > 2000000 || last_frame_cpu_ns > 7000000)) {
+          process = 0;
+          nskip++;
+          last_frame_cpu_ns = 0;  // try the next one
+        }
         if (process) last_proc_start = t_first;
         if (process) {
           c_frame0 = cpu_ns();
@@ -540,9 +569,10 @@ int main(int argc, char **argv) {
   uint64_t dco, blocks;
   mjdec_stats(dec, &dco, &blocks);
   fprintf(stderr,
-          "sc-vision: %ld frames seen, %ld processed, %ld bad, %ld with tags; last URB reap -> tags p50 %.3f p95 %.3f "
-          "p99 %.3f ms; identity checks: decode %ld ok %ld differ, NAPA %ld ok %ld differ; DC-only %.1f%%\n",
-          nframes, ndone, nbad, ndet, P(.5), P(.95), P(.99), chk.ok_dec.load(), chk.bad_dec.load(),
+          "sc-vision: %ld frames seen, %ld processed, %ld skipped (overload), %ld bad, %ld with tags; last URB reap -> "
+          "tags p50 %.3f p95 %.3f p99 %.3f ms; identity checks: decode %ld ok %ld differ, NAPA %ld ok %ld differ; "
+          "DC-only %.1f%%\n",
+          nframes, ndone, nskip, nbad, ndet, P(.5), P(.95), P(.99), chk.ok_dec.load(), chk.bad_dec.load(),
           chk.ok_det.load(), chk.bad_det.load(), blocks ? 100.0 * dco / blocks : 0.0);
   if (pub) nt_pub_destroy(pub);
   mjdec_destroy(dec);

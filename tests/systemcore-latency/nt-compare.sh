@@ -12,6 +12,8 @@ L=$HERE/../../scripts/systemcore/uvcvideo-load.sh
 secs=${1:-15}
 configs=${2:-pvjava pvnative scv}
 OUT=${OUT:-$HOME/shared/latency/nt}
+CAM=${CAM:-thrifty}   # the PhotonVision / sc-vision camera name (topic)
+SCV_ARGS=${SCV_ARGS:---serial SJ-05 --cpu 3 --fifo 40 --pkts 2 --exposure 2 --gain 128 --gamma 100 --backlight 0 --sharpness 1 --min-tag 32 --calib /opt/sc-vision/etc/calib.json}
 mkdir -p "$OUT"
 DROPIN=/etc/systemd/system/photonvision.service.d/zz-ntcompare.conf
 PROBE=/opt/sc-vision/bin/nt_probe
@@ -37,15 +39,15 @@ for c in $configs; do
       pid=$(systemctl show -p MainPID --value photonvision)
       ;;
     scv)
-      sudo -n /opt/sc-vision/bin/sc-vision --serial SJ-05 --cpu 3 --fifo 40 --pkts 2 --exposure 2 --gain 128 \
-        --gamma 100 --backlight 0 --sharpness 1 --min-tag 32 --calib /opt/sc-vision/etc/calib.json --nt 127.0.0.1 \
-        --name thrifty --secs $((secs + 8)) > "$OUT/scv.log" 2>&1 &
+      # shellcheck disable=SC2086
+      sudo -n /opt/sc-vision/bin/sc-vision $SCV_ARGS --nt 127.0.0.1 --name "$CAM" --secs $((secs + 8)) \
+        > "$OUT/scv.log" 2>&1 &
       sleep 4
       pid=$(pidof sc-vision | cut -d" " -f1)
       ;;
   esac
   t0=$(ticks "$pid")
-  "$PROBE" 127.0.0.1 thrifty "$secs" > "$OUT/$c.probe" 2>&1
+  "$PROBE" 127.0.0.1 "$CAM" "$secs" > "$OUT/$c.probe" 2>&1
   t1=$(ticks "$pid")
   echo "proc_pct_of_1 $(awk -v p=$((t1 - t0)) -v s="$secs" 'BEGIN{printf "%.1f", p/s}')" > "$OUT/$c.cpu"
   if [[ $c == scv ]]; then wait; else
