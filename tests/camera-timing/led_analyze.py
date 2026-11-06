@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Camera delay from an LED sweep (uvc_timing --led ... --frames N F.mjpeg). Laptop: Pillow + numpy.
 
-  led_analyze.py F.mjpeg PULSES.csv [--roi X0 Y0 X1 Y1] [--clock HZ]
+  led_analyze.py F.mjpeg PULSES.csv [--roi X0 Y0 X1 Y1] [--clock HZ] [--invert]
+
+--invert: the LED is lit between pulses and dark during them. On the bench SystemCore/Pi 5 (LimelightOS) the ACT
+LED is: writing brightness 0 lights it, 1 turns it off (measured 2026-11-05), so led-test.sh's pulses are dips.
 
 1. Decodes every saved frame. The LED region is found automatically: pixels that get much brighter than their
    median in a few frames (or give --roi in full-frame pixels).
@@ -99,6 +102,8 @@ def main():
     sig = np.full(len(ims), np.nan)
     for k in ok:
         sig[k] = float((ims[k] - med)[roi].mean())
+    if "--invert" in sys.argv:  # LED lit at rest, the pulse turns it off: the signal is the dip
+        sig = -sig
     tf = np.array([int(r["t_first_ns"]) for r in idx], dtype=float)
     pts = np.array([int(r["pts"]) for r in idx], dtype=float)
     stc = np.array([int(r["scr_stc"]) for r in idx], dtype=float)

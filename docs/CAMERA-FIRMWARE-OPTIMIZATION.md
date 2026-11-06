@@ -17,7 +17,8 @@ How it was measured:
 
 ## Summary
 
-1. **The camera delay is ~0.35 ms, not 2.5 ms** (measured, medium-high confidence).
+1. **The camera delay is ~0.4 ms, not 2.5 ms.** Measured with an LED: exposure end -> first USB packet is
+   0.41 +- 0.05 ms, and the PTS marks exposure end (+-0.02 ms). The earlier, LED-free analysis:
    - In the camera's own clock, a frame's first data packet leaves 0.35 ms (Thriftiest) or 0.32 ms (Swyft)
      after its PTS.
    - That gap stays the same for exposures from 0.1 to 5 ms. The sensor readout paces the frame's bytes, so
@@ -105,6 +106,30 @@ Each mode's frames were matched against 1280x800 frames of the same scene (`mode
 | Swyft 352x288 @ 210 | 3.75 ms | 0.22 | binned and scaled |
 
 ## Camera delay: what was measured and how sure it is
+
+### LED measurement (2026-11-05, Thriftiest SJ-05, usbrecov 5.13, 1280x800 MJPEG 120 fps)
+
+`uvc_timing --led` pulsed the Pi's green ACT LED for 0.29 ms. Pulses came at 0..8.3 ms after every 4th
+frame's first packet, in 0.05 ms steps: 453 pulses in 15 s, scheduling error p99 0.5 us. The camera
+faced the LED from ~15 cm, at exposure 10 and gain 64. `led_analyze.py --invert` fitted the dip that
+each pulse left in the LED spot as an overlap trapezoid, with error bars from 40 bootstrap resamples.
+
+| | Result |
+|---|---|
+| **Exposure end -> first USB data packet** | **0.41 +- 0.05 ms** (host clock) |
+| Exposure end -> PTS | 0.045 +- 0.02 ms (camera clock): **PTS marks the end of exposure** |
+| Exposure at setting 10 | 0.91-0.94 ms |
+
+- **The camera delay constant should be ~0.4 ms, not 2.5 ms.** Published mid-exposure times are ~2.1 ms early.
+- **The ACT LED polarity is inverted on this LimelightOS board:** brightness 0 lights it, 1 turns it off.
+  Toggle check: 213 vs 69 grey. So the pulses were 0.3 ms dark gaps on a lit LED.
+- **The 1280x400 band (VTS 910) gives no latency gain.** Its first data came 4.06 ms after PTS. If PTS is
+  exposure end there too, exposure end -> last row stays ~7.6 ms. The band only pays off with a shorter
+  VTS (~240 fps), which needs the frame-rate code. The flicker test (+2.7 ms) agrees roughly.
+
+Data (laptop scratch, kept for re-analysis): frames, index and pulse log of this run.
+
+### Before the LED test
 
 - **Measured.** The SCR carries the camera's source clock for every packet. Its fit to host time has
   residuals of a few microseconds and a slope of exactly 48.000 / 15.000 MHz. So "PTS -> first data
