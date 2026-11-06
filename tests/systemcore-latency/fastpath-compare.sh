@@ -17,12 +17,10 @@ mkdir -p "$OUT"
 S="SPECTRUM_IDLE_FPS=0 SPECTRUM_SYSTEMCORE_PROFILE=0 SPECTRUM_JPEG_DECODER=stream SPECTRUM_NAPA_STREAM=1 SPECTRUM_STREAM_DECODER=mjdec"
 "$L" urb 2
 for s in $steps; do
+  # shellcheck disable=SC2086
   case $s in
-    # shellcheck disable=SC2086
     copy) "$HERE/run.sh" pv "$secs" pv-copy $S SPECTRUM_STREAM_NOCOPY=0 >/dev/null 2>&1 ;;
-    # shellcheck disable=SC2086
     nocopy) "$HERE/run.sh" pv "$secs" pv-nocopy $S SPECTRUM_NATIVE_POSE=0 >/dev/null 2>&1 ;;
-    # shellcheck disable=SC2086
     nativepose) "$HERE/run.sh" pv "$secs" pv-nativepose $S >/dev/null 2>&1 ;;
     scv) EXPOSURE_MS=0.2 "$HERE/run.sh" native "$secs" scv --serial SJ-05 --cpu 3 --fifo 40 --pkts 2 --exposure 2 \
            --gain 128 --gamma 100 --backlight 0 --sharpness 1 --min-tag 32 --calib /opt/sc-vision/etc/calib.json \
