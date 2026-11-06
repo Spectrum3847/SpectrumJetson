@@ -16,6 +16,17 @@ SystemCore toolchain (`build.sh`, Git Bash) and pinned/timed by the programs the
 | `pvcsv.py CSV` | Stage table from PhotonVision's `SPECTRUM_LATENCY_TRACE` CSV alone, plus frame gaps. |
 | `gen_synth.py OUT` | Rendered Rewind sessions with field tags, encoded like the camera (4:2:2, restart every 8 rows). The TXMAN1 recordings were on the lost Jetson SSD. |
 | `mjpeg2rewind.py CAP.mjpeg OUT` | `v4l2-ctl --stream-to` capture -> Rewind folder; prints the JPEG layout. |
+| `jpegbits.py CAMDIR` | Entropy bits per component, DC-only blocks, SOF/DRI/DHT layout (pure Python). `scmn_bench split` times entropy vs IDCT. |
+| `expsweep.sh OUT ...` | Exposure x gain sweep on the live tag (scmn_live + captures; restores the controls). |
+| `burn.py CORES SECS` | Pinned spin load standing in for robot code. `livecsv.py` per-frame stages of a `scmn_live --csv`. |
+| `soak.sh OUT MIN CMD...` / `soakreport.py OUT` | Long run under the lock with sysmon; per-5-min latency, CPU, gaps, RSS, fds, temperature, throttling. Re-binds uvcvideo if a usbfs app left the camera without a driver. |
+| `scvtrace.py APP.csv TRACE` | A native app's own frame timestamps against the kernel's `xhci_urb_giveback` trace. |
+| `topcpu.py [SECS]` | Exact per-thread CPU (schedstat), all threads as % of 4 cores and per core. `/proc/stat` aliases with the 2 kHz USB rhythm (`cpucal.py` shows the method is fine for ordinary loads). |
+| `prof.c` -> `scmn_prof PID SECS` + `profsym.py` | Sampling profiler (perf_event_open; no perf on LimelightOS), symbolized on the laptop. |
+| `pvconfig.py` | Read-only dump of PhotonVision's settings DB. |
+| `nt_check.cc` (+ `fetch-ntcore.sh`) | Decodes `/photonvision/<camera>/rawBytes` from the publisher's own photonstruct schemas: PhotonVision and sc-vision with one tool. |
+| `hh.sh OUT SECS native MIN \| pv NAME` | Head-to-head runs with the same camera settings, exact CPU, kernel-trace check. |
+| `prototypes/napa-04-stream-readahead.patch` | The proved fix for streaming NAPA reading unfed rows (`scmn_bench probe`). |
 
 ```
 tests/systemcore-mjpeg-napa/build.sh ~/build/scmn            # laptop
