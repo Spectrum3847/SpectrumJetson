@@ -23,6 +23,9 @@ typedef struct {
 int pose_ippe_square(const cam_model *cam, const double corners[8], double size_m, tag_pose *best,
                      tag_pose *alt);
 
+// 1 (default): refine each IPPE solution with Gauss-Newton on the pixel reprojection error.
+extern int pose_refine;
+
 // Parse a PhotonVision calibration JSON (cameraIntrinsics.data, distCoeffs.data). 0 or -1.
 int cam_model_load(const char *path, cam_model *cam);
 

@@ -5,14 +5,16 @@
 #   sc-vision limelight      Limelight's own visionserver (stops the others)
 #   sc-vision off            none of them (camera free for tests)
 #   sc-vision status
-# Takes /tmp/camera.lock briefly so it never switches under a running camera test.
+# Takes /tmp/camera.lock briefly so it never switches under a running camera test (SC_VISION_HAVE_LOCK=1: the
+# caller already holds it).
 set -euo pipefail
 units=(photonvision sc-vision-native limelight_visionserver)
+lock() { [[ ${SC_VISION_HAVE_LOCK:-0} == 1 ]] || flock -w 30 /tmp/camera.lock true; }
 stop_all() { for u in "${units[@]}"; do sudo systemctl stop "$u" 2>/dev/null || true; done; }
 case ${1:-status} in
-  photonvision) flock -w 30 /tmp/camera.lock true; stop_all; sudo systemctl start photonvision ;;
-  native) flock -w 30 /tmp/camera.lock true; stop_all; sudo systemctl start sc-vision-native ;;
-  limelight) flock -w 30 /tmp/camera.lock true; stop_all; sudo systemctl start limelight_visionserver ;;
+  photonvision) lock; stop_all; sudo systemctl start photonvision ;;
+  native) lock; stop_all; sudo systemctl start sc-vision-native ;;
+  limelight) lock; stop_all; sudo systemctl start limelight_visionserver ;;
   off) stop_all ;;
   status) ;;
   *) echo "usage: sc-vision photonvision|native|limelight|off|status" >&2; exit 2 ;;

@@ -29,9 +29,12 @@ LIBS=()
 if [[ ${NT:-0} == 1 ]]; then
   PUB=("$HERE/src/nt_pub.cc" -I"${NT_INC:?NT_INC: ntcore/wpiutil headers}")
   # shellcheck disable=SC2054
-  LIBS=(-L"${NT_LIB:?NT_LIB: dir with libntcore.so etc.}" -lntcore -lwpinet -lwpiutil -Wl,-rpath,/opt/sc-vision/lib)
+  LIBS=(-L"${NT_LIB:?NT_LIB: dir with libntcore.so etc.}" -lntcore -ldatalog -lwpinet -lwpiutil -Wl,-rpath,/opt/sc-vision/lib)
 fi
-"$SC_CXX" "${CF[@]}" -std=c++20 -I"$HERE/src" -I"$OUT/napa-src" "$HERE/src/sc_vision.cc" "${PUB[@]}" \
+"$SC_CXX" "${CF[@]}" -std=gnu++23 -I"$HERE/src" -I"$OUT/napa-src" "$HERE/src/sc_vision.cc" "${PUB[@]}" \
   "$OUT/mjdec.o" "$OUT/uvc_usb.o" "$OUT/pose.o" "$OUT/napa_core.o" -o "$OUT/sc-vision" -ljpeg -lpthread -lm \
   "${LIBS[@]}"
+if [[ ${NT:-0} == 1 ]]; then
+  "$SC_CXX" "${CF[@]}" -std=gnu++23 -I"$NT_INC" "$HERE/tools/nt_probe.cc" -o "$OUT/nt_probe" "${LIBS[@]}"
+fi
 echo "built in $OUT"

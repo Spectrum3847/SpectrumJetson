@@ -97,6 +97,64 @@ static double reproj_err(const cam_model *c, const double R[9], const double t[3
   return sqrt(s / 4);
 }
 
+// R <- exp([w]x) R (Rodrigues)
+static void rot_update(double R[9], const double w[3]) {
+  double th = sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+  double E[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  if (th > 1e-15) {
+    double k[3] = {w[0] / th, w[1] / th, w[2] / th}, c = cos(th), sn = sin(th), v = 1 - c;
+    E[0] = c + k[0] * k[0] * v, E[1] = k[0] * k[1] * v - k[2] * sn, E[2] = k[0] * k[2] * v + k[1] * sn;
+    E[3] = k[1] * k[0] * v + k[2] * sn, E[4] = c + k[1] * k[1] * v, E[5] = k[1] * k[2] * v - k[0] * sn;
+    E[6] = k[2] * k[0] * v - k[1] * sn, E[7] = k[2] * k[1] * v + k[0] * sn, E[8] = c + k[2] * k[2] * v;
+  }
+  double N[9];
+  for (int i = 0; i < 3; i++)
+    for (int j = 0; j < 3; j++) N[i * 3 + j] = E[i * 3] * R[j] + E[i * 3 + 1] * R[3 + j] + E[i * 3 + 2] * R[6 + j];
+  memcpy(R, N, sizeof N);
+}
+
+static void residuals(const cam_model *c, const double R[9], const double t[3], const double obj[4][2],
+                      const double px[8], double r[8]) {
+  for (int i = 0; i < 4; i++) {
+    double P[3];
+    for (int k = 0; k < 3; k++) P[k] = R[k * 3] * obj[i][0] + R[k * 3 + 1] * obj[i][1] + t[k];
+    double u, v;
+    project(c, P, &u, &v);
+    r[2 * i] = u - px[2 * i], r[2 * i + 1] = v - px[2 * i + 1];
+  }
+}
+
+// Gauss-Newton on the pixel reprojection error (with distortion): the maximum-likelihood pose for Gaussian
+// corner noise. IPPE's analytic pose is the start; 4 iterations, numeric Jacobian (6 parameters, 8 residuals).
+static void refine(const cam_model *c, const double obj[4][2], const double px[8], tag_pose *p) {
+  for (int it = 0; it < 4; it++) {
+    double r0[8], J[8][6];
+    residuals(c, p->R, p->t, obj, px, r0);
+    for (int k = 0; k < 6; k++) {
+      double R[9], t[3], d[3] = {0, 0, 0}, r[8];
+      memcpy(R, p->R, sizeof R), memcpy(t, p->t, sizeof t);
+      const double h = k < 3 ? 1e-6 : 1e-6 * (fabs(p->t[2]) + 1e-3);
+      if (k < 3) d[k] = h, rot_update(R, d);
+      else t[k - 3] += h;
+      residuals(c, R, t, obj, px, r);
+      for (int i = 0; i < 8; i++) J[i][k] = (r[i] - r0[i]) / h;
+    }
+    double A[36] = {0}, g[6] = {0};
+    for (int i = 0; i < 8; i++)
+      for (int a = 0; a < 6; a++) {
+        g[a] -= J[i][a] * r0[i];
+        for (int b = 0; b < 6; b++) A[a * 6 + b] += J[i][a] * J[i][b];
+      }
+    for (int a = 0; a < 6; a++) A[a * 6 + a] *= 1 + 1e-9;
+    if (solve(A, g, 6)) return;
+    rot_update(p->R, g);
+    p->t[0] += g[3], p->t[1] += g[4], p->t[2] += g[5];
+    if (fabs(g[0]) + fabs(g[1]) + fabs(g[2]) < 1e-10) break;
+  }
+}
+
+int pose_refine = 1;  // Gauss-Newton after IPPE (sc-vision --no-refine turns it off)
+
 int pose_ippe_square(const cam_model *cam, const double corners[8], double size_m, tag_pose *best,
                      tag_pose *alt) {
   const double h = size_m / 2;
@@ -157,6 +215,7 @@ int pose_ippe_square(const cam_model *cam, const double corners[8], double size_
       for (int j = 0; j < 3; j++) R[i * 3 + j] = Rv[0 * 3 + i] * Rt[0 * 3 + j] + Rv[1 * 3 + i] * Rt[1 * 3 + j] +
                                                  Rv[2 * 3 + i] * Rt[2 * 3 + j];
     if (translation(R, obj, img, sol[k].t)) return -1;
+    if (pose_refine) refine(cam, obj, corners, &sol[k]);
     sol[k].err = reproj_err(cam, R, sol[k].t, obj, corners);
   }
   int bi = sol[0].err <= sol[1].err ? 0 : 1;
