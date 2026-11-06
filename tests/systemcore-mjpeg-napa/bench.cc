@@ -534,6 +534,67 @@ static int RunFused(const Opt &o) {
   return rc;
 }
 
+// ---- split mode -----------------------------------------------------------------------------------------
+// Where libjpeg-turbo's gray decode spends its time, without perf: (a) entropy decode of all components only
+// (jpeg_read_coefficients: Huffman + restart handling, no IDCT), (b) the full gray decode (Huffman for all
+// components + Y IDCT + output). (b) - (a) = Y IDCT + row output. Also counts Y / Cb / Cr nonzero coefficients
+// per block, a proxy for how the entropy bits split between luma and chroma.
+static int RunSplit(const Opt &o) {
+  auto items = LoadFrames(o);
+  std::vector<unsigned char> jpeg;
+  std::vector<uint8_t> ref;
+  std::vector<double> ent, full;
+  double nz[3] = {0, 0, 0}, blocks[3] = {0, 0, 0};
+  for (auto &it : items) {
+    if (!recording::ReadJpeg(it.f, jpeg)) continue;
+    jpeg_decompress_struct c;
+    JErr err;
+    c.err = jpeg_std_error(&err.mgr);
+    err.mgr.error_exit = ErrExit;
+    err.mgr.emit_message = NoMessage;
+    if (setjmp(err.jump)) {
+      jpeg_destroy_decompress(&c);
+      continue;
+    }
+    jpeg_create_decompress(&c);
+    double c0 = CpuMs();
+    jpeg_mem_src(&c, jpeg.data(), jpeg.size());
+    jpeg_read_header(&c, TRUE);
+    jvirt_barray_ptr *coef = jpeg_read_coefficients(&c);
+    ent.push_back(CpuMs() - c0);
+    if (ent.size() <= 400) {  // coefficient statistics on the first 400 frames
+      for (int ci = 0; ci < std::min(3, c.num_components); ci++) {
+        jpeg_component_info *comp = &c.comp_info[ci];
+        for (JDIMENSION by = 0; by < comp->height_in_blocks; by++) {
+          JBLOCKARRAY row = c.mem->access_virt_barray(reinterpret_cast<j_common_ptr>(&c), coef[ci], by, 1, FALSE);
+          for (JDIMENSION bx = 0; bx < comp->width_in_blocks; bx++) {
+            int n = 0;
+            for (int k = 1; k < 64; k++) n += row[0][bx][k] != 0;
+            nz[ci] += n, blocks[ci]++;
+          }
+        }
+      }
+    }
+    jpeg_finish_decompress(&c);
+    jpeg_destroy_decompress(&c);
+    c0 = CpuMs();
+    recording::DecodeGray(jpeg, ref, it.f.width, it.f.height);
+    full.push_back(CpuMs() - c0);
+  }
+  std::vector<double> idct;
+  for (size_t i = 0; i < ent.size(); i++) idct.push_back(full[i] - ent[i]);
+  std::printf("split: %s, %zu frames, cpu %d\n", o.session.c_str(), ent.size(), o.cpu);
+  std::printf("  entropy decode, all components (jpeg_read_coefficients) ms %s\n", Stats(ent).c_str());
+  std::printf("  full gray decode ms                                       %s\n", Stats(full).c_str());
+  std::printf("  difference = Y IDCT + output ms                           %s\n", Stats(idct).c_str());
+  std::printf("  nonzero AC coefficients per block: Y %.2f  Cb %.2f  Cr %.2f  (blocks per frame Y %.0f Cb %.0f Cr %.0f)\n",
+              nz[0] / std::max(1.0, blocks[0]), nz[1] / std::max(1.0, blocks[1]), nz[2] / std::max(1.0, blocks[2]),
+              blocks[0] / std::max<size_t>(1, std::min<size_t>(400, ent.size())),
+              blocks[1] / std::max<size_t>(1, std::min<size_t>(400, ent.size())),
+              blocks[2] / std::max<size_t>(1, std::min<size_t>(400, ent.size())));
+  return 0;
+}
+
 // ---- probe mode -----------------------------------------------------------------------------------------
 // Does streaming NAPA read rows it hasn't been given? tests/napa-stream's identity check feeds bands of an
 // image that is already complete, so a read past Feed(rows) can't show there. Here rows are copied into a
@@ -710,6 +771,7 @@ int main(int argc, char **argv) {
   if (o.mode == "fused") return RunFused(o);
   if (o.mode == "fuzz") return RunFuzz(o);
   if (o.mode == "probe") return RunProbe(o, o.band, o.fill);
+  if (o.mode == "split") return RunSplit(o);
   std::fprintf(stderr, "mode: decode|fused|fuzz\n");
   return 2;
 }

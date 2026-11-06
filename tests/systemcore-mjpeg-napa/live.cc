@@ -397,12 +397,15 @@ int main(int argc, char **argv) {
 
   std::vector<double> lat_v4l2_pose, lat_mid_pose, tail_eoi_pose, dq_pose, v4l2_eoi, cpu_ms, tz, txv, tyv, rollv, pitchv, yawv;
   long frames = 0, drops = 0, redo = 0, with_tag = 0, last_seq = -1, finished_at_dq = 0;
+  std::vector<double> chunks;  // KiB that became visible per poll that saw new bytes (~ URB size)
+  size_t last_fill_seen = 0;
   const double t_start = NowMs();
   const double cpu_start = CpuMs();
 
   auto reset = [&]() {
     if (napa_on) det.Finish();
     dec.End();
+    last_fill_seen = 0;
     cur = -1, napa_on = false, fill = 0, rows = 0, have_result = false, failed = false, eoi_len = 0;
     t_first = t_eoi = t_tags = t_pose = 0, cpu_frame = 0;
   };
@@ -445,6 +448,10 @@ int main(int argc, char **argv) {
         const size_t f = FindFill(p, fill, std::min(lens[i], wipe));
         if (f > fill) {
           fill = f;
+          // the last bytes are here: the tail starts now, before decoding them (URBs land in big chunks)
+          if (fill >= 2 && p[fill - 2] == 0xFF && p[fill - 1] == 0xD9 && t_eoi == 0) t_eoi = NowMs();
+          chunks.push_back(static_cast<double>(fill - last_fill_seen) / 1024.0);
+          last_fill_seen = fill;
           const int r = dec.Feed(fill);
           if (r < 0) failed = true;
           else if (r > rows) {
@@ -452,7 +459,6 @@ int main(int argc, char **argv) {
             if (napa_on) det.Feed(rows);
           }
           busy = true;
-          if (fill >= 2 && p[fill - 2] == 0xFF && p[fill - 1] == 0xD9 && t_eoi == 0) t_eoi = NowMs();
           if (rows == H && t_eoi > 0) {
             cpu_frame += CpuMs() - c0;
             dec.End();
@@ -590,6 +596,7 @@ int main(int argc, char **argv) {
   Line("EOI seen -> pose ms (tail)", tail_eoi_pose);
   Line("DQBUF -> pose ms", dq_pose);
   Line("per-frame work CPU ms", cpu_ms);
+  Line("KiB newly visible per poll (~URB)", chunks);
   std::printf("  (mid-exposure = v4l2 ts - %.2f ms camera delay - %.2f ms half exposure; both assumed)\n", cam_delay_ms,
               exposure_ms / 2);
   if (!tz.empty())
