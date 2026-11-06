@@ -303,3 +303,14 @@ int cam_model_load(const char *path, cam_model *cam) {
   for (int i = 0; i < nd && i < 8; i++) cam->k[i] = D[i];
   return 0;
 }
+
+void pose_undistort_px(const cam_model *cam, double u, double v, double *uo, double *vo) {
+  double x, y;
+  undistort(cam, u, v, &x, &y);
+  *uo = cam->fx * x + cam->cx, *vo = cam->fy * y + cam->cy;
+}
+
+void pose_distort_px(const cam_model *cam, double u, double v, double *uo, double *vo) {
+  const double P[3] = {(u - cam->cx) / cam->fx, (v - cam->cy) / cam->fy, 1.0};
+  project(cam, P, uo, vo);
+}
