@@ -77,6 +77,7 @@ struct StreamApi {
   decltype(&spectrum_stream_take) take = nullptr;
   decltype(&spectrum_stream_detach) detach = nullptr;
   decltype(&spectrum_stream_set_copy) set_copy = nullptr;  // newer libspectrum-stream.so only
+  decltype(&spectrum_stream_release) release = nullptr;    // newer still
 };
 const StreamApi *Stream() {
   static const StreamApi *api = [] () -> const StreamApi * {
@@ -90,6 +91,7 @@ const StreamApi *Stream() {
     a->take = reinterpret_cast<decltype(a->take)>(dlsym(h, "spectrum_stream_take"));
     a->detach = reinterpret_cast<decltype(a->detach)>(dlsym(h, "spectrum_stream_detach"));
     a->set_copy = reinterpret_cast<decltype(a->set_copy)>(dlsym(h, "spectrum_stream_set_copy"));
+    a->release = reinterpret_cast<decltype(a->release)>(dlsym(h, "spectrum_stream_release"));
     if (!a->decode || !a->take || !a->detach) {
       std::cout << "NAPA: libspectrum-stream.so is too old for streaming NAPA" << std::endl;
       return nullptr;
@@ -423,10 +425,13 @@ struct NativeCam {
     while (r < 0 && errno == EINTR);
     return r;
   }
+  const char *step = "";
   bool open_dev(const std::string &path, int width, int height, int fps) {
     dev = path, w = width, h = height;
+    step = "open";
     fd = ::open(path.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) return false;
+    step = "S_FMT";
     v4l2_format f{};
     f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     f.fmt.pix.width = width, f.fmt.pix.height = height, f.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
@@ -436,6 +441,7 @@ struct NativeCam {
     sp.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     sp.parm.capture.timeperframe.numerator = 1, sp.parm.capture.timeperframe.denominator = fps > 0 ? fps : 120;
     xioctl(VIDIOC_S_PARM, &sp);
+    step = "REQBUFS";
     v4l2_requestbuffers rb{};
     rb.count = 4, rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, rb.memory = V4L2_MEMORY_MMAP;
     if (xioctl(VIDIOC_REQBUFS, &rb) || rb.count < 2) return false;
@@ -451,6 +457,7 @@ struct NativeCam {
       if (xioctl(VIDIOC_QBUF, &b)) return false;
     }
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    step = "STREAMON";
     if (xioctl(VIDIOC_STREAMON, &type)) return false;
     sj_wait_arg a{0, 0};
     sj_wait = xioctl(SJ_WAIT_IOC, &a) == 0;  // our uvcvideo: sleep until the driver copied more bytes
@@ -929,10 +936,15 @@ JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraOpen(JNI
     n->sink->cfg_new = true;
   }
   n->sink->log_last = std::chrono::steady_clock::now();
+  // the streaming decoder's watcher of this camera (from frames cscore delivered before) keeps cscore's buffers
+  // mapped, and vb2 then refuses our REQBUFS (EBUSY): stop it first
+  if (const StreamApi *sa = Stream())
+    if (sa->release) sa->release(dev.c_str());
   auto cam = std::make_unique<NativeCam>();
   cam->sink = n->sink.get();
   if (!cam->open_dev(dev, width, height, fps)) {
-    std::cout << "native camera: cannot open " << dev << " (" << std::strerror(errno) << ")" << std::endl;
+    std::cout << "native camera: cannot open " << dev << " (" << cam->step << ": " << std::strerror(errno) << ")"
+              << std::endl;
     delete n;
     return 0;
   }

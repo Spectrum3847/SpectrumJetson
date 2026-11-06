@@ -705,6 +705,7 @@ void WatchLoop(Watcher *w) {
 }
 
 // Watch every MJPEG capture device of this size whose buffers exist (cscore is streaming it).
+void Reap();
 void Scan(int width, int height) {
   for (int k = 0; k < 16; k++) {
     const std::string dev = "/dev/video" + std::to_string(k);
@@ -748,7 +749,12 @@ void Scan(int width, int height) {
     w->thread = std::thread(WatchLoop, raw);
     g_watchers.push_back(std::move(w));
   }
-  // reap watchers whose camera stopped: unmap, so cscore can free or reallocate its buffers
+  Reap();
+}
+
+// Reap watchers whose camera stopped: unmap, so cscore (or the native camera backend) can free or reallocate the
+// buffers (vb2 refuses REQBUFS with EBUSY while any are still mapped). g_mu held.
+void Reap() {
   for (auto it = g_watchers.begin(); it != g_watchers.end();) {
     if ((*it)->dead) {
       (*it)->thread.join();
@@ -971,6 +977,23 @@ SPECTRUM_STREAM_API int spectrum_stream_take(const uint8_t *out, int width, int 
 SPECTRUM_STREAM_API void spectrum_stream_set_copy(int on) { g_copy.store(on ? 1 : 0, std::memory_order_relaxed); }
 
 SPECTRUM_STREAM_API long spectrum_stream_refs(void) { return g_refs.load(); }
+
+SPECTRUM_STREAM_API int spectrum_stream_release(const char *dev) {
+  std::lock_guard<std::mutex> l(g_mu);
+  int n = 0;
+  for (auto &w : g_watchers) {
+    char a[4096], b[4096];
+    const bool same = dev && realpath(dev, a) && realpath(w->dev.c_str(), b) && std::strcmp(a, b) == 0;
+    if (!dev || same) w->stop = true, n++;
+  }
+  for (auto &w : g_watchers)
+    if (w->stop && w->thread.joinable()) {
+      w->thread.join();
+      w->dead = true;
+    }
+  Reap();
+  return n;
+}
 
 SPECTRUM_STREAM_API void spectrum_stream_detach(void *ctx) {
   if (!ctx) return;

@@ -77,3 +77,25 @@ first), and keep the hooks small; posted in PVPERF-LOG.
   2402/2402 frames kept, 11.6 MB/s, push 9.5-10 us p50 / 15-21 us p99 / 64 us max on the vision thread, writer
   0.6% of a core. The SD card's fdatasync stalled up to 1.9 s once; the 16 MB ring (~2.8 s per camera at this
   rate) absorbed it. For matches: 32 MB rings, or a record fps below 120, gives margin.
+
+## Status 2026-11-06 evening: code complete, blocked on device ownership
+
+Done (fork 2442bfec + 76a39d03 = photonvision-117/118; SpectrumJetson NapaDetectorJNI camera*):
+the native thread (V4L2 queue, decode-as-it-lands, streaming NAPA, pose, publish, tag quality, camera-clock
+capture time from the dequeued stamp, frame policy, Rewind ring writer, latest image for Java), the PhotonVision
+side (USBFrameProvider native mode, controls mirrored natively with read-before-write, RewindRecorder.forNative,
+NapaDetector/NativePublish on the camera's handle) and the fallback to the cscore fast path.
+
+Blocked: on the SystemCore the native open fails with EBUSY at VIDIOC_S_FMT. cscore's UsbCamera keeps the
+device open whatever its connection strategy (UsbCameraImpl's thread reconnects whenever its fd is closed; the
+strategy only decides streaming), and its S_FMT at connect holds uvcvideo's per-device "privileges"
+(uvc_acquire_privileges), which only the holder's close releases; S_FMT/REQBUFS from any other handle then get
+EBUSY. The camera falls back to the fast path (checked live: 121 fps, 17.6% of a core, dark scene).
+
+Options:
+1. Don't create the UsbCamera for a native camera at all: settings go to the native side (cameraSetControl,
+   read first) through a NativeCameraSettables, video modes from VIDIOC_ENUM_FMT. Most work, cleanest.
+2. Create it, read its properties/modes, then close() it before the native open; settables write natively.
+3. Our uvcvideo: a module parameter that skips the privileges check (a kernel-module change: needs approval).
+4. usbfs (sc-vision's capture): detaching uvcvideo removes the node from under cscore; hot-plug handling ours.
+Recommended: 1 (or 2 as a first step).

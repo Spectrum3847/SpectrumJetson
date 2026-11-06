@@ -1,0 +1,150 @@
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+index a8d7262c..ed9ab4db 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+@@ -71,7 +71,11 @@ public class USBFrameProvider extends CpuImageProcessor {
+                         USBFrameProvider.class, visionSettables.getConfiguration().nickname, LogGroup.Camera);
+         this.directGray = new DirectDecode(logger, "Direct MJPEG->gray decode", "cscore's conversion");
+         this.directBgr = new DirectDecode(logger, "Hardware MJPEG->BGR decode", "cscore's decode");
+-        this.cvSink.setEnabled(true);
++        // Spectrum (sc/mjpeg-napa): a camera the native backend will own is never streamed by cscore
++        // (it
++        // keeps the device's V4L2 queue while open, and uvcvideo then refuses another owner)
++        if (NATIVE_CAMERA) camera.setConnectionStrategy(VideoSource.ConnectionStrategy.FORCE_CLOSE);
++        this.cvSink.setEnabled(!NATIVE_CAMERA);
+         // photonvision-89: this UsbCamera has a camera thread of its own, whatever happened to the
+         // last one with this name.
+         PvCSCoreLogger.clearCameraThreadEnded(camera.getName());
+@@ -127,8 +131,10 @@ public class USBFrameProvider extends CpuImageProcessor {
+                 nativeFailed = true;
+                 return false;
+             }
+-            // cscore: keep the device open (controls) but stream nothing
+-            camera.setConnectionStrategy(VideoSource.ConnectionStrategy.KEEP_OPEN);
++            // cscore lets go of the device (open, it keeps the V4L2 queue: the native REQBUFS gets
++            // EBUSY); its
++            // properties keep the settings PhotonVision sets, and mirrorControls() applies them natively
++            camera.setConnectionStrategy(VideoSource.ConnectionStrategy.FORCE_CLOSE);
+             cvSink.setEnabled(false);
+             synchronized (this) {
+                 if (graySink != null) graySink.setEnabled(false);
+@@ -138,6 +144,10 @@ public class USBFrameProvider extends CpuImageProcessor {
+                 rewind = null;
+             }
+             String dev = camera.getPath();
++            for (int i = 0; i < 100 && camera.isConnected(); i++) Thread.sleep(50); // cscore closes it
++            logger.info(
++                    "Native camera: cscore "
++                            + (camera.isConnected() ? "still has the device open" : "closed the device"));
+             long h = 0;
+             for (int attempt = 0;
+                     attempt < 20 && h == 0;
+@@ -158,6 +168,7 @@ public class USBFrameProvider extends CpuImageProcessor {
+                 return false;
+             }
+             nativeHandle = h;
++            java.util.Arrays.fill(mirrored, Integer.MIN_VALUE);
+             nativeGray = new org.opencv.core.Mat(mode.height, mode.width, org.opencv.core.CvType.CV_8UC1);
+             nativeRewind = RewindRecorder.forNative(h, () -> settables.getConfiguration().nickname);
+             logger.info(
+@@ -169,7 +180,62 @@ public class USBFrameProvider extends CpuImageProcessor {
+         }
+     }
+ 
++    // cscore property (raw value) -> V4L2 control id, for the controls PhotonVision sets
++    private static final String[] MIRROR_NAMES = {
++        "auto_exposure",
++        "raw_exposure_time_absolute",
++        "raw_gain",
++        "raw_brightness",
++        "raw_contrast",
++        "raw_gamma",
++        "backlight_compensation",
++        "raw_sharpness",
++        "white_balance_automatic",
++        "white_balance_temperature"
++    };
++    private static final int[] MIRROR_IDS = {
++        0x009a0901,
++        0x009a0902,
++        0x00980913,
++        0x00980900,
++        0x00980901,
++        0x00980910,
++        0x0098091c,
++        0x0098091b,
++        0x0098090c,
++        0x0098091a
++    };
++    private final int[] mirrored = new int[MIRROR_NAMES.length];
++    private long nextMirrorNs = 0;
++
++    /**
++     * Native camera: the settings PhotonVision gave cscore (which no longer has the device open)
++     * applied on the native side, each read first and written only when different (the Swyft stores
++     * controls in flash). Twice a second; auto exposure first, so a manual exposure takes.
++     */
++    private void mirrorControls() {
++        long now = System.nanoTime();
++        if (now < nextMirrorNs) return;
++        nextMirrorNs = now + 500_000_000L;
++        for (int i = 0; i < MIRROR_NAMES.length; i++) {
++            try {
++                var prop = camera.getProperty(MIRROR_NAMES[i]);
++                if (prop == null || prop.getKind() == org.wpilib.vision.camera.VideoProperty.Kind.NONE)
++                    continue;
++                int v = prop.get();
++                if (v == mirrored[i] && mirrored[i] != Integer.MIN_VALUE) continue;
++                int r =
++                        org.photonvision.jni.NapaDetectorJNI.cameraSetControl(nativeHandle, MIRROR_IDS[i], v);
++                if (r >= 0) mirrored[i] = v;
++                if (r == 1) logger.debug("Native camera: " + MIRROR_NAMES[i] + " = " + v);
++            } catch (RuntimeException e) {
++                // not this camera's control
++            }
++        }
++    }
++
+     private CapturedFrame nativeFrame() {
++        mirrorControls();
+         long end = System.nanoTime() + 200_000_000L;
+         while (System.nanoTime() < end) {
+             long stamp =
+@@ -1361,6 +1427,11 @@ public class USBFrameProvider extends CpuImageProcessor {
+         boolean gray = type == FrameThresholdType.GREYSCALE;
+         synchronized (this) {
+             if (cvSink == null || gray == useGray) return;
++            if (nativeHandle
++                    != 0) { // the native camera owns the device: no cscore sink may start streaming
++                useGray = gray;
++                return;
++            }
+             if (gray && graySink == null) {
+                 graySink = new CvSink("opencv_gray_" + camera.getName(), PixelFormat.GRAY);
+                 graySink.setSource(camera);
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java b/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
+index 5f623fc2..a9c01ce8 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
+@@ -63,7 +63,7 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+     private IntegerPublisher policyScale, policyFullEvery, policyProcessEvery, scaledFrames;
+     private long beats = 0;
+ 
+-    private long windowStartNs = 0, total = 0, nativeAtWindowStart = -1;
++    private long windowStartNs = 0, total = 0, nativeAtWindowStart = -1, scaledAtWindowStart = -1;
+     private int count = 0;
+     private double sumMs = 0, maxMs = 0, sumLatencyMs = 0;
+ 
+@@ -169,7 +169,11 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+             policyScale.set(pol[0]);
+             policyFullEvery.set(pol[1]);
+             policyProcessEvery.set(pol[2]);
+-            scaledFrames.set(nativePub.scaledFrames());
++            // frames decoded at a reduced scale in this window (about a second); the native count is
++            // cumulative
++            long sc = nativePub.scaledFrames();
++            scaledFrames.set(scaledAtWindowStart >= 0 ? Math.max(0, sc - scaledAtWindowStart) : 0);
++            scaledAtWindowStart = sc;
+         } else {
+             nativeAtWindowStart = -1;
+             fps.set(count / window);

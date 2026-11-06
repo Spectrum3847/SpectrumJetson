@@ -54,6 +54,10 @@ void spectrum_stream_detach(void *ctx);
 // what's used): it writes a small tag into the image's first row instead, which spectrum_stream_take() reads.
 // 1 (default): copy. spectrum_stream_refs(): frames handed over by tag so far.
 void spectrum_stream_set_copy(int on);
+
+// Stops and unmaps the watchers of a device (its /dev path; NULL: all), so another owner (the native camera
+// backend) can allocate its buffers. Returns how many.
+int spectrum_stream_release(const char *dev);
 long spectrum_stream_refs(void);
 
 #ifdef __cplusplus
