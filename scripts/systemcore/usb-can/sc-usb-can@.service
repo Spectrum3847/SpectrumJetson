@@ -1,0 +1,13 @@
+# CANable 2.0 (slcan firmware) on /dev/%I -> SocketCAN can0. Started by 90-sc-usb-can.rules on plug-in
+# (and at boot, when udev replays the add event); stops when the adapter is unplugged.
+[Unit]
+Description=USB CAN adapter /dev/%I -> SocketCAN (slcand)
+BindsTo=dev-%i.device
+After=dev-%i.device
+
+[Service]
+Type=forking
+ExecStart=/opt/sc-usb-can/usb-can-up.sh /dev/%I
+ExecStartPost=/opt/sc-usb-can/usb-can-up.sh --link
+Restart=on-failure
+RestartSec=2

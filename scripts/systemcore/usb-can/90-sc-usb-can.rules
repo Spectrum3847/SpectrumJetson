@@ -1,0 +1,3 @@
+# CANable 2.0 slcan firmware (16d0:117e, USB CDC-ACM): stable /dev/canable symlink, and start
+# sc-usb-can@canable.service (slcand -> can0) on plug-in. Installed by install-usb-can.sh.
+ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="16d0", ATTRS{idProduct}=="117e", SYMLINK+="canable", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sc-usb-can@canable.service"
