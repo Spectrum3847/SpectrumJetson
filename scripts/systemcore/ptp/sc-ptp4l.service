@@ -1,0 +1,12 @@
+[Unit]
+Description=PTP grandmaster on eth0 (Spectrum, scripts/systemcore/ptp)
+After=network.target
+Before=photonvision.service
+
+[Service]
+ExecStart=/usr/local/sbin/ptp4l -f /etc/sc-ptp/ptp4l-master.conf -i eth0
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
