@@ -169,6 +169,7 @@ struct StreamSink {
   int64_t t_begin = 0;         // CLOCK_MONOTONIC when the frame's first bytes were seen
   int64_t t_cam = 0;           // the frame's predicted camera-clock stamp (0: unknown)
   int64_t t_cam_direct = 0;    // native camera backend: the frame's dequeued V4L2 stamp (camera clock), else 0
+  bool no_publish = false;     // native camera backend: finish without publishing (the frame never completed)
   std::atomic<long> cam_stamped{0};
   std::atomic<int64_t> taken_sight{0};  // t_begin of the frame detectStreamed last handed to Java
   // Camera clock (hwtimestamps=1). The first sight of a frame's bytes is noisy (sd ~0.07 ms: URB boundary and
@@ -336,7 +337,7 @@ struct StreamSink {
         out->fitted = true;
         s->Tagfit(out->tags);
       }
-      s->Publish(out->tags);
+      if (!s->no_publish) s->Publish(out->tags);
       return out;
     };
     c.free_result = [](void *r) { delete static_cast<SinkOut *>(r); };
@@ -429,6 +430,8 @@ struct sj_wait_arg {
 };
 #define SJ_WAIT_IOC _IOWR('u', 0x40, struct sj_wait_arg)
 
+static void CtlDropDev(const std::string &dev);  // the device's control fd (below), closed when it is lost
+
 struct NativeCam {
   StreamSink *sink = nullptr;
   std::string dev;
@@ -439,6 +442,36 @@ struct NativeCam {
   std::atomic<bool> stop{false};
   std::atomic<long> frames{0}, bad{0}, skipped{0}, rec_kept{0};
   std::atomic<int64_t> last_frame_ns{0};
+  // Device loss (photonvision-137): the errno that ended capture (ENODEV/EIO...: the device went away or its queue
+  // failed; ETIMEDOUT: no buffer completed for timeout_ms), 0 while capturing. The thread then stops touching the
+  // device and Java closes the handle and reopens the camera (NativeFrameProvider). Before, a dead device's last
+  // frame was decoded and published again and again (the Thriftiest's 20 fps of one stale frame after a USB reset)
+  // or the thread spun on a wiped buffer forever (the Swyft's silent 0 fps), and the open fd kept the old uvcvideo
+  // device's streaming interface, so a rebind came back without a video node.
+  std::atomic<int> dead{0};
+  int64_t open_ns = 0;
+  std::atomic<int64_t> last_buf_ns{0};  // the last buffer the driver completed (any, skipped frames included)
+  int dq_err = 0;                       // errno of the last failed DQBUF other than EAGAIN (0: none)
+  static int timeout_ms() {
+    static const int v = [] {
+      const char *e = std::getenv("SPECTRUM_NATIVE_FRAME_TIMEOUT_MS");
+      const int t = e ? std::atoi(e) : 0;
+      return t > 0 ? t : 500;
+    }();
+    return v;
+  }
+  void die(int err) {
+    if (dead.exchange(err) == 0)
+      std::cout << "native camera: " << dev << " lost (" << (err == ETIMEDOUT ? "no frame" : std::strerror(err))
+                << ") after " << frames.load() << " frames" << std::endl;
+  }
+  // false once the device is gone or silent: no buffer for timeout_ms (from the first 2 s after opening on)
+  bool alive() {
+    if (dead) return false;
+    const int64_t ref = std::max<int64_t>(last_buf_ns.load(), open_ns + 2000000000LL);
+    if (mono() - ref > static_cast<int64_t>(timeout_ms()) * 1000000) die(ETIMEDOUT);
+    return !dead;
+  }
   bool sj_wait = false;
   uint32_t sj_seq = 0;  // the driver's copy counter last seen (UVCIOC_SJ_WAIT sleeps until it moves on)
   // the latest full-size image for Java (copied only while Java asks, at most once per request)
@@ -464,6 +497,30 @@ struct NativeCam {
     do r = ioctl(fd, req, arg);
     while (r < 0 && errno == EINTR);
     return r;
+  }
+  // Controls from Java (cameraSetControl/GetControl), against the fd being closed by release_dev.
+  std::mutex fd_mu;
+  int ctl_ioctl(unsigned long req, void *arg) {
+    std::lock_guard<std::mutex> l(fd_mu);
+    if (fd < 0) {
+      errno = ENODEV;
+      return -1;
+    }
+    return xioctl(req, arg);
+  }
+  // Lets go of the device at once (stream off, buffers unmapped, fd closed). A lost device's fds and mappings keep
+  // its uvcvideo device alive, and with it the claim on its streaming interface: a uvcvideo rebind then probed
+  // "No streaming interface found" and made no video node until PhotonVision restarted. So this runs on the camera
+  // thread the moment the device is lost, not when Java next looks, and drops the control fd too.
+  void release_dev() {
+    std::lock_guard<std::mutex> l(fd_mu);
+    if (fd < 0) return;
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    xioctl(VIDIOC_STREAMOFF, &type);
+    for (int i = 0; i < nbuf; i++)
+      if (buf[i]) munmap(buf[i], blen[i]), buf[i] = nullptr;
+    ::close(fd);
+    fd = -1;
   }
   const char *step = "";
   bool open_dev(const std::string &path, int width, int height, int fps) {
@@ -502,6 +559,7 @@ struct NativeCam {
     sj_wait_arg a{0, 0};
     sj_wait = xioctl(SJ_WAIT_IOC, &a) == 0;  // our uvcvideo: sleep until the driver copied more bytes
     if (sj_wait) sj_seq = a.seq;
+    open_ns = mono();
     return true;
   }
   void wipe(int i) { std::memset(buf[i], 0xFF, std::min<size_t>(blen[i], 256 * 1024)); }
@@ -512,6 +570,8 @@ struct NativeCam {
       sj_wait_arg a{sj_seq, 2000};
       if (xioctl(SJ_WAIT_IOC, &a) == 0)
         sj_seq = a.seq;
+      else if (errno == ENODEV)
+        die(ENODEV);
       else
         sj_wait = false;
     } else {
@@ -530,13 +590,22 @@ struct NativeCam {
     return q;
   }
   // Dequeue the buffer the driver finished (blocking up to timeout_ms). Its index, or -1.
+  // A DQBUF error other than EAGAIN (ENODEV, EIO: the device or its queue is gone) ends capture (dq_err, die).
   int dqbuf(v4l2_buffer &b, int timeout_ms) {
     const int64_t end = mono() + static_cast<int64_t>(timeout_ms) * 1000000;
     for (;;) {
       b = v4l2_buffer{};
       b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, b.memory = V4L2_MEMORY_MMAP;
-      if (xioctl(VIDIOC_DQBUF, &b) == 0) return static_cast<int>(b.index);
-      if (errno != EAGAIN || mono() > end) return -1;
+      if (xioctl(VIDIOC_DQBUF, &b) == 0) {
+        last_buf_ns = mono();
+        return static_cast<int>(b.index);
+      }
+      if (errno != EAGAIN) {
+        dq_err = errno;
+        die(errno);
+        return -1;
+      }
+      if (mono() > end) return -1;
       timespec ts{0, 50000};
       nanosleep(&ts, nullptr);
     }
@@ -552,11 +621,11 @@ struct NativeCam {
     std::unique_ptr<mjdec, void (*)(mjdec *)> mj(mjdec_create(), mjdec_destroy);
     std::vector<uint8_t> img(static_cast<size_t>(w) * h);
     int next = 0;  // the driver fills the queued buffers in queue order
-    while (!stop) {
+    while (!stop && alive()) {
       uint8_t *p = buf[next];
       // the frame's first bytes
       const int64_t wait0 = mono();
-      while (!stop && !(p[0] == 0xFF && p[1] == 0xD8)) {
+      while (!stop && alive() && !(p[0] == 0xFF && p[1] == 0xD8)) {
         v4l2_buffer b;
         if (mono() - wait0 > 300000000LL) {  // nothing for 300 ms: resynchronise on whatever completes
           const int i = dqbuf(b, 0);
@@ -565,7 +634,7 @@ struct NativeCam {
         }
         wait_bytes();
       }
-      if (stop || !(p[0] == 0xFF && p[1] == 0xD8)) continue;
+      if (stop || dead || !(p[0] == 0xFF && p[1] == 0xD8)) continue;
       const int64_t t_sight = mono();
       int scale = sink->c.plan ? sink->c.plan(sink) : 1;
       bool fed = false;
@@ -578,7 +647,7 @@ struct NativeCam {
         sink->t_begin = t_sight;
         size_t got = 0;
         bool ok = true;
-        while (!stop && rows < hs) {
+        while (!stop && !dead && rows < hs) {
           const size_t a = landed(p, got, blen[next]);
           if (a > got) {
             got = a;
@@ -607,7 +676,13 @@ struct NativeCam {
       v4l2_buffer b;
       const int i = dqbuf(b, 30);
       if (i < 0) {
-        if (fed) sink->c.free_result(sink->c.finish(sink));
+        // the buffer never completed (device gone, or stalled): its tags aren't published. Before, they were, and
+        // a dead device's buffer, still holding its last frame, was decoded and published again every pass.
+        if (fed) {
+          sink->no_publish = true;
+          sink->c.free_result(sink->c.finish(sink));
+          sink->no_publish = false;
+        }
         continue;
       }
       const int64_t stamp = static_cast<int64_t>(b.timestamp.tv_sec) * 1000000000LL + b.timestamp.tv_usec * 1000LL;
@@ -640,17 +715,15 @@ struct NativeCam {
       requeue(i);
       next = (i + 1) % nbuf;
     }
+    if (dead) {
+      release_dev();
+      CtlDropDev(dev);
+    }
   }
   ~NativeCam() {
     stop = true;
     if (th.joinable()) th.join();
-    if (fd >= 0) {
-      int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-      xioctl(VIDIOC_STREAMOFF, &type);
-      for (int i = 0; i < nbuf; i++)
-        if (buf[i]) munmap(buf[i], blen[i]);
-      ::close(fd);
-    }
+    release_dev();
     std::lock_guard<std::mutex> l(rmu);
     if (rw) rewind_close(rw);
   }
@@ -1027,9 +1100,9 @@ JNIEXPORT jint JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraSetContro
   if (!n || !n->cam) return -1;
   v4l2_control c{};
   c.id = static_cast<uint32_t>(id);
-  if (n->cam->xioctl(VIDIOC_G_CTRL, &c) == 0 && c.value == value) return 0;  // the Swyft writes controls to flash
+  if (n->cam->ctl_ioctl(VIDIOC_G_CTRL, &c) == 0 && c.value == value) return 0;  // the Swyft writes controls to flash
   c.value = value;
-  return n->cam->xioctl(VIDIOC_S_CTRL, &c) == 0 ? 1 : -1;
+  return n->cam->ctl_ioctl(VIDIOC_S_CTRL, &c) == 0 ? 1 : -1;
 }
 
 // A V4L2 control's value, or Integer.MIN_VALUE.
@@ -1038,7 +1111,7 @@ JNIEXPORT jint JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraGetContro
   if (!n || !n->cam) return INT32_MIN;
   v4l2_control c{};
   c.id = static_cast<uint32_t>(id);
-  return n->cam->xioctl(VIDIOC_G_CTRL, &c) == 0 ? c.value : INT32_MIN;
+  return n->cam->ctl_ioctl(VIDIOC_G_CTRL, &c) == 0 ? c.value : INT32_MIN;
 }
 
 // The latest full-size gray image into dataAddr (width x height, stride width), for the UI / stream / Java pipeline
@@ -1094,16 +1167,17 @@ JNIEXPORT jlong JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraSequence
   return n && n->sink ? static_cast<jlong>(n->sink->seq.load()) : 0;
 }
 
-// {frames, bad frames, frames skipped by the policy, ms since the last frame (-1: none), Rewind frames kept}.
+// {frames, bad frames, frames skipped by the policy, ms since the last frame (-1: none), Rewind frames kept,
+//  errno that ended capture (0: capturing; ETIMEDOUT: no frame for SPECTRUM_NATIVE_FRAME_TIMEOUT_MS, default 500)}.
 JNIEXPORT jlongArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_cameraStats(JNIEnv *env, jclass, jlong h) {
   auto *n = Handle(h);
   if (!n || !n->cam) return nullptr;
   auto *c = n->cam.get();
   const int64_t last = c->last_frame_ns.load();
-  jlong v[5] = {c->frames.load(), c->bad.load(), c->skipped.load(),
-                last ? (NativeCam::mono() - last) / 1000000 : -1, c->rec_kept.load()};
-  jlongArray a = env->NewLongArray(5);
-  if (a) env->SetLongArrayRegion(a, 0, 5, v);
+  jlong v[6] = {c->frames.load(), c->bad.load(), c->skipped.load(),
+                last ? (NativeCam::mono() - last) / 1000000 : -1, c->rec_kept.load(), c->dead.load()};
+  jlongArray a = env->NewLongArray(6);
+  if (a) env->SetLongArrayRegion(a, 0, 6, v);
   return a;
 }
 
@@ -1313,6 +1387,10 @@ std::string JStr(JNIEnv *env, jstring s) {
   std::string r(c ? c : "");
   if (c) env->ReleaseStringUTFChars(s, c);
   return r;
+}
+static void CtlDropDev(const std::string &dev) {
+  std::lock_guard<std::mutex> l(g_ctl_mu);
+  CtlDrop(dev);
 }
 }  // namespace
 

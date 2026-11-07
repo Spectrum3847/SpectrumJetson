@@ -1,0 +1,338 @@
+From 093b69decee608a5f922d97c8ad5afb832e9b8e5 Mon Sep 17 00:00:00 2001
+From: Allen Gregory <allengregoryiv@gmail.com>
+Date: Fri, 6 Nov 2026 21:55:14 -0600
+Subject: [PATCH] Native camera: reconnect after a USB reset or re-enumeration;
+ reopened handles get the pipeline's NAPA settings
+
+NativeFrameProvider: when the native thread gives the device up (cameraStats[5]: ENODEV/EIO, or no frame for
+SPECTRUM_NATIVE_FRAME_TIMEOUT_MS, default 500) the handle is closed and the camera reopened by its by-id path every
+100 ms (whatever /dev/videoN it comes back as) in the selected mode, controls written back where they differ
+(NativeCameraSettables.restoreControls); reconnects are logged, health state disconnected/recovering, recoveries
+counts them. A reconnect never falls back to cscore.
+
+NapaDetectorJNI.cameraOpens: a reopened camera's NAPA handle is often the closed one's address again, so
+NapaDetector skipped re-sending the pipeline's NAPA settings (the new detector ran NAPA defaults instead of min tag
+22: Swyft ~85 fps at ~40 ms after a reconnect or handover) and NativePublish missed the reset of its counters.
+Both now compare (handle, opens).
+
+Native side (SpectrumJetson detector/napa/NapaDetectorJNI.cc, patches/photonvision-137): device loss detection,
+no publish of frames whose buffer never completed (the Thriftiest's 20 fps of one stale frame), the device let go
+at once (a held fd made a uvcvideo rebind come back without a video node).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../org/photonvision/jni/NapaDetectorJNI.java |  13 ++-
+ .../USBCameras/NativeCameraSettables.java     |  21 ++++
+ .../frame/provider/NativeFrameProvider.java   | 109 +++++++++++++++++-
+ .../frame/provider/USBFrameProvider.java      |   1 +
+ .../vision/pipe/impl/NapaDetector.java        |   7 +-
+ .../vision/pipe/impl/NativePublish.java       |   7 +-
+ 6 files changed, 151 insertions(+), 7 deletions(-)
+
+diff --git a/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java b/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
+index 5b56f9ab..0c1dc32e 100644
+--- a/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
++++ b/photon-core/src/main/java/org/photonvision/jni/NapaDetectorJNI.java
+@@ -146,7 +146,8 @@ public final class NapaDetectorJNI {
+ 
+     /**
+      * {frames, bad frames, skipped by the policy, ms since the last frame (-1: none), Rewind frames
+-     * kept}.
++     * kept, the errno that ended capture (0 while capturing; ETIMEDOUT: no frame for
++     * SPECTRUM_NATIVE_FRAME_TIMEOUT_MS, default 500)}.
+      */
+     public static native long[] cameraStats(long handle);
+ 
+@@ -163,6 +164,16 @@ public final class NapaDetectorJNI {
+      */
+     public static native int cameraLatestJpeg(long handle, java.nio.ByteBuffer direct);
+ 
++    /**
++     * Spectrum (photonvision-137): native camera opens so far, bumped by every caller of cameraOpen /
++     * cameraOpenSeq. A reopened camera's handle is often the closed one's address again (freed, then
++     * allocated at the same size), so "same handle" alone missed reopens: its detector kept NAPA's
++     * defaults instead of the pipeline's (min tag 22), the Swyft fell to ~85 fps at ~40 ms after a
++     * reconnect, and NativePublish didn't see it publish. Compare (handle, opens) instead.
++     */
++    public static final java.util.concurrent.atomic.AtomicLong cameraOpens =
++            new java.util.concurrent.atomic.AtomicLong();
++
+     /** As cameraOpen; the first published result's sequence ID is lastSeq + 1. */
+     public static native long cameraOpenSeq(
+             String dev, int width, int height, int fps, String family, long lastSeq);
+diff --git a/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSettables.java b/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSettables.java
+index b8a392e2..2aa4d256 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSettables.java
++++ b/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSettables.java
+@@ -46,6 +46,7 @@ public class NativeCameraSettables extends VisionSourceSettables {
+     /** One V4L2 control, as cscore names it. */
+     static final class Ctl {
+         final int id, type, min, max, step, def;
++        final long flags;
+         final String name;
+         volatile int value;
+ 
+@@ -58,6 +59,7 @@ public class NativeCameraSettables extends VisionSourceSettables {
+             step = Integer.parseInt(f[4]);
+             def = Integer.parseInt(f[5]);
+             value = Integer.parseInt(f[6]);
++            flags = Long.parseLong(f[7]);
+             name = normalize(f[8]);
+         }
+     }
+@@ -213,6 +215,25 @@ public class NativeCameraSettables extends VisionSourceSettables {
+         return dev;
+     }
+ 
++    private static final long V4L2_CTRL_FLAG_READ_ONLY = 0x0004;
++
++    /**
++     * Spectrum (photonvision-137): the camera came back (USB reset, re-enumeration): every control as
++     * last set or read here is written back where the device differs (read first, so a control the
++     * camera kept isn't rewritten; the Swyft stores its controls in flash). Returns {written,
++     * failed}.
++     */
++    public int[] restoreControls() {
++        int written = 0, failed = 0;
++        for (Ctl c : controls.values()) { // device order: auto exposure before the exposure time
++            if ((c.flags & V4L2_CTRL_FLAG_READ_ONLY) != 0) continue;
++            int r = NapaDetectorJNI.deviceSetControl(dev, c.id, c.value);
++            if (r > 0) written++;
++            else if (r < 0) failed++;
++        }
++        return new int[] {written, failed};
++    }
++
+     void setModeListener(Consumer<VideoMode> l) {
+         modeListener = l;
+     }
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+index 7856bad8..aa264f8d 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+@@ -42,6 +42,13 @@ import org.wpilib.vision.camera.VideoMode;
+  * <p>cscore handover: while the calibration pipeline runs, or the selected video mode isn't MJPEG,
+  * or the native open failed, the native capture is closed and a temporary cscore UsbCamera streams
+  * the device for the Java pipeline (closed again, and native reopened, afterwards).
++ *
++ * <p>Reconnect (photonvision-137): the native thread notices a lost device (a V4L2 error such as
++ * ENODEV, or no frame for SPECTRUM_NATIVE_FRAME_TIMEOUT_MS, default 500) and lets go of it at once;
++ * this then closes the handle and reopens the camera by its path ({@code /dev/v4l/by-id/...}, the
++ * camera's serial: whatever /dev/videoN it comes back as) every 100 ms until it captures again, in
++ * the selected mode, with its controls written back. Health: state {@code disconnected} (no node) /
++ * {@code recovering}, {@code recoveries} counts each reconnect.
+  */
+ public class NativeFrameProvider extends CpuImageProcessor {
+     private final Logger logger;
+@@ -61,6 +68,14 @@ public class NativeFrameProvider extends CpuImageProcessor {
+     private volatile String state = "starting";
+     private volatile String problem = "";
+ 
++    // reconnect after the device was lost (photonvision-137)
++    private boolean reconnecting = false;
++    private long lostAtNs = 0, nextTryNs = 0;
++    private int reconnectTries = 0;
++    private String lostReason = "";
++    private static final long RECONNECT_EVERY_NS = 100_000_000L;
++    private static final int ENODEV = 19, ETIMEDOUT = 110;
++
+     // the cscore handover (calibration, non-MJPEG modes, native open failure)
+     private UsbCamera cscore;
+     private CvSink cscoreSink;
+@@ -145,12 +160,17 @@ public class NativeFrameProvider extends CpuImageProcessor {
+     }
+ 
+     private boolean openNative(VideoMode m) {
++        return openNative(m, 10);
++    }
++
++    private boolean openNative(VideoMode m, int attempts) {
+         long h = 0;
+-        for (int attempt = 0; attempt < 10 && h == 0; attempt++) {
++        for (int attempt = 0; attempt < attempts && h == 0; attempt++) {
++            if (attempt > 0) sleepMs(100);
+             h = NapaDetectorJNI.cameraOpenSeq(dev, m.width, m.height, m.fps, "tag36h11", sequenceID);
+-            if (h == 0) sleepMs(100);
+         }
+         if (h == 0) return false;
++        NapaDetectorJNI.cameraOpens.incrementAndGet();
+         handle = h;
+         openMode = m;
+         opens++;
+@@ -207,6 +227,14 @@ public class NativeFrameProvider extends CpuImageProcessor {
+     private void sync() {
+         VideoMode m = settables.getCurrentVideoMode();
+         boolean wantNative = wantNative();
++        if (reconnecting) {
++            // reconnect() opens it, in the mode selected then; not a native open failure (cscore)
++            if (wantNative) {
++                reopen = false;
++                return;
++            }
++            reconnecting = false;
++        }
+         if (!reopen && (wantNative ? handle != 0 : cscore != null)) return;
+         reopen = false;
+         if (wantNative) {
+@@ -260,13 +288,90 @@ public class NativeFrameProvider extends CpuImageProcessor {
+ 
+     private long lastFrameNs = 0;
+ 
++    /**
++     * The native thread gave the device up (stats[5], its errno): close it and start reconnecting.
++     */
++    private void checkLost() {
++        long[] s = NapaDetectorJNI.cameraStats(handle);
++        if (s == null || s.length < 6 || s[5] == 0) return;
++        int err = (int) s[5];
++        lostReason =
++                err == ETIMEDOUT
++                        ? "no frame"
++                        : err == ENODEV ? "device gone (ENODEV)" : "V4L2 error " + err;
++        long frames = s[0];
++        closeNative();
++        NapaDetectorJNI.deviceClose(
++                dev); // the old device's control fd, if Java's settables reopened it
++        reconnecting = true;
++        lostAtNs = System.nanoTime();
++        nextTryNs = lostAtNs;
++        reconnectTries = 0;
++        problem = "reconnecting: " + lostReason;
++        state = "recovering";
++        logger.warn(
++                "Native camera: "
++                        + dev
++                        + " lost ("
++                        + lostReason
++                        + ") after "
++                        + frames
++                        + " frames; reconnecting");
++    }
++
++    /** Every 100 ms while reconnecting: reopen the camera by its path once it's there. */
++    private void reconnect() {
++        long now = System.nanoTime();
++        if (now < nextTryNs) return;
++        nextTryNs = now + RECONNECT_EVERY_NS;
++        if (!new java.io.File(dev).exists()) {
++            state = "disconnected";
++            return;
++        }
++        state = "recovering";
++        VideoMode m = settables.getCurrentVideoMode();
++        if (m == null) return;
++        reconnectTries++;
++        NapaDetectorJNI.deviceClose(dev); // a fresh control fd, on the device that came back
++        if (!openNative(m, 1)) return;
++        int[] c =
++                settables instanceof org.photonvision.vision.camera.USBCameras.NativeCameraSettables n
++                        ? n.restoreControls()
++                        : new int[] {0, 0};
++        reconnecting = false;
++        problem = "";
++        String node = dev;
++        try {
++            node = java.nio.file.Path.of(dev).toRealPath().toString();
++        } catch (java.io.IOException | RuntimeException e) {
++            // logged as the path PhotonVision knows it by
++        }
++        logger.info(
++                String.format(
++                        "Native camera: %s (%s) reconnected %.0f ms after it was lost (%s), %d open"
++                                + " attempts; controls written back: %d (%d failed)",
++                        dev,
++                        node,
++                        (System.nanoTime() - lostAtNs) / 1e6,
++                        lostReason,
++                        reconnectTries,
++                        c[0],
++                        c[1]));
++    }
++
+     @Override
+     CapturedFrame getInputMat() {
+         try {
+             sync();
++            if (handle != 0) checkLost();
++            if (reconnecting) reconnect();
+         } catch (RuntimeException e) {
+             logger.error("Native camera: switching capture failed", e);
+         }
++        if (reconnecting && handle == 0) {
++            sleepMs(20); // the Java pipeline waits here, not in a busy loop of empty frames
++            return new CapturedFrame(new CVMat(), settables.getFrameStaticProperties(), 0);
++        }
+         if (handle != 0) {
+             state = "streaming";
+             long end = System.nanoTime() + 200_000_000L;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+index 030d892a..32ce5d48 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+@@ -171,6 +171,7 @@ public class USBFrameProvider extends CpuImageProcessor {
+                 camera.setConnectionStrategy(VideoSource.ConnectionStrategy.AUTO_MANAGE);
+                 return false;
+             }
++            org.photonvision.jni.NapaDetectorJNI.cameraOpens.incrementAndGet();
+             nativeHandle = h;
+             java.util.Arrays.fill(mirrored, Integer.MIN_VALUE);
+             nativeGray = new org.opencv.core.Mat(mode.height, mode.width, org.opencv.core.CvType.CV_8UC1);
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NapaDetector.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NapaDetector.java
+index eae73616..2bd46c64 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NapaDetector.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NapaDetector.java
+@@ -84,13 +84,15 @@ public class NapaDetector implements Releasable {
+     }
+ 
+     private Object[] lastParams;
+-    private long sentCam = 0;
++    private long sentCam = 0, sentCamOpens = -1;
+ 
+     /**
+      * Spectrum (sc/mjpeg-napa) native camera backend: its detector follows this pipeline's settings.
+      */
+     private void configureCamera(long cam) {
+-        if (cam == sentCam || lastParams == null) return;
++        // a reopened camera may have the closed one's handle value: the open count tells them apart
++        long opens = NapaDetectorJNI.cameraOpens.get();
++        if ((cam == sentCam && opens == sentCamOpens) || lastParams == null) return;
+         NapaDetectorJNI.setParams(
+                 cam,
+                 (int) lastParams[0],
+@@ -100,6 +102,7 @@ public class NapaDetector implements Releasable {
+                 (int) lastParams[3],
+                 (double) lastParams[4]);
+         sentCam = cam;
++        sentCamOpens = opens;
+     }
+ 
+     private static Boolean streamOn = null;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+index f9d50ca8..77515e16 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipe/impl/NativePublish.java
+@@ -63,7 +63,7 @@ public final class NativePublish {
+     public volatile long midShiftNs = 0;
+     // native camera backend: the NAPA handle that owns this camera (0: not native)
+     public volatile long cameraHandle = 0;
+-    private long lastNapaHandle = 0;
++    private long lastNapaHandle = 0, lastOpens = -1;
+     // from the camera's frame provider: its camera-clock stamp (PTS) -> mid-exposure (0: no camera
+     // clock)
+     public volatile long camShiftNs = 0;
+@@ -249,8 +249,11 @@ public final class NativePublish {
+      */
+     void update(long napaHandle) {
+         if (napaHandle == 0) return;
+-        if (napaHandle != lastNapaHandle) { // a native camera reopened: its counters start over
++        long opens = org.photonvision.jni.NapaDetectorJNI.cameraOpens.get();
++        // a native camera reopened (maybe at the same handle value): its counters start over
++        if (napaHandle != lastNapaHandle || opens != lastOpens) {
+             lastNapaHandle = napaHandle;
++            lastOpens = opens;
+             published = 0;
+         }
+         long n =
+-- 
+2.55.0.windows.2
+

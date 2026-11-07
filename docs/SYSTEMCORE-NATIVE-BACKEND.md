@@ -324,3 +324,14 @@ both "Native camera source", PV the only owner; Swyft 119.6 results/s, Thrifties
 tag quality 1435/1435 and 1447/1447 matched, health/processEvery 1, no health/scale. Latency/CPU of that run
 are NOT representative: another agent's tagfit_bench was using ~93% of a core meanwhile (p50 capture->publish
 9.0/8.9 ms, PV 99.4%).
+
+## Reconnect after a USB reset (fork 093b69de = photonvision-137, 2026-11-06)
+
+A native camera now recovers by itself from a USB reset, a uvcvideo rebind, a deauthorize/authorize, or an unplug and re-plug:
+- **Native side.** The capture thread detects a lost device: a V4L2 error, or no frame for `SPECTRUM_NATIVE_FRAME_TIMEOUT_MS`, default 500 ms. It then releases the device at once.
+- **Fork side.** `NativeFrameProvider` reopens the camera by its by-id path every 100 ms, with its mode and controls. The log shows `lost` and `reconnected` lines; health shows `state` `disconnected`/`recovering` and counts `recoveries`.
+- **Reopen bug fixed.** Reopened handles now get the pipeline's NAPA settings. Before, a reused handle address left NAPA on its defaults.
+- **Results.** All 40 resets (4 methods x 2 cameras x 5) came back to 120 fps at p50 8.8-9.0 ms, with a first result 0.5-1.0 s after the reset.
+- Root causes and the full table are in `tests/camera-reset/README.md`.
+
+The cscore path is unchanged. `USBFrameProvider`'s StuckCameraWatchdog still reconnects it, then escalates to USB resets. The superseded `SPECTRUM_NATIVE_CAMERA=cscore-legacy` path gets the native loss detection but no Java reopen.

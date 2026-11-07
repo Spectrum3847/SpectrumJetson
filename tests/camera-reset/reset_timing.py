@@ -7,6 +7,7 @@
             usbreset  USBDEVFS_RESET on /dev/bus/usb/BBB/DDD
             rebind    uvcvideo unbind/bind of the camera's control interface (X:1.0)
             authorize /sys/bus/usb/devices/X/authorized 0 -> 1
+            yank      authorized 0, held YANK_S (3) s like an unplugged cable, then 1; times from the 1
     --pv    PhotonVision runs natively: first frame / first tag come from its NT results (rawBytes)
             instead of a v4l2-ctl capture here.
 
@@ -14,6 +15,8 @@ Per repeat it prints one JSON line: node_gone (did the by-id node disappear), t_
 node being back), t_frame (first valid MJPEG frame / first PhotonVision result after the outage), t_tag (first
 frame with an AprilTag 36h11 / first result with a target), and the controls before and after (exposure, gain,
 gamma, brightness, contrast, sharpness, backlight). It never re-applies controls itself; the caller compares.
+With --pv also fps_after and lat_p50_after / lat_p99_after (ms, capture -> publish from the results themselves) over
+the last 2 s of the TIMEOUT window, the steady state the camera came back to.
 No vendor or firmware requests are sent: only the generic USB and sysfs resets above.
 """
 import fcntl, json, os, subprocess, sys, time
@@ -22,7 +25,8 @@ DEV = {"thrifty": "/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0",
        "swyft": "/dev/v4l/by-id/usb-Generic_USB_Camera_SJ-SW01-video-index0"}
 CTRLS = "exposure_time_absolute,gain,gamma,brightness,contrast,sharpness,backlight_compensation"
 USBDEVFS_RESET = 0x5514
-TIMEOUT = 15.0
+TIMEOUT = float(os.environ.get("RESET_TIMEOUT_S", "15"))
+YANK_S = float(os.environ.get("YANK_S", "3"))
 
 
 def usb_dir(node):
@@ -57,6 +61,13 @@ def do_reset(method, udev, intf):
         open(f"{udev}/authorized", "w").write("0")
         time.sleep(0.05)
         open(f"{udev}/authorized", "w").write("1")
+    elif method == "yank":
+        open(f"{udev}/authorized", "w").write("0")
+        time.sleep(YANK_S)
+        t = time.monotonic()
+        open(f"{udev}/authorized", "w").write("1")
+        return t
+    return None
 
 
 def wait_node(node, t0):
@@ -123,7 +134,8 @@ def pv_watch(cam, t0):
 
 def pv_times(ws, mp_unpack, decode_result, t0):
     """Every rawBytes arrival from t0 on; the outage is the longest gap between results with new capture times.
-    Returns (outage s, t_frame, t_tag, fps over the last 2 s, results with tags fraction over the last 2 s)."""
+    Returns (outage s, t_frame, t_tag, fps over the last 2 s, results with tags fraction over the last 2 s,
+    latency p50 and p99 over the last 2 s in ms)."""
     ids = {}; rows = []; last_cap = None
     while time.monotonic() - t0 < TIMEOUT:
         try:
@@ -141,19 +153,22 @@ def pv_times(ws, mp_unpack, decode_result, t0):
             if not ids.get(arr[0], "").endswith("/rawBytes"):
                 continue
             _, cap, tg = decode_result(arr[3])
+            pub = int.from_bytes(arr[3][16:24], "little", signed=True)
             if last_cap is not None and cap <= last_cap:
                 continue  # a repeat, not a new frame
             last_cap = cap
-            rows.append((now, len(tg)))
+            rows.append((now, len(tg), (pub - cap) / 1e6))  # ns -> ms
     rows = [r for r in rows if r[0] >= 0]
     if len(rows) < 2:
-        return None, None, None, 0.0, 0.0
+        return None, None, None, 0.0, 0.0, None, None
     prev = [0.0] + [r[0] for r in rows[:-1]]
     gap, k = max((rows[j][0] - prev[j], j) for j in range(len(rows)))
     t_frame = rows[k][0]
     t_tag = next((r[0] for r in rows[k:] if r[1]), None)
     tail = [r for r in rows if r[0] >= TIMEOUT - 2.0]
-    return gap, t_frame, t_tag, len(tail) / 2.0, sum(1 for r in tail if r[1]) / max(len(tail), 1)
+    lat = sorted(r[2] for r in tail)
+    pct = (lambda q: round(lat[min(len(lat) - 1, int(q * len(lat)))], 2)) if lat else (lambda q: None)
+    return gap, t_frame, t_tag, len(tail) / 2.0, sum(1 for r in tail if r[1]) / max(len(tail), 1), pct(.5), pct(.99)
 
 
 def main():
@@ -169,16 +184,17 @@ def main():
             time.sleep(0.5)  # announces and a few results first
         t0 = time.monotonic()
         if method != "reopen":
-            do_reset(method, udev, intf)
+            t0 = do_reset(method, udev, intf) or t0
         gone, t_node = (False, 0.0) if method == "reopen" else wait_node(node, t0)
         row = {"cam": cam, "method": method, "pv": pv, "rep": rep, "node_gone": gone, "t_node": t_node}
         if t_node is not None:
             time.sleep(0.2)  # udev permissions / PhotonVision's own re-open
             row["after_node"] = controls(node)
         if pv:
-            outage, t_frame, t_tag, fps, tagged = pv_times(ws, mp_unpack, decode_result, t0)
+            outage, t_frame, t_tag, fps, tagged, p50, p99 = pv_times(ws, mp_unpack, decode_result, t0)
             ws.k.close()
-            row.update(outage=outage, t_frame=t_frame, t_tag=t_tag, fps_after=fps, tagged_after=tagged)
+            row.update(outage=outage, t_frame=t_frame, t_tag=t_tag, fps_after=fps, tagged_after=tagged,
+                       lat_p50_after=p50, lat_p99_after=p99)
         elif t_node is not None:
             row["t_frame"], row["t_tag"] = capture(node, t0)
         row["before"] = before
