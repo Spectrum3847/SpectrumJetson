@@ -2,7 +2,7 @@
 """Software camera-reset recovery timing on the SystemCore / Pi 5 (run as root, holding /tmp/camera.lock).
 
   reset_timing.py CAM METHOD REPS [--pv]
-    CAM     thrifty (Thriftiest SJ-05) or swyft (Swyft SJ-SW01)
+    CAM     thrifty (Thriftiest SJ-05), swyft (Swyft SJ-SW01) or thriftycam (ThriftyCam, 05c8:0a00, no serial)
     METHOD  reopen    close and re-open the V4L2 device (without --pv only: PhotonVision owns the device)
             usbreset  USBDEVFS_RESET on /dev/bus/usb/BBB/DDD
             rebind    uvcvideo unbind/bind of the camera's control interface (X:1.0)
@@ -22,7 +22,10 @@ No vendor or firmware requests are sent: only the generic USB and sysfs resets a
 import fcntl, json, os, subprocess, sys, time
 
 DEV = {"thrifty": "/dev/v4l/by-id/usb-DCX-260513-K_Thrifty_SJ-05-video-index0",
-       "swyft": "/dev/v4l/by-id/usb-Generic_USB_Camera_SJ-SW01-video-index0"}
+       "swyft": "/dev/v4l/by-id/usb-Generic_USB_Camera_SJ-SW01-video-index0",
+       "thriftycam": "/dev/v4l/by-id/usb-DCX-240524--XH_SPCA2630_PC_Camera-video-index0"}
+# Capture mode per camera (width, height, fps): the ThriftyCam has no 1280x800 or 120 fps mode.
+MODE = {"thrifty": (1280, 800, 120), "swyft": (1280, 800, 120), "thriftycam": (1600, 1304, 60)}
 CTRLS = "exposure_time_absolute,gain,gamma,brightness,contrast,sharpness,backlight_compensation"
 USBDEVFS_RESET = 0x5514
 TIMEOUT = float(os.environ.get("RESET_TIMEOUT_S", "15"))
@@ -84,14 +87,15 @@ def wait_node(node, t0):
     return gone, time.monotonic() - t0
 
 
-def capture(node, t0, frames=240):
-    """v4l2-ctl capture at 1280x800 MJPEG 120 fps; time of the first dequeued buffer, and the first tag by index."""
+def capture(node, t0, mode, frames=240):
+    """v4l2-ctl MJPEG capture at the camera's MODE; time of the first dequeued buffer, and the first tag by index."""
+    w, h, fps = mode
     out = "/dev/shm/reset_timing.mjpeg"
     t_first = None
     deadline = t0 + TIMEOUT
     while t_first is None and time.monotonic() < deadline:
-        p = subprocess.Popen(["v4l2-ctl", "-d", node, "--set-fmt-video=width=1280,height=800,pixelformat=MJPG",
-                              "--set-parm=120", "--stream-mmap=4", f"--stream-count={frames}", f"--stream-to={out}"],
+        p = subprocess.Popen(["v4l2-ctl", "-d", node, f"--set-fmt-video=width={w},height={h},pixelformat=MJPG",
+                              f"--set-parm={fps}", "--stream-mmap=4", f"--stream-count={frames}", f"--stream-to={out}"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         while True:
             c = p.stderr.read(1)  # v4l2-ctl prints a "<" per buffer on stderr
@@ -114,9 +118,9 @@ def capture(node, t0, frames=240):
             return t_first, None
         i = b + 2
         img = cv2.imdecode(np.frombuffer(data[a:b + 2], np.uint8), cv2.IMREAD_GRAYSCALE)
-        if img is not None and img.shape == (800, 1280):
+        if img is not None and img.shape == (h, w):
             if det.detectMarkers(img)[1] is not None:
-                return t_first, t_first + k / 120.0
+                return t_first, t_first + k / float(fps)
         k += 1
 
 
@@ -196,7 +200,11 @@ def main():
             row.update(outage=outage, t_frame=t_frame, t_tag=t_tag, fps_after=fps, tagged_after=tagged,
                        lat_p50_after=p50, lat_p99_after=p99)
         elif t_node is not None:
-            row["t_frame"], row["t_tag"] = capture(node, t0)
+            row["t_frame"], row["t_tag"] = capture(node, t0, MODE[cam])
+        try:  # 5000 = SuperSpeed; read only once the node is back (the device has enumerated)
+            row["speed"] = open(os.path.join(usb_dir(node)[0], "speed")).read().strip()
+        except OSError:
+            row["speed"] = None
         row["before"] = before
         row["after"] = controls(node) if os.path.exists(node) else None
         print(json.dumps(row), flush=True)
