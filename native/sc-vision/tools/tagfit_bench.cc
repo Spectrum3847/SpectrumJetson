@@ -155,7 +155,10 @@ static double pct(std::vector<double> v, double p) {
 
 // ------------------------------------------------------------------------------------------- options
 struct Opt {
-  tagfit_params fp;
+  tagfit_params fp, ref;  // ref: the double-precision cold reference (defaults), timed and compared alongside
+  bool warm = false, cmp = true;
+  int seq = 1;
+  double lut_step = -1;   // --lut [STEP]: 0 auto
   bool use_cam = true;
   int n = 2000, nseeds = 1, seed = 1, jpeg = 85, maxf = 1000000, min_tag = 16;
   double noise = 2.5, blur = 0.8, bloom = 0, gamma = 1;
@@ -186,30 +189,44 @@ static int synth(const cam_model &cam, const Opt &o) {
   std::vector<uint8_t> img(w * h), cells;
   std::vector<double> tmp(w * h);
   struct Bin {
-    std::vector<double> ce0, ce1, re0, re1, ro0, ro1, am0, am1, rp0, rp1, us, bias, sr0, sr1, bv, bh, kp;
-    int n = 0, ok = 0, flip0 = 0, flip1 = 0, worse = 0, better = 0;
+    std::vector<double> ce0, ce1, re0, re1, ro0, ro1, am0, am1, rp0, rp1, us, bias, sr0, sr1, bv, bh, kp, usr, dref;
+    int okdiff = 0, n = 0, ok = 0, flip0 = 0, flip1 = 0, worse = 0, better = 0;
   };
   const double edges[] = {0, 2.5, 4, 6, 9, 14, 1e9};
   const int NB = 6;
   Bin bins[NB];
-  int rendered = 0, found = 0, rot_bad = 0;
+  int rendered = 0, found = 0, rot_bad = 0, nwarm = 0;
   for (int sd = o.seed; sd < o.seed + o.nseeds; sd++) {
   rng.seed(sd);
   for (int f = 0; f < o.n; f++) {
     // pose: log-uniform range 0.6..8 m, anywhere in the image, turned up to 60 deg yaw, 25 pitch, 15 roll
     double range = exp(log(0.6) + U(rng) * (log(8.0) - log(0.6)));
     double px = 120 + U(rng) * (w - 240), py = 100 + U(rng) * (h - 200), ux, uy;
+    double ang[3] = {(U(rng) * 2 - 1) * 60, (U(rng) * 2 - 1) * 25, (U(rng) * 2 - 1) * 15};
+    int id = (int)(U(rng) * 32);
+    // --seq K: sequences of K frames, each the previous pose moved a little (a robot driving at ~1-2 m/s, 60 fps):
+    // range +-1.5%, 4 px, 0.7 deg per frame; for the warm start
+    static double s_range, s_px, s_py, s_ang[3];
+    static int s_id;
+    const bool cont = o.seq > 1 && f % o.seq != 0;
+    if (cont) {
+      range = s_range * (1 + 0.015 * (2 * U(rng) - 1)), px = s_px + 4 * (2 * U(rng) - 1), py = s_py + 4 * (2 * U(rng) - 1);
+      for (int k = 0; k < 3; k++) ang[k] = s_ang[k] + 0.7 * (2 * U(rng) - 1);
+      range = std::clamp(range, 0.5, 9.0), px = std::clamp(px, 120.0, w - 120.0), py = std::clamp(py, 100.0, h - 100.0);
+      id = s_id;
+    }
+    s_range = range, s_px = px, s_py = py, s_id = id;
+    for (int k = 0; k < 3; k++) s_ang[k] = ang[k];
     pose_undistort_px(&cam, px, py, &ux, &uy);
     double d[3] = {(ux - cam.cx) / cam.fx, (uy - cam.cy) / cam.fy, 1}, dn = sqrt(d[0] * d[0] + d[1] * d[1] + 1);
     double t[3] = {d[0] / dn * range, d[1] / dn * range, d[2] / dn * range};
     double R0[9] = {1, 0, 0, 0, -1, 0, 0, 0, -1}, Ry[9], Rx[9], Rz[9], T1[9], T2[9], R[9];
-    rot(1, (U(rng) * 2 - 1) * 60 * M_PI / 180, Ry);
-    rot(0, (U(rng) * 2 - 1) * 25 * M_PI / 180, Rx);
-    rot(2, (U(rng) * 2 - 1) * 15 * M_PI / 180, Rz);
+    rot(1, ang[0] * M_PI / 180, Ry);
+    rot(0, ang[1] * M_PI / 180, Rx);
+    rot(2, ang[2] * M_PI / 180, Rz);
     matmul(R0, Ry, T1);
     matmul(T1, Rx, T2);
     matmul(T2, Rz, R);
-    int id = (int)(U(rng) * 32);
     tag_cells(id, cells);
     // true corners: object (-s/2, s/2) (s/2, s/2) (s/2, -s/2) (-s/2, -s/2), through the lens
     static const double ob[4][2] = {{-1, 1}, {1, 1}, {1, -1}, {-1, -1}};
@@ -231,7 +248,7 @@ static int synth(const cam_model &cam, const Opt &o) {
     char cpath[600] = "";
     bool cached = false;
     if (!o.cache.empty()) {
-      snprintf(cpath, sizeof cpath, "%s/s%d_g%.2f_n%.1f_b%.2f_j%d_bl%.2f_%05d.raw", o.cache.c_str(), sd, o.gamma,
+      snprintf(cpath, sizeof cpath, "%s/s%d_q%d_g%.2f_n%.1f_b%.2f_j%d_bl%.2f_%05d.raw", o.cache.c_str(), sd, o.seq, o.gamma,
                o.noise, o.blur, o.jpeg, o.bloom, f);
       if (FILE *cf = fopen(cpath, "rb")) {
         cached = fread(img.data(), 1, img.size(), cf) == img.size();
@@ -321,10 +338,31 @@ static int synth(const cam_model &cam, const Opt &o) {
       rot_bad++;
       continue;
     }
-    tagfit_result fr;
+    tagfit_result fr, rr;
     double t0 = now_us();
-    tagfit_refine(img.data(), w, h, w, cells.data(), W, o.use_cam ? &cam : nullptr, hit->corners, &o.fp, &fr);
+    static tagfit_warm wst;
+    static int wprev = -10;
+    const bool wv = o.warm && cont && wprev == f - 1;
+    tagfit_warm wn;
+    tagfit_refine_warm(img.data(), w, h, w, cells.data(), W, o.use_cam ? &cam : nullptr, hit->corners, &o.fp,
+                       wv ? &wst : nullptr, &wn, &fr);
+    wst = wn, wprev = f;
+    nwarm += fr.warm;
     double us = now_us() - t0;
+    if (o.cmp) {
+      double t1 = now_us();
+      tagfit_refine(img.data(), w, h, w, cells.data(), W, o.use_cam ? &cam : nullptr, hit->corners, &o.ref, &rr);
+      double us_ref = now_us() - t1;
+      int b0 = 0;
+      while (b0 < 6 - 1 && rr.cell_px >= edges[b0 + 1]) b0++;
+      if (rr.ok) bins[b0].usr.push_back(us_ref);
+      if (rr.ok && fr.ok) {
+        double d = 0;
+        for (int k = 0; k < 8; k++) d += (fr.corners[k] - rr.corners[k]) * (fr.corners[k] - rr.corners[k]);
+        bins[b0].dref.push_back(sqrt(d / 4));
+      }
+      bins[b0].okdiff += rr.ok != fr.ok;
+    }
     PoseOut p0 = pose_of(cam, hit->corners), p1 = pose_of(cam, fr.corners);
     int b = 0;
     while (b < NB - 1 && fr.cell_px >= edges[b + 1]) b++;
@@ -353,8 +391,8 @@ static int synth(const cam_model &cam, const Opt &o) {
     }
   }
   }
-  printf("synth: %d rendered, %d detected, %d with a corner order unlike the renderer's (skipped)\n", rendered, found,
-         rot_bad);
+  printf("synth: %d rendered, %d detected, %d with a corner order unlike the renderer's (skipped); %d fits started warm\n",
+         rendered, found, rot_bad, nwarm);
   printf("gamma %.2f noise %.1f blur %.2f jpeg %d bloom %.2f iters %d bias %d cam %d\n", o.gamma, o.noise, o.blur, o.jpeg, o.bloom,
          o.fp.iters, o.fp.fit_bias, o.use_cam);
   printf("%-10s %5s %5s %9s | %-15s | %-15s | %-15s | %-15s | %-11s | %-15s | %-13s | %s\n", "cell px", "n", "fit%", "+/->0.1px",
@@ -372,6 +410,10 @@ static int synth(const cam_model &cam, const Opt &o) {
            median(B.rp1), median(B.us), pct(B.us, 0.9), median(B.bias));
     printf("%-10s signed range err %% med %+.4f -> %+.4f   bias v/h %+.3f %+.3f kappa %+.4f\n", "", median(B.sr0), median(B.sr1),
            median(B.bv), median(B.bh), median(B.kp));
+    if (o.cmp)
+      printf("%-10s vs reference: us %4.0f -> %4.0f (x%.2f), corner diff px med %.5f p99 %.5f max %.5f, ok differs %d\n",
+             "", median(B.usr), median(B.us), median(B.usr) / median(B.us), median(B.dref), pct(B.dref, 0.99),
+             B.dref.empty() ? NAN : *std::max_element(B.dref.begin(), B.dref.end()), B.okdiff);
   }
   napa_destroy(det);
   return 0;
@@ -379,6 +421,9 @@ static int synth(const cam_model &cam, const Opt &o) {
 
 // ------------------------------------------------------------------------------------------- replay
 struct Acc {
+  tagfit_warm warm{};
+  int last_frame = -10, nwarm = 0, okdiff = 0;
+  std::vector<double> usr, dref;
   int n = 0, ok = 0;
   double cell = 0;
   std::vector<double> c0[8], c1[8], r0, r1, w0[3], w1[3], am0, am1, rp0, rp1, us, bv, bh, rs, kp;
@@ -425,13 +470,28 @@ static int replay(const char *path, const cam_model &cam, const Opt &o) {
     int nd = napa_detect(det, img.data(), w, h, w, &np, dd, 32);
     for (int i = 0; i < nd; i++) {
       tag_cells(dd[i].id, cells);
-      tagfit_result r;
+      Acc &A = acc[dd[i].id];
+      tagfit_result r, rr;
+      tagfit_warm nxt;
+      const bool wv = o.warm && frames - A.last_frame == 1;
       double t0 = now_us();
-      tagfit_refine(img.data(), w, h, w, cells.data(), L.width, o.use_cam ? &cam : nullptr, dd[i].corners, &o.fp, &r);
+      tagfit_refine_warm(img.data(), w, h, w, cells.data(), L.width, o.use_cam ? &cam : nullptr, dd[i].corners, &o.fp,
+                         wv ? &A.warm : nullptr, &nxt, &r);
       double us = now_us() - t0;
+      A.warm = nxt, A.last_frame = frames, A.nwarm += r.warm;
+      if (o.cmp) {
+        double t1 = now_us();
+        tagfit_refine(img.data(), w, h, w, cells.data(), L.width, o.use_cam ? &cam : nullptr, dd[i].corners, &o.ref, &rr);
+        if (rr.ok) A.usr.push_back(now_us() - t1);
+        if (rr.ok && r.ok) {
+          double d = 0;
+          for (int k = 0; k < 8; k++) d += (r.corners[k] - rr.corners[k]) * (r.corners[k] - rr.corners[k]);
+          A.dref.push_back(sqrt(d / 4));
+        }
+        A.okdiff += rr.ok != r.ok;
+      }
       PoseOut p0 = pose_of(cam, dd[i].corners), p1 = pose_of(cam, r.corners);
       if (!p0.ok || !p1.ok) continue;
-      Acc &A = acc[dd[i].id];
       A.n++;
       A.ok += r.ok;
       A.cell += r.cell_px;
@@ -471,6 +531,23 @@ static int replay(const char *path, const cam_model &cam, const Opt &o) {
     printf("     range mean %.4f -> %.4f m, bias v/h %+.3f %+.3f px, edge rms %.3f px, kappa %+.4f cell\n",
            std::accumulate(A.r0.begin(), A.r0.end(), 0.0) / A.n, std::accumulate(A.r1.begin(), A.r1.end(), 0.0) / A.n,
            median(A.bv), median(A.bh), median(A.rs), median(A.kp));
+    if (o.cmp)
+      printf("     vs reference: us %.0f -> %.0f, corner diff px med %.5f p99 %.5f max %.5f, ok differs %d, warm %d of %d\n",
+             median(A.usr), median(A.us), median(A.dref), pct(A.dref, 0.99),
+             A.dref.empty() ? NAN : *std::max_element(A.dref.begin(), A.dref.end()), A.okdiff, A.nwarm, A.n);
+  }
+  // all tags (moving sessions too): diff vs the reference, timing
+  if (o.cmp) {
+    std::vector<double> d, u, ur;
+    int od = 0, nw = 0, nn = 0;
+    for (auto &[id, A] : acc) {
+      d.insert(d.end(), A.dref.begin(), A.dref.end()), u.insert(u.end(), A.us.begin(), A.us.end());
+      ur.insert(ur.end(), A.usr.begin(), A.usr.end()), od += A.okdiff, nw += A.nwarm, nn += A.n;
+    }
+    printf("ALL: %d tag sightings, warm %d; us med %.1f -> %.1f (p90 %.1f -> %.1f); corner diff vs reference px med %.5f "
+           "p90 %.5f p99 %.5f max %.5f; ok differs %d\n",
+           nn, nw, median(ur), median(u), pct(ur, 0.9), pct(u, 0.9), median(d), pct(d, 0.9), pct(d, 0.99),
+           d.empty() ? NAN : *std::max_element(d.begin(), d.end()), od);
   }
   napa_destroy(det);
   return 0;
@@ -484,6 +561,7 @@ int main(int argc, char **argv) {
   napa_family_info("tag36h11", &L);
   Opt o;
   tagfit_defaults(&o.fp);
+  tagfit_defaults(&o.ref);
   std::string mode = argv[1];
   int a0 = mode == "synth" ? 3 : 4;
   const char *calib = mode == "synth" ? argv[2] : argv[3];
@@ -520,9 +598,24 @@ int main(int argc, char **argv) {
     else if (a == "--max-seg") o.fp.max_segments = atoi(nx());
     else if (a == "--max-samples") o.fp.max_samples = atoi(nx());
     else if (a == "--branch-amb") o.fp.branch_amb = atof(nx());
+    else if (a == "--fast") o.fp.fast = 1;
+    else if (a == "--lut") o.lut_step = atof(nx());
+    else if (a == "--warm") o.warm = true;
+    else if (a == "--seq") o.seq = atoi(nx());
+    else if (a == "--warm-iters") o.fp.warm_iters = atoi(nx());
+    else if (a == "--no-cmp") o.cmp = false;
     else return fprintf(stderr, "unknown option %s\n", a.c_str()), 2;
   }
   cam_model cam;
   if (cam_model_load(calib, &cam)) return fprintf(stderr, "can't read %s\n", calib), 1;
+  tagfit_lut *lut = nullptr;
+  if (o.lut_step >= 0) {
+    double t0 = now_us();
+    lut = tagfit_lut_create(&cam, 1280, 800, o.lut_step);
+    printf("lens LUT: worst error %.5f px, built in %.1f ms\n", tagfit_lut_max_err(lut), (now_us() - t0) / 1e3);
+    o.fp.lut = lut;
+  }
+  printf("test config: fast %d lut %d warm %d iters %d warm_iters %d\n", o.fp.fast, lut != nullptr, o.warm, o.fp.iters,
+         o.fp.warm_iters);
   return mode == "synth" ? synth(cam, o) : replay(argv[2], cam, o);
 }

@@ -2,7 +2,14 @@
 #include "tagfit.h"
 
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(TAGFIT_NO_NEON)
+#include <arm_neon.h>
+#define TAGFIT_NEON 1
+#endif
 
 void tagfit_defaults(tagfit_params *p) {
   p->iters = 2;
@@ -23,7 +30,110 @@ void tagfit_defaults(tagfit_params *p) {
   p->lobe_cells = 0;
   p->min_run = 0;
   p->min_run_below = 1e9;
+  p->fast = 0;
+  p->lut = NULL;
+  p->warm_iters = 1;
 }
+
+// ------------------------------------------------------------------------------------------- lens LUT
+// The lens model's radial factor (the rational polynomial in r^2 and its division) tabulated against r^2, linear
+// between entries; the tangential terms stay exact (a few multiplies). A 2-D grid of offsets was tried first: its
+// bilinear error near the sensor corners (8-coefficient model) was 0.16 / 0.04 / 0.01 px at 16 / 8 / 4 px nodes.
+struct tagfit_lut {
+  cam_model cam;
+  double r2max, inv;  // table spans r^2 in [0, r2max]
+  int n;
+  float *rad;
+  double max_err;
+  double ifx, ify;
+};
+
+static double radial(const cam_model *c, double r2) {
+  const double *k = c->k;
+  return (1 + ((k[4] * r2 + k[1]) * r2 + k[0]) * r2) / (1 + ((k[7] * r2 + k[6]) * r2 + k[5]) * r2);
+}
+
+static void lut_build(tagfit_lut *L, int w, int h, int n) {
+  const cam_model *c = &L->cam;
+  // r^2 of the sensor's corners (normalised pinhole), plus 50%: tags partly off the sensor still map
+  double r2 = 0;
+  for (int k = 0; k < 4; k++) {
+    double u, v;
+    pose_undistort_px(c, k & 1 ? w - 1 : 0, k & 2 ? h - 1 : 0, &u, &v);
+    double x = (u - c->cx) / c->fx, y = (v - c->cy) / c->fy;
+    if (isfinite(x) && isfinite(y)) r2 = fmax(r2, x * x + y * y);
+  }
+  if (!(r2 > 0) || r2 > 4) r2 = 4;
+  L->r2max = 1.5 * r2;
+  L->n = n;
+  L->inv = (n - 1) / L->r2max;
+  free(L->rad);
+  L->rad = (float *)malloc(sizeof(float) * (n + 1));
+  for (int i = 0; i <= n; i++) L->rad[i] = (float)radial(c, i / L->inv);
+  L->ifx = 1 / c->fx, L->ify = 1 / c->fy;
+}
+
+// pinhole -> image through the table; 0 beyond it
+static inline int lut_map(const tagfit_lut *L, double u, double v, double *xo, double *yo) {
+  const cam_model *c = &L->cam;
+  double x = (u - c->cx) * L->ifx, y = (v - c->cy) * L->ify, r2 = x * x + y * y, g = r2 * L->inv;
+  if (!(g < L->n - 1)) return 0;
+  int i = (int)g;
+  double f = g - i, rad = L->rad[i] + f * (L->rad[i + 1] - L->rad[i]);
+  double xd = x * rad + 2 * c->k[2] * x * y + c->k[3] * (r2 + 2 * x * x);
+  double yd = y * rad + c->k[2] * (r2 + 2 * y * y) + 2 * c->k[3] * x * y;
+  *xo = c->fx * xd + c->cx, *yo = c->fy * yd + c->cy;
+  return 1;
+}
+
+static inline int lut_mapf(const tagfit_lut *L, float u, float v, float *xo, float *yo) {
+  const cam_model *c = &L->cam;
+  const float k2 = (float)c->k[2], k3 = (float)c->k[3];
+  float x = (u - (float)c->cx) * (float)L->ifx, y = (v - (float)c->cy) * (float)L->ify, r2 = x * x + y * y;
+  float g = r2 * (float)L->inv;
+  if (!(g < L->n - 1)) return 0;
+  int i = (int)g;
+  float f = g - i, rad = L->rad[i] + f * (L->rad[i + 1] - L->rad[i]);
+  float xd = x * rad + 2 * k2 * x * y + k3 * (r2 + 2 * x * x);
+  float yd = y * rad + k2 * (r2 + 2 * y * y) + 2 * k3 * x * y;
+  *xo = (float)c->fx * xd + (float)c->cx, *yo = (float)c->fy * yd + (float)c->cy;
+  return 1;
+}
+
+// worst error (px) over the sensor, every 2 px, against pose_distort_px (float path)
+static double lut_check(const tagfit_lut *L, int w, int h) {
+  double worst = 0;
+  for (int py = 0; py < h; py += 2)
+    for (int px = 0; px < w; px += 2) {
+      double u, v, x, y;
+      pose_undistort_px(&L->cam, px, py, &u, &v);
+      if (!isfinite(u) || !isfinite(v)) continue;
+      pose_distort_px(&L->cam, u, v, &x, &y);
+      if (fabs(x - px) > 0.01 || fabs(y - py) > 0.01) continue;  // undistortion did not converge here
+      float xf, yf;
+      if (!lut_mapf(L, (float)u, (float)v, &xf, &yf)) continue;
+      worst = fmax(worst, hypot(xf - x, yf - y));
+    }
+  return worst;
+}
+
+tagfit_lut *tagfit_lut_create(const cam_model *cam, int w, int h, double entries) {
+  tagfit_lut *L = (tagfit_lut *)calloc(1, sizeof *L);
+  L->cam = *cam;
+  lut_build(L, w, h, entries > 0 ? (int)entries : 1024);
+  L->max_err = lut_check(L, w, h);
+  if (getenv("TAGFIT_DEBUG"))
+    fprintf(stderr, "lut n %d r2max %g rad0 %g radn %g k0 %g\n", L->n, L->r2max, L->rad[0], L->rad[L->n - 1], L->cam.k[0]);
+  return L;
+}
+
+void tagfit_lut_destroy(tagfit_lut *L) {
+  if (!L) return;
+  free(L->rad);
+  free(L);
+}
+
+double tagfit_lut_max_err(const tagfit_lut *L) { return L ? L->max_err : NAN; }
 
 // Solve A x = b, n x n (n <= 9), partial pivoting, in place. 0 or -1.
 static int solve_n(double *A, double *b, int n) {
@@ -98,11 +208,16 @@ static inline int bilin(const view *im, double x, double y, double *out) {
 typedef struct {
   const cam_model *cam;
   double ox, oy;
+  const tagfit_lut *lut;
 } frame;
 
 static inline void to_img(const frame *f, double qx, double qy, double *x, double *y) {
-  if (f->cam) pose_distort_px(f->cam, qx + f->ox, qy + f->oy, x, y);
-  else *x = qx + f->ox, *y = qy + f->oy;
+  if (f->cam) {
+    if (f->lut && lut_map(f->lut, qx + f->ox, qy + f->oy, x, y)) return;
+    pose_distort_px(f->cam, qx + f->ox, qy + f->oy, x, y);
+  } else {
+    *x = qx + f->ox, *y = qy + f->oy;
+  }
 }
 
 enum { MAXK = 41 };
@@ -225,11 +340,13 @@ typedef struct {
   int W, ns, nso, nb2, nk_;
   double iW, R, ap, floor, cell;
   const tagfit_params *p;
+  int iters;          // Gauss-Newton steps for this fit (p->iters, or p->warm_iters when warm)
+  double bias0;       // starting bias (warm start)
 } ctx;
 
 typedef struct {
   double rms0, rms, biasv[2], kappa;
-  int used;
+  int used, steps;
 } fitstat;
 
 // Gauss-Newton from M (updated in place). 1 if it converged within the guards, 0 if not.
@@ -238,10 +355,11 @@ static int fit(const ctx *C, model *M, fitstat *st) {
   const int W = C->W, nb2 = C->nb2, nk_ = C->nk_;
   const double iW = C->iW;
   const int nm = M->kind ? 6 : 8, np = nm + nb2 + nk_;
-  double kappa = 0, biasv[2] = {0, 0}, rms_first = NAN, rms_last = NAN;
-  int used = 0;
+  double kappa = 0, biasv[2] = {C->bias0, C->bias0}, rms_first = NAN, rms_last = NAN;
+  int used = 0, steps = 0;
+  const int iters = C->iters;
   // passes 0 .. iters-1 measure and step; the last pass only measures (the residual after the fit).
-  for (int it = 0; it <= p->iters; it++) {
+  for (int it = 0; it <= iters; it++) {
     double A[121] = {0}, b[11] = {0}, ss = 0, sw2 = 0;
     double D[4] = {1, 0, 0, 1};  // d(image)/d(pinhole) at the tag's centre
     if (C->cam) {
@@ -293,7 +411,7 @@ static int fit(const ctx *C, model *M, fitstat *st) {
             double wt = fabs(res) < 0.5 ? 1 : 0.5 / fabs(res);  // Huber
             ss += wt * res * res, sw2 += wt;
             used++;
-            if (it == p->iters) continue;
+            if (it == iters) continue;
             double J[11] = {0};
             jrow(M, a, bb, qx, qy, nx * D[0] + ny * D[2], nx * D[1] + ny * D[3], J);
             if (nb2) J[nm + bx] = -1;
@@ -307,7 +425,7 @@ static int fit(const ctx *C, model *M, fitstat *st) {
     double rms = used ? sqrt(ss / sw2) : NAN;
     if (it == 0) rms_first = rms;
     rms_last = rms;
-    if (it == p->iters) break;
+    if (it == iters) break;
     if (used < 24) return 0;
     for (int m = 0; m < np; m++) A[m * np + m] *= 1 + 1e-6;
     if (solve_n(A, b, np)) return 0;
@@ -318,25 +436,210 @@ static int fit(const ctx *C, model *M, fitstat *st) {
       mapq(M, a, bb, &before[2 * k], &before[2 * k + 1]);
     }
     step(M, b);
+    steps++;
     for (int k = 0; k < 4; k++) {
       double a, bb, x, y;
       corner_ab(k, &a, &bb);
       mapq(M, a, bb, &x, &y);
       moved = fmax(moved, hypot(x - before[2 * k], y - before[2 * k + 1]));
     }
-    if (moved < 0.005) it = p->iters - 1;  // converged: go straight to the measuring pass
+    if (moved < 0.005) it = iters - 1;  // converged: go straight to the measuring pass
     for (int k = 0; k < nb2; k++) biasv[k] = b[nm + k];
     if (nb2 == 1) biasv[1] = biasv[0];
     if (nk_) kappa = b[nm + nb2];
     if (!(fabs(biasv[0]) < 0.35 * C->cell && fabs(biasv[1]) < 0.35 * C->cell)) return 0;
   }
-  st->rms0 = rms_first, st->rms = rms_last, st->used = used, st->kappa = kappa;
+  st->rms0 = rms_first, st->rms = rms_last, st->used = used, st->kappa = kappa, st->steps = steps;
   st->biasv[0] = biasv[0], st->biasv[1] = biasv[1];
   return used >= 24 && rms_last <= rms_first * 1.05 + 0.02;
 }
 
-int tagfit_refine(const uint8_t *img, int w, int h, int stride, const uint8_t *white, int W, const cam_model *cam,
-                  const double corners[8], const tagfit_params *pp, tagfit_result *r) {
+// ------------------------------------------------------------------------------------------- fast path
+// The same measurement and model as fit() (homography only), in float32: positions through the LUT, the edge
+// normal from the analytic derivative of the homography (fit() takes a 0.1-cell finite difference: the same
+// direction to ~1e-3 rad), the profile and lobe in float, NEON for the profile's bilinear arithmetic and the
+// gradient. The normal equations are accumulated (upper triangle) and solved in double.
+
+static inline void to_imgf(const frame *f, float qx, float qy, float *x, float *y) {
+  if (f->cam) {
+    if (f->lut && lut_mapf(f->lut, qx + (float)f->ox, qy + (float)f->oy, x, y)) return;
+    double xd, yd;
+    pose_distort_px(f->cam, qx + f->ox, qy + f->oy, &xd, &yd);
+    *x = (float)xd, *y = (float)yd;
+  } else {
+    *x = qx + (float)f->ox, *y = qy + (float)f->oy;
+  }
+}
+
+static int edge_offset_f(const view *im, float x0, float y0, float nx, float ny, int K, int na, float floor_,
+                         int mw, float *s_out) {
+  const float st = 0.25f;
+  const int N = 2 * (K + na) + 1;
+  if (N > MAXK + 2 * 8) return 0;
+  // the whole profile must be inside (then no per-point bounds checks)
+  const float s0 = -(K + na) * st, s1 = (K + na) * st;
+  const float xa = x0 + s0 * nx, ya = y0 + s0 * ny, xb = x0 + s1 * nx, yb = y0 + s1 * ny;
+  if (!(xa >= 0 && ya >= 0 && xb >= 0 && yb >= 0 && xa < im->w - 1 && xb < im->w - 1 && ya < im->h - 1 &&
+        yb < im->h - 1))
+    return 0;
+  float prof[MAXK + 20], g[MAXK + 4];
+  const uint8_t *base = im->p;
+  const int stride = im->stride;
+  int i = 0;
+#ifdef TAGFIT_NEON
+  const float32x4_t vstep = {0, 1, 2, 3};
+  for (; i + 4 <= N; i += 4) {
+    float32x4_t s = vmulq_n_f32(vaddq_f32(vdupq_n_f32((float)(i - K - na)), vstep), st);
+    float32x4_t x = vfmaq_n_f32(vdupq_n_f32(x0), s, nx), y = vfmaq_n_f32(vdupq_n_f32(y0), s, ny);
+    int32x4_t ix = vcvtq_s32_f32(x), iy = vcvtq_s32_f32(y);  // truncation: x, y >= 0
+    float32x4_t fx = vsubq_f32(x, vcvtq_f32_s32(ix)), fy = vsubq_f32(y, vcvtq_f32_s32(iy));
+    int32x4_t off = vmlaq_n_s32(ix, iy, stride);
+    int o[4];
+    vst1q_s32(o, off);
+    float p00[4], p01[4], p10[4], p11[4];
+    for (int k = 0; k < 4; k++) {
+      const uint8_t *r = base + o[k];
+      p00[k] = r[0], p01[k] = r[1], p10[k] = r[stride], p11[k] = r[stride + 1];
+    }
+    float32x4_t a00 = vld1q_f32(p00), a01 = vld1q_f32(p01), a10 = vld1q_f32(p10), a11 = vld1q_f32(p11);
+    float32x4_t a = vfmaq_f32(a00, fx, vsubq_f32(a01, a00)), b = vfmaq_f32(a10, fx, vsubq_f32(a11, a10));
+    vst1q_f32(prof + i, vfmaq_f32(a, fy, vsubq_f32(b, a)));
+  }
+#endif
+  for (; i < N; i++) {
+    float s = (i - K - na) * st, x = x0 + s * nx, y = y0 + s * ny;
+    int ix = (int)x, iy = (int)y;
+    float fx = x - ix, fy = y - iy;
+    const uint8_t *r = base + (size_t)iy * stride + ix;
+    float a = r[0] + fx * (r[1] - r[0]), b = r[stride] + fx * (r[stride + 1] - r[stride]);
+    prof[i] = a + fy * (b - a);
+  }
+  const int nk = 2 * K + 1;
+  int j = 0;
+#ifdef TAGFIT_NEON
+  for (; j + 4 <= nk; j += 4) vst1q_f32(g + j, vsubq_f32(vld1q_f32(prof + j + 2 * na), vld1q_f32(prof + j)));
+#endif
+  for (; j < nk; j++) g[j] = prof[j + 2 * na] - prof[j];
+  int bj = -1;
+  float best = floor_;
+  for (j = 0; j < nk; j++)
+    if (g[j] > best) best = g[j], bj = j;
+  if (bj < 0) return 0;
+  int jl = bj, jr = bj;
+  const float lo = 0.2f * best;
+  while (jl > 0 && bj - jl < mw && g[jl - 1] > lo && g[jl - 1] <= g[jl]) jl--;
+  while (jr < nk - 1 && jr - bj < mw && g[jr + 1] > lo && g[jr + 1] <= g[jr]) jr++;
+  float sg = 0, sj = 0;
+  for (j = jl; j <= jr; j++) {
+    float v = g[j] - lo;
+    sg += v, sj += v * j;
+  }
+  *s_out = (sj / sg - K) * st;
+  return 1;
+}
+
+static int fit_f32(const ctx *C, model *M, fitstat *st) {
+  const tagfit_params *p = C->p;
+  const int nb2 = C->nb2, np = 8 + nb2, iters = C->iters;
+  const float iW = (float)C->iW;
+  const float st_ = 0.25f;
+  const int na = (int)lround(C->ap / st_), K = (int)(C->R / st_);
+  const int mw = p->lobe_cells > 0 ? (int)(p->lobe_cells * C->cell / st_) : 2 * K + 1;
+  const float floor_ = (float)C->floor;
+  double biasv[2] = {C->bias0, C->bias0}, rms_first = NAN, rms_last = NAN;
+  int used = 0, steps = 0;
+  for (int it = 0; it <= iters; it++) {
+    double A[100] = {0}, b[10] = {0}, ss = 0, sw2 = 0;
+    float D[4] = {1, 0, 0, 1};
+    if (C->cam) {
+      double cx, cy, x0c, y0c, xa, ya, xb, yb;
+      mapq(M, 0, 0, &cx, &cy);
+      to_img(C->fr, cx, cy, &x0c, &y0c);
+      to_img(C->fr, cx + 1, cy, &xa, &ya);
+      to_img(C->fr, cx, cy + 1, &xb, &yb);
+      D[0] = (float)(xa - x0c), D[2] = (float)(ya - y0c), D[1] = (float)(xb - x0c), D[3] = (float)(yb - y0c);
+    }
+    float H[8];
+    for (int k = 0; k < 8; k++) H[k] = (float)M->H[k];
+    const float bv[2] = {(float)biasv[0], (float)biasv[1]};
+    const int last = it == iters;
+    used = 0;
+    for (int si = 0; si < C->nseg; si++) {
+      const seg sg = C->segs[si];
+      const int axis = sg.axis, nk = sg.outline ? C->nso : C->ns;
+      const float t0 = sg.outline ? 0.1f : 0.2f, tw = sg.outline ? 0.8f : 0.6f, sgn = sg.w1 ? 1.f : -1.f;
+      const int bx = p->bias_axes ? axis : 0;
+      for (int k = 0; k < nk; k++) {
+        float t = sg.c + t0 + tw * (k + 0.5f) / nk;
+        float a = (axis ? t : sg.e) * iW - 0.5f, bb = (axis ? sg.e : t) * iW - 0.5f;
+        float iz = 1.f / (H[6] * a + H[7] * bb + 1.f);
+        float qx = (H[0] * a + H[1] * bb + H[2]) * iz, qy = (H[3] * a + H[4] * bb + H[5]) * iz;
+        // d q / d a and d q / d b (analytic), through the lens Jacobian
+        float qax = (H[0] - qx * H[6]) * iz, qay = (H[3] - qy * H[6]) * iz;
+        float qbx = (H[1] - qx * H[7]) * iz, qby = (H[4] - qy * H[7]) * iz;
+        float ax = D[0] * qax + D[1] * qay, ay = D[2] * qax + D[3] * qay;
+        float bxx = D[0] * qbx + D[1] * qby, byy = D[2] * qbx + D[3] * qby;
+        float tx = axis ? ax : bxx, ty = axis ? ay : byy;  // along the edge
+        float wx = axis ? bxx : ax, wy = axis ? byy : ay;  // across it, toward +model axis
+        float tl2 = tx * tx + ty * ty;
+        if (tl2 < 1e-20f) continue;
+        float il = 1.f / sqrtf(tl2), nx = -ty * il, ny = tx * il;
+        if ((nx * wx + ny * wy) * sgn < 0) nx = -nx, ny = -ny;  // black to white
+        float x, y, s;
+        to_imgf(C->fr, qx, qy, &x, &y);
+        if (!edge_offset_f(C->im, x, y, nx, ny, K, na, floor_, mw, &s)) continue;
+        float res = s + bv[bx];
+        float wt = fabsf(res) < 0.5f ? 1.f : 0.5f / fabsf(res);
+        ss += wt * res * res, sw2 += wt;
+        used++;
+        if (last) continue;
+        float mx = nx * D[0] + ny * D[2], my = nx * D[1] + ny * D[3];
+        float mq = -(mx * qx + my * qy);
+        double J[10] = {mx * a * iz, mx * bb * iz, mx * iz, my * a * iz, my * bb * iz, my * iz, mq * a * iz,
+                        mq * bb * iz, 0, 0};
+        if (nb2) J[8 + bx] = -1;
+        for (int m = 0; m < np; m++) {
+          const double wj = wt * J[m];
+          for (int n2 = m; n2 < np; n2++) A[m * np + n2] += wj * J[n2];
+          b[m] += wj * s;
+        }
+      }
+    }
+    double rms = used ? sqrt(ss / sw2) : NAN;
+    if (it == 0) rms_first = rms;
+    rms_last = rms;
+    if (last) break;
+    if (used < 24) return 0;
+    for (int m = 0; m < np; m++)
+      for (int n2 = 0; n2 < m; n2++) A[m * np + n2] = A[n2 * np + m];
+    for (int m = 0; m < np; m++) A[m * np + m] *= 1 + 1e-6;
+    if (solve_n(A, b, np)) return 0;
+    double before[8], moved = 0;
+    for (int k = 0; k < 4; k++) {
+      double a, bb;
+      corner_ab(k, &a, &bb);
+      mapq(M, a, bb, &before[2 * k], &before[2 * k + 1]);
+    }
+    step(M, b);
+    steps++;
+    for (int k = 0; k < 4; k++) {
+      double a, bb, x, y;
+      corner_ab(k, &a, &bb);
+      mapq(M, a, bb, &x, &y);
+      moved = fmax(moved, hypot(x - before[2 * k], y - before[2 * k + 1]));
+    }
+    if (moved < 0.005) it = iters - 1;
+    for (int k = 0; k < nb2; k++) biasv[k] = b[8 + k];
+    if (nb2 == 1) biasv[1] = biasv[0];
+    if (!(fabs(biasv[0]) < 0.35 * C->cell && fabs(biasv[1]) < 0.35 * C->cell)) return 0;
+  }
+  st->rms0 = rms_first, st->rms = rms_last, st->used = used, st->kappa = 0, st->steps = steps;
+  st->biasv[0] = biasv[0], st->biasv[1] = biasv[1];
+  return used >= 24 && rms_last <= rms_first * 1.05 + 0.02;
+}
+
+static int refine(const uint8_t *img, int w, int h, int stride, const uint8_t *white, int W, const cam_model *cam,
+                  const double corners[8], const tagfit_params *pp, const tagfit_warm *warm, tagfit_result *r) {
   tagfit_params p;
   if (pp) p = *pp;
   else tagfit_defaults(&p);
@@ -351,14 +654,34 @@ int tagfit_refine(const uint8_t *img, int w, int h, int stride, const uint8_t *w
   r->cell_px = cell;
   if (cell < p.min_cell_px || (p.max_cell_px > 0 && cell > p.max_cell_px)) return 0;
   const view im = {img, w, h, stride};
-  frame fr = {cam, 0, 0};
-  double q[8];
+  frame fr = {cam, 0, 0, cam ? p.lut : NULL};
+  // warm start: this frame's corners plus the previous frame's correction (gates: same place and size)
+  int use_warm = 0;
+  double start[8];
+  memcpy(start, corners, sizeof start);
+  if (warm && warm->valid && !p.pose) {
+    double cx = 0, cy = 0;
+    for (int k = 0; k < 4; k++) cx += corners[2 * k] / 4, cy += corners[2 * k + 1] / 4;
+    // (not below 2.5 px cells: there one warm step measured worse than two cold ones, synthetic --seq 10)
+    if (cell >= 2.5 && hypot(cx - warm->cx, cy - warm->cy) < 2 * cell && fabs(warm->cell_px / cell - 1) < 0.15) {
+      use_warm = 1;
+      for (int k = 0; k < 8; k++) start[k] += warm->dc[k];
+    }
+  }
+  double q[8], qn[8];  // start, and the input corners (the move guard is from the input), pinhole
   for (int k = 0; k < 4; k++) {
-    if (cam) pose_undistort_px(cam, corners[2 * k], corners[2 * k + 1], &q[2 * k], &q[2 * k + 1]);
-    else q[2 * k] = corners[2 * k], q[2 * k + 1] = corners[2 * k + 1];
+    if (cam) {
+      pose_undistort_px(cam, start[2 * k], start[2 * k + 1], &q[2 * k], &q[2 * k + 1]);
+      if (use_warm) pose_undistort_px(cam, corners[2 * k], corners[2 * k + 1], &qn[2 * k], &qn[2 * k + 1]);
+    } else {
+      q[2 * k] = start[2 * k], q[2 * k + 1] = start[2 * k + 1];
+      qn[2 * k] = corners[2 * k], qn[2 * k + 1] = corners[2 * k + 1];
+    }
+    if (!use_warm) qn[2 * k] = q[2 * k], qn[2 * k + 1] = q[2 * k + 1];
     fr.ox += q[2 * k] / 4, fr.oy += q[2 * k + 1] / 4;
   }
-  for (int k = 0; k < 4; k++) q[2 * k] -= fr.ox, q[2 * k + 1] -= fr.oy;
+  for (int k = 0; k < 4; k++) q[2 * k] -= fr.ox, q[2 * k + 1] -= fr.oy, qn[2 * k] -= fr.ox, qn[2 * k + 1] -= fr.oy;
+  r->warm = use_warm;
   // Up to two starting models: the homography, or the pose from IPPE (and its other solution when ambiguous).
   model M[2];
   int nmod = 1;
@@ -436,7 +759,7 @@ int tagfit_refine(const uint8_t *img, int w, int h, int stride, const uint8_t *w
     nseg = p.max_segments;
   }
   r->segments = nseg;
-  ctx C = {segs, nseg, &im, &fr, cam, white, W, 0, 0, 0, 0, iW, 0, 0, 0.2 * contrast, cell, &p};
+  ctx C = {segs, nseg, &im, &fr, cam, white, W, 0, 0, 0, 0, iW, 0, 0, 0.2 * contrast, cell, &p, 0, 0};
   C.R = fmin(1.5, fmax(0.75, 0.4 * cell));
   C.ap = fmin(0.5, fmax(0.25, 0.25 * cell));
   int ns = (int)(cell / (p.sample_px > 0.5 ? p.sample_px : 0.5));
@@ -460,9 +783,12 @@ int tagfit_refine(const uint8_t *img, int w, int h, int stride, const uint8_t *w
   C.ns = ns, C.nso = nso;
   C.nb2 = p.fit_bias ? (p.bias_axes ? 2 : 1) : 0;
   C.nk_ = p.fit_kappa ? 1 : 0;
+  C.iters = use_warm ? p.warm_iters : p.iters;
+  C.bias0 = use_warm && C.nb2 ? warm->bias : 0;
+  const int fast = p.fast && M[0].kind == 0 && !C.nk_;
   fitstat st[2];
   int ok[2] = {0, 0};
-  for (int k = 0; k < nmod; k++) ok[k] = fit(&C, &M[k], &st[k]);
+  for (int k = 0; k < nmod; k++) ok[k] = fast ? fit_f32(&C, &M[k], &st[k]) : fit(&C, &M[k], &st[k]);
   int best = 0;
   if (nmod == 2 && ok[1] && (!ok[0] || st[1].rms < st[0].rms)) best = 1;
   r->branches = nmod;
@@ -475,7 +801,7 @@ int tagfit_refine(const uint8_t *img, int w, int h, int stride, const uint8_t *w
     mapq(&M[best], a, bb, &qx, &qy);
     // bounded move (the other IPPE branch moves corners legitimately: allow it a cell)
     double lim = best ? fmin(6.0, 1.0 * cell) : fmin(3.0, 0.35 * cell);
-    if (!(hypot(qx - q[2 * k], qy - q[2 * k + 1]) < lim)) return 0;
+    if (!(hypot(qx - qn[2 * k], qy - qn[2 * k + 1]) < lim)) return 0;
     to_img(&fr, qx, qy, &out[2 * k], &out[2 * k + 1]);
   }
   memcpy(r->corners, out, sizeof out);
@@ -486,5 +812,98 @@ int tagfit_refine(const uint8_t *img, int w, int h, int stride, const uint8_t *w
   r->bias = 0.5 * (st[best].biasv[0] + st[best].biasv[1]);
   r->bias_v = st[best].biasv[0], r->bias_h = st[best].biasv[1];
   r->kappa = st[best].kappa;
+  r->iters_run = st[best].steps;
   return 1;
+}
+
+int tagfit_refine(const uint8_t *img, int w, int h, int stride, const uint8_t *white, int W, const cam_model *cam,
+                  const double corners[8], const tagfit_params *p, tagfit_result *r) {
+  return refine(img, w, h, stride, white, W, cam, corners, p, NULL, r);
+}
+
+int tagfit_refine_warm(const uint8_t *img, int w, int h, int stride, const uint8_t *white, int W, const cam_model *cam,
+                       const double corners[8], const tagfit_params *p, const tagfit_warm *warm, tagfit_warm *next,
+                       tagfit_result *r) {
+  int ok = refine(img, w, h, stride, white, W, cam, corners, p, warm, r);
+  if (next) {
+    memset(next, 0, sizeof *next);
+    if (ok) {
+      next->valid = 1;
+      for (int k = 0; k < 8; k++) next->dc[k] = r->corners[k] - corners[k];
+      for (int k = 0; k < 4; k++) next->cx += corners[2 * k] / 4, next->cy += corners[2 * k + 1] / 4;
+      next->cell_px = r->cell_px;
+      next->bias = r->bias;
+    }
+  }
+  return ok;
+}
+
+// ------------------------------------------------------------------------------------------- live
+enum { LIVE_IDS = 1024 };
+struct tagfit_live {
+  cam_model cam;
+  tagfit_lut *lut;
+  tagfit_params p;
+  int warm_on;
+  tagfit_warm warm[LIVE_IDS];
+  long frame[LIVE_IDS];
+  long tried, refined, nwarm;
+  double us;
+};
+
+static double env_num(const char *k, double def) {
+  const char *v = getenv(k);
+  return v && *v ? atof(v) : def;
+}
+
+int tagfit_env_enabled(void) { return env_num("SPECTRUM_TAGFIT", 0) != 0; }
+
+tagfit_live *tagfit_live_create(const cam_model *cam, int w, int h) {
+  tagfit_live *t = (tagfit_live *)calloc(1, sizeof *t);
+  if (!t) return NULL;
+  t->cam = *cam;
+  tagfit_defaults(&t->p);
+  t->p.iters = (int)env_num("SPECTRUM_TAGFIT_ITERS", 2);
+  t->p.max_cell_px = env_num("SPECTRUM_TAGFIT_MAX_CELL", 0);
+  t->warm_on = env_num("SPECTRUM_TAGFIT_WARM", 1) != 0;
+  t->p.warm_iters = (int)env_num("SPECTRUM_TAGFIT_WARM_ITERS", 1);
+  if (env_num("SPECTRUM_TAGFIT_FAST", 1) != 0) {
+    t->p.fast = 1;
+    t->lut = tagfit_lut_create(&t->cam, w, h, 0);
+    t->p.lut = t->lut;
+  }
+  return t;
+}
+
+void tagfit_live_destroy(tagfit_live *t) {
+  if (!t) return;
+  tagfit_lut_destroy(t->lut);
+  free(t);
+}
+
+int tagfit_live_refine(tagfit_live *t, const uint8_t *img, int w, int h, int stride, int id, const uint8_t *white,
+                       int W, double corners[8], long frame) {
+  struct timespec a, b;
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &a);
+  const int slot = id >= 0 && id < LIVE_IDS ? id : -1;
+  // warm only from the frame just before (or the one before that: a dropped frame)
+  const tagfit_warm *wm = t->warm_on && slot >= 0 && t->warm[slot].valid && frame - t->frame[slot] >= 1 &&
+                                  frame - t->frame[slot] <= 2
+                              ? &t->warm[slot]
+                              : NULL;
+  tagfit_warm next;
+  tagfit_result r;
+  int ok = tagfit_refine_warm(img, w, h, stride, white, W, &t->cam, corners, &t->p, wm, &next, &r);
+  if (slot >= 0) t->warm[slot] = next, t->frame[slot] = frame;
+  if (ok) memcpy(corners, r.corners, sizeof r.corners);
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &b);
+  t->tried++;
+  t->refined += ok;
+  t->nwarm += ok && r.warm;
+  t->us += (b.tv_sec - a.tv_sec) * 1e6 + (b.tv_nsec - a.tv_nsec) / 1e3;
+  return ok;
+}
+
+void tagfit_live_stats(const tagfit_live *t, long *tried, long *refined, long *warm, double *us) {
+  *tried = t->tried, *refined = t->refined, *warm = t->nwarm, *us = t->us;
 }

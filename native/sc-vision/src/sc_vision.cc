@@ -11,7 +11,9 @@
 //   sc-vision [--secs S] [--csv FILE] [--cpu K] [--fifo PRIO] [--exposure N(0.1ms)] [--gain G]
 //             [--pkts 4] [--urbs 32] [--alt -1] [--min-tag 16] [--hamming 1] [--min-contrast 20]
 //             [--every N] [--check N] [--calib FILE] [--tag-size M] [--save DIR] [--no-napa] [--whole]
-//             [--nt HOST] [--name CAM] [--selftest]
+//             [--nt HOST] [--name CAM] [--tagfit] [--selftest]
+// Full-tag refinement (docs/FULL-TAG-REFINEMENT.md): off by default; --tagfit or env SPECTRUM_TAGFIT=1 (needs
+// --calib), between NAPA and the pose, full-scale frames only. SPECTRUM_TAGFIT_* settings: tagfit.h.
 #include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -46,6 +48,8 @@ extern "C" {
 #include "mjdec.h"
 #include "napa_core.h"
 #include "pose.h"
+#include "tagfit.h"
+#include "tagfit_napa.h"
 #include "uvc_usb.h"
 }
 #include "nt_pub.h"
@@ -254,6 +258,7 @@ int main(int argc, char **argv) {
   // image, min tag / scale, corners back to full-res pixels), every full_every-th processed frame at full scale.
   // The robot can override each over NT (/photonvision/<name>/input/*); defaults: full scale, every frame.
   int scale_def = 1, full_every_def = 0;
+  int tagfit_on = tagfit_env_enabled();
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     auto nx = [&]() { return i + 1 < argc ? argv[++i] : (char *)"0"; };
@@ -297,6 +302,7 @@ int main(int argc, char **argv) {
     else if (a == "--sharpness") sharpness = atoi(nx());
     else if (a == "--brightness") brightness = atoi(nx());
     else if (a == "--sharpen") np.sharpening_x100 = atoi(nx());  // NAPA's cell sharpening x100 (default 25)
+    else if (a == "--tagfit") tagfit_on = 1;  // full-tag refinement (also env SPECTRUM_TAGFIT=1)
     else if (a == "--selftest") return selftest();
     else {
       fprintf(stderr, "unknown option %s\n", a.c_str());
@@ -395,7 +401,9 @@ int main(int argc, char **argv) {
   mjdec *dec = mjdec_create();
   napa_detector *nd = napa_create();
   napa_stream *ns = napa_stream_create(nd);
-  std::vector<napa_detection> dets(64);
+  std::vector<napa_detection> dets(64), dets_raw(64);
+  tagfit_live *tf = tagfit_on && have_cam ? tagfit_live_create(&cam, W, H) : nullptr;
+  if (tagfit_on) fprintf(stderr, "sc-vision: tagfit %s\n", tf ? "on" : "off (needs --calib)");
   FILE *out = csv ? fopen(csv, "w") : nullptr;
   if (out)
     fprintf(out,
@@ -461,6 +469,16 @@ int main(int argc, char **argv) {
     c_napa += cpu_ns() - c2;
     tag_pose poses[64], alts[64];
     int64_t p0 = cpu_ns();
+    // full-tag refinement: only frames that get published (this one), at full scale; NAPA's corner order
+    const bool fitted = tf && fscale == 1 && nt > 0;
+    if (fitted) {
+      std::copy(dets.begin(), dets.begin() + nt, dets_raw.begin());  // the identity check compares NAPA's own
+      uint8_t cells[18 * 18];
+      for (int i = 0; i < nt; i++) {
+        const int tw = tagfit_napa_cells(dets[i].id, cells);
+        if (tw) tagfit_live_refine(tf, Y.data(), W, Hs, W, dets[i].id, cells, tw, dets[i].corners, ndone);
+      }
+    }
     if (have_cam)
       for (int i = 0; i < nt; i++) {
         double c[8];  // AprilTag's corner order: the tag frame PhotonVision's pose uses
@@ -512,7 +530,7 @@ int main(int argc, char **argv) {
       if (!save_f) save_f = fopen(save, "wb");
       if (save_f) fwrite(fb.data(), 1, flen, save_f);
     }
-    if (check > 0 && ndone % check == 0 && fscale == 1) chk.offer(fb.data(), flen, Y.data(), W, H, dets.data(), nt, np);
+    if (check > 0 && ndone % check == 0 && fscale == 1) chk.offer(fb.data(), flen, Y.data(), W, H, fitted ? dets_raw.data() : dets.data(), nt, np);
   };
   while (!g_stop) {
     int64_t tr;
@@ -610,6 +628,14 @@ int main(int argc, char **argv) {
           chk.ok_det.load(), chk.bad_det.load(), blocks ? 100.0 * dco / blocks : 0.0);
   fprintf(stderr, "sc-vision: processed at full scale %ld, 1/2 %ld, 1/4 %ld\n", n_by_scale[1], n_by_scale[2],
           n_by_scale[4]);
+  if (tf) {
+    long tt, tr2, tw2;
+    double tus;
+    tagfit_live_stats(tf, &tt, &tr2, &tw2, &tus);
+    fprintf(stderr, "sc-vision: tagfit %ld tags, %ld refined (%ld warm), %.1f us/tag CPU\n", tt, tr2, tw2,
+            tt ? tus / tt : 0.0);
+    tagfit_live_destroy(tf);
+  }
   if (pub) nt_pub_destroy(pub);
   mjdec_destroy(dec);
   napa_stream_destroy(ns);

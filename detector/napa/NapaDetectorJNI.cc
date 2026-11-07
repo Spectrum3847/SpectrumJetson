@@ -65,7 +65,9 @@
 extern "C" {
 #include "../../native/sc-vision/src/pose.h"  // poseSquare (sc/mjpeg-napa)
 #include "../../native/sc-vision/src/mjdec.h"  // the native camera backend's decoder
+#include "../../native/sc-vision/src/tagfit.h"  // full-tag refinement (SPECTRUM_TAGFIT=1)
 }
+#include "../../native/sc-vision/src/tagfit_napa.h"
 #include "../../native/sc-vision/src/pv_pack.h"  // native publish (sc/mjpeg-napa)
 
 namespace {
@@ -153,6 +155,8 @@ struct PublishCfg {
 struct SinkOut {
   std::vector<napa_far::Tag> tags;
   int64_t t_begin;
+  std::vector<napa_far::Tag> raw;  // NAPA's own corners when tagfit refined tags (for the identity check)
+  bool fitted = false;
 };
 
 // The camera watcher's side of streaming NAPA: its own detector, fed band by band on the watcher thread.
@@ -251,6 +255,54 @@ struct StreamSink {
   long plan_n = 0, proc_n = 0;  // watcher thread
   int planned = 0, cur_scale = 1, applied_scale = 1, full_w = 0;
   std::atomic<long> n_scaled{0}, n_skipped{0};
+  // Full-tag refinement (docs/FULL-TAG-REFINEMENT.md), off unless SPECTRUM_TAGFIT=1: on the watcher thread when the
+  // frame's tags are final, before they are published (natively or handed to Java), full-scale frames with a
+  // calibration only. Not in the identity check (its frames are not published).
+  const bool tagfit_on = tagfit_env_enabled() != 0;
+  tagfit_live *tf = nullptr;
+  cam_model tf_cam{};
+  long tf_frame = 0;
+  int64_t tf_next_log = 0;
+  const uint8_t *f_img = nullptr;
+  int f_w = 0, f_h = 0, f_stride = 0;
+  void Tagfit(std::vector<napa_far::Tag> &tags) {
+    cam_model cam;
+    bool have;
+    {
+      std::lock_guard<std::mutex> l(cfg_mu);
+      cam = pub.cam, have = pub.have_cam;
+    }
+    if (!have || !f_img) return;
+    if (!tf || std::memcmp(&cam, &tf_cam, sizeof cam) != 0) {
+      tagfit_live_destroy(tf);
+      tf = tagfit_live_create(&cam, f_w, f_h);
+      tf_cam = cam;
+      std::cout << "NAPA: tagfit on" << std::endl;
+    }
+    tf_frame++;
+    uint8_t cells[18 * 18];
+    for (auto &t : tags) {
+      const int W = tagfit_napa_cells(t.id, cells);
+      if (!W) continue;
+      double c[8];  // AprilTag order -> NAPA's ({1,0,3,2}, its own inverse) and back
+      static const int perm[4] = {1, 0, 3, 2};
+      for (int k = 0; k < 4; k++) c[2 * k] = t.p[2 * perm[k]], c[2 * k + 1] = t.p[2 * perm[k] + 1];
+      if (tagfit_live_refine(tf, f_img, f_w, f_h, f_stride, t.id, cells, W, c, tf_frame))
+        for (int k = 0; k < 4; k++) t.p[2 * perm[k]] = c[2 * k], t.p[2 * perm[k] + 1] = c[2 * k + 1];
+    }
+    const int64_t now = MonoNs();
+    if (now > tf_next_log) {
+      if (tf_next_log) {
+        long tt, tr, tw;
+        double us;
+        tagfit_live_stats(tf, &tt, &tr, &tw, &us);
+        std::printf("NAPA tagfit: %ld tags, %ld refined (%ld warm), %.1f us/tag\n", tt, tr, tw, tt ? us / tt : 0.0);
+        std::fflush(stdout);
+      }
+      tf_next_log = now + 30000000000LL;
+    }
+  }
+  ~StreamSink() { tagfit_live_destroy(tf); }
   explicit StreamSink(const std::string &family) : det(family) {
     c.ctx = this;
     c.plan = [](void *x) -> int {
@@ -293,6 +345,7 @@ struct StreamSink {
         }
         s->cfg_new = false;
       }
+      s->f_img = img, s->f_w = w, s->f_h = h, s->f_stride = stride;
       return s->det.Begin(img, w, h, stride, NowUs()) ? 1 : 0;
     };
     c.feed = [](void *x, int rows) { static_cast<StreamSink *>(x)->det.Feed(rows); };
@@ -302,6 +355,11 @@ struct StreamSink {
       if (s->cur_scale > 1)  // a reduced frame's corners back to full-res pixels (centres at integers)
         for (auto &t : out->tags)
           for (double &v : t.p) v = v * s->cur_scale + (s->cur_scale - 1) * 0.5;
+      if (s->tagfit_on && s->cur_scale == 1 && !out->tags.empty()) {
+        out->raw = out->tags;
+        out->fitted = true;
+        s->Tagfit(out->tags);
+      }
       s->Publish(out->tags);
       return out;
     };
@@ -1170,6 +1228,9 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_detectS
     rc = api->take(img, width, height, static_cast<size_t>(step), &n->sink->c, wantAfterNanos, &res);
     if (rc == 1) {
       tags.swap(static_cast<SinkOut *>(res)->tags);
+      std::vector<napa_far::Tag> raw;
+      const bool fitted = static_cast<SinkOut *>(res)->fitted;
+      if (fitted) raw.swap(static_cast<SinkOut *>(res)->raw);
       n->sink->taken_sight = static_cast<SinkOut *>(res)->t_begin;
       n->sink->c.free_result(res);
       n->streamed++;
@@ -1181,7 +1242,7 @@ JNIEXPORT jobjectArray JNICALL Java_org_photonvision_jni_NapaDetectorJNI_detectS
       }();
       if (check_every > 0 && ++n->check_due % check_every == 0 &&
           !(width >= 8 && std::memcmp(img, "SJREFv1", 8) == 0))
-        IdentityCheck(n, img, width, height, step, tags, now_us);
+        IdentityCheck(n, img, width, height, step, fitted ? raw : tags, now_us);
     }
   }
   if (rc != 1) {

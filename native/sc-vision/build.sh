@@ -41,7 +41,7 @@ if [[ ${NT:-0} == 1 ]]; then
   LIBS=(-L"${NT_LIB:?NT_LIB: dir with libntcore.so etc.}" -lntcore -ldatalog -lwpinet -lwpiutil -Wl,-rpath,/opt/sc-vision/lib)
 fi
 "$SC_CXX" "${CF[@]}" -std=gnu++23 -I"$HERE/src" -I"$OUT/napa-src" "$HERE/src/sc_vision.cc" "${PUB[@]}" \
-  "$OUT/mjdec.o" "$OUT/uvc_usb.o" "$OUT/pose.o" "$OUT/napa_core.o" -o "$OUT/sc-vision" -ljpeg -lpthread -lm \
+  "$OUT/mjdec.o" "$OUT/uvc_usb.o" "$OUT/pose.o" "$OUT/tagfit.o" "$OUT/napa_core.o" -o "$OUT/sc-vision" -ljpeg -lpthread -lm \
   "${LIBS[@]}"
 if [[ ${NT:-0} == 1 ]]; then
   "$SC_CXX" "${CF[@]}" -std=gnu++23 -I"$NT_INC" "$HERE/tools/nt_probe.cc" -o "$OUT/nt_probe" "${LIBS[@]}"

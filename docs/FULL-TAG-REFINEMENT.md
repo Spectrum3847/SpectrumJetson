@@ -1,11 +1,139 @@
 # Full-tag refinement ("tagfit"): fitting every bit edge, not just the outline
 
-Status: offline prototype (2026-11-06), branch `sc/tagfit` (off `sc/mjpeg-napa`). Not wired into sc-vision or
-PhotonVision yet. Code: `native/sc-vision/src/tagfit.{c,h}` and `native/sc-vision/tools/tagfit_bench.cc`. Build
+Status (2026-11-06, pass 3): wired into sc-vision and PhotonVision's native NAPA path behind `SPECTRUM_TAGFIT=1`,
+off by default; branch `sc/tagfit` (off `sc/mjpeg-napa`). Code: `native/sc-vision/src/tagfit.{c,h}` and `native/sc-vision/tools/tagfit_bench.cc`. Build
 both with `native/sc-vision/build.sh`. Lens helpers `pose_undistort_px` and `pose_distort_px` were added to
 `pose.{c,h}`.
 
-**Pass 2 (2026-11-06, offline) supersedes the defaults and CPU figures in sections 3–5.** It is in section 0.
+**Pass 3 (section 00: speedups, the switch, live A/B) and pass 2 (section 0) supersede the defaults and CPU figures in sections 3–5.**
+
+## 00. Pass 3: speedups and the live switch (off by default)
+
+All µs figures here were **measured on the Pi 5** (Raspberry Pi 5 Model B Rev 1.1, kernel 6.12, governor
+`performance`, `max_current` 5000). Nothing was emulated. The robot program was running; PhotonVision was
+stopped. The figures are synthetic medians from `tagfit_bench`: 800 frames as 80 motion sequences of 10
+frames (`--seq 10`), 696 tags. Each test run also times and compares the double-precision cold reference
+(the pass 2 default) on the same tag. Live numbers use NAPA min_tag 22.
+
+### Switches
+
+| where | switch | default |
+|---|---|---|
+| sc-vision | `SPECTRUM_TAGFIT=1` or `--tagfit` (needs `--calib`) | off |
+| PhotonVision native path (`libspectrum-napa-apriltag.so`, StreamSink) | `SPECTRUM_TAGFIT=1` in PhotonVision's environment | off |
+| both | `SPECTRUM_TAGFIT_WARM` (1), `SPECTRUM_TAGFIT_WARM_ITERS` (1), `SPECTRUM_TAGFIT_FAST` (1: float32 + LUT), `SPECTRUM_TAGFIT_ITERS` (2), `SPECTRUM_TAGFIT_MAX_CELL` (0: all sizes) | as shown |
+
+- **Published frames only.** The refinement runs where a frame's tags are final and about to be published:
+  - sc-vision: between NAPA and the pose. Full-scale frames only.
+  - JNI: in the StreamSink's `finish`. It runs before the native publish and before the tags are handed to
+    Java, so it applies whether the result is published natively or by Java.
+  - Both pipelines publish every frame they process. Frames the policy skips are never decoded. So the
+    rule reduces to "never anywhere else", and the identity checks matter here.
+  - The identity checks still compare NAPA's own unrefined corners. Both pipelines keep a copy for them.
+    (Live check: 149 + 151 ok, 0 differ.)
+- **Camera model.** The JNI path takes the calibration that Java hands to `setNativePublish`. With no
+  calibration, there is no fit.
+- **No PhotonVision Java change and no NT topics.** The switch is an environment variable read by the
+  native library.
+
+### Speedups, per tag (µs, Pi 5, synthetic motion sequences)
+
+| cell px | reference (double, exact lens, 2 iters) | float32 + NEON, no LUT | float32, no NEON | float32 + NEON + LUT | + warm start, 1 iter | cold, 1 iter (not used) |
+|---|---|---|---|---|---|---|
+| < 2.5 | 83 | 71 | 75 | 72 | 72 (stays cold) | 50 |
+| 2.5–4 | 89 | 78 | 84 | 75 | **59** | 54 |
+| 4–6 | 101 | 85 | 93 | 83 | **62** | 58 |
+| 6–9 | 134 | 112 | 124 | 108 | **78** | 76 |
+| 9–14 | 174 | 146 | 152 | 136 | **97** | 92 |
+| ≥ 14 | 248 | 213 | 216 | 188 | **143** | 129 |
+
+- **float32 + NEON** (the `fast` path, homography fit only):
+  - The measurement loop runs in float, with analytic edge normals from the homography's derivative.
+  - The normal equations are accumulated as an upper triangle and solved in double.
+  - Gain: 1.15–1.30×. NEON contributes about half of that: 1.07–1.15× without it.
+  - The per-sample cost is the 17-point bilinear profile. NEON has no gather, so the four pixel loads per
+    point stay scalar.
+- **Lens LUT.** The tabulated part is the radial factor against r², 1024 entries; the tangential terms stay
+  exact. Worst error over the sensor is 0.00024 px.
+  - A 2-D grid of offsets was tried first and rejected. With the 8-coefficient model, its bilinear error at
+    the sensor corners was 0.16, 0.04 and 0.01 px at 16, 8 and 4 px nodes.
+  - Gain: only 2–3% in the float path. In the double path it was 3–9% *slower*. The exact rational model is
+    one division and about 25 flops, so it was never the third of the cost that pass 2 estimated.
+- **Warm start.**
+  - Start from this frame's NAPA corners plus the previous frame's correction (refined − NAPA) for the same
+    id, and from the previous bias. Then run 1 Gauss-Newton step instead of 2.
+  - Gates: the previous frame (or the one before it), the centre moved under 2 cells, the size changed
+    under 15%, and cells of at least 2.5 px.
+  - The move guard is still measured from NAPA's corners.
+  - Result: 1.5–1.8× faster than the reference, and 1.3× faster than the fast path alone.
+  - Live, 98% of fits started warm.
+
+### Accuracy against the reference and against truth
+
+- **fast + LUT vs the double reference:**
+  - Synthetic, clean and with noise 5 / blur 1.2: corner difference median 0.00002–0.00004 px, p99
+    ≤ 0.03 px, and no difference in which tags are accepted.
+  - The few 0.02–0.08 px outliers occur where the reference itself flips: the early exit at 0.005 px of
+    motion, or a lobe edge tie. They also appear in a double-precision run with the LUT.
+  - Real static sessions: corner, range and rotation jitter are identical to the reference, to the last
+    digit or one count. Tagdist tags 3, 10 and 11 give range std 0.39 / 1.38 / 7.59 mm on both.
+  - Moving sessions: live2 median 0.046 px and TXMAN1 Q17 median 0.00004 px. Blurred lobes make single
+    samples flip.
+- **Warm 1 step vs cold 2 steps,** synthetic motion against truth (corner median / p90 px):
+
+  | cell px | cold 2 | warm 1 |
+  |---|---|---|
+  | 2.5–4 | 0.053 / 0.122 | 0.054 / 0.105 |
+  | 4–6 | 0.044 / 0.283 | 0.044 / 0.278 |
+  | 9–14 | 0.022 / 0.039 | 0.021 / 0.037 |
+  | ≥ 14 | 0.019 / 0.040 | 0.017 / 0.027 |
+
+  - Range and rotation errors are equal or better.
+  - Flips at 2.5–4 px: 2 cold, 3 warm.
+  - Below 2.5 px cells, warm was worse (corner p90 0.148 → 0.175), hence the 2.5 px gate.
+  - Cold 1 step, by contrast, is clearly worse: ≥ 14 px p90 0.078, and < 2.5 px median 0.150.
+- **Warm 1 step, real static sessions:**
+
+  | session (min tag 22) | reference range std mm | warm 1 range std mm |
+  |---|---|---|
+  | tagdist tag 3 (0.8 m) | 0.39 | 0.25 |
+  | tagdist tag 10 (1.64 m) | 1.38 | 1.26 |
+  | tagdist tag 11 (3.33 m) | 7.60 | 7.26 |
+  | cd-ctrl | 0.98 | 0.97 |
+  | e2_g128 | 1.16 | 1.16 |
+
+  - Rotation std: equal or lower.
+
+### Live A/B (sc-vision, both cameras at once, 40 s each)
+
+Setup:
+- Thriftiest: core 3, FIFO 40, exposure 50, gain 32.
+- Swyft: core 2, FIFO 40, exposure 10, calibration from PhotonVision's database.
+- Both at 120 fps, min tag 22, a static scene with 2.4–2.9 tags per frame.
+- Latency is to the pose (`t_pose`). CPU is the per-frame CPU of the vision thread.
+
+| camera | tagfit | last packet → pose p50 / p99 ms | first packet → pose p50 / p99 ms | CPU (% of a core) | fit µs/tag |
+|---|---|---|---|---|---|
+| Thriftiest | off | 0.092 / 0.129 | 7.656 / 7.764 | 34.0 | – |
+| Thriftiest | on (warm) | 0.379 / 0.464 | 7.965 / 8.095 | 36.6 | 115 |
+| Thriftiest | on, cold | 0.484 / 0.596 | 8.074 / 8.225 | 37.9 | 180 |
+| Swyft | off | 0.131 / 0.212 | 7.663 / 7.787 | 32.6 | – |
+| Swyft | on (warm) | 0.406 / 0.501 | 7.934 / 8.065 | 35.8 | 97 |
+| Swyft | on, cold | 0.537 / 0.631 | 8.064 / 8.199 | 37.6 | 141 |
+
+At 2.5–3 tags per frame, tagfit with the warm start adds about 0.28 ms to the latency to pose, and 2.6–3.2
+points of one core per camera at 120 fps (about half of that at 60 fps). The cold fit adds about 0.4 ms.
+
+### Still to do
+
+- PhotonVision's native path is built (`scripts/systemcore/build-napa.sh`) and `napa_test` passes on the Pi.
+  It has not been run live under PhotonVision with `SPECTRUM_TAGFIT=1`.
+- Camera calibration is deferred. As section 0 notes, the reprojection error and ambiguity gates should
+  wait for it.
+- Further CPU savings:
+  - Skip the final measuring pass on warm fits. It is only the rms guard, about a third of a warm fit.
+  - A fixed-point or 8-bit profile, so the gather is cheaper.
+  - `SPECTRUM_TAGFIT_MAX_CELL` (e.g. 9) to fit only far and mid tags.
 
 ## 0. Pass 2: why tagfit looked worse, and the cheaper default
 
