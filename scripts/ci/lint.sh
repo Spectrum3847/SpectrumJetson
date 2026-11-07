@@ -18,6 +18,7 @@ echo "shellcheck: ${#sh[@]} scripts"
 shellcheck -S warning -e SC2088,SC2034,SC1091,SC2024 "${sh[@]}" || rc=1
 echo "pyflakes: ${#py[@]} files"
 pyflakes="pyflakes3"; command -v pyflakes3 >/dev/null || pyflakes="python3 -m pyflakes"
+python3 -m pyflakes --version >/dev/null 2>&1 || pyflakes="python -m pyflakes"
 $pyflakes "${py[@]}" || rc=1
 ((rc == 0)) && echo "lint: clean" || echo "lint: findings above"
 exit "$rc"

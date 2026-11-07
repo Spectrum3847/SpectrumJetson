@@ -9,7 +9,7 @@
 # by camera name (Thriftiest 2, Swyft 10).
 set -u
 cpu() { python3 -c "import os,sys,time;s=open('/proc/$1/stat').read().rsplit(')',1)[1].split();print((int(s[11])+int(s[12]))/os.sysconf('SC_CLK_TCK'),time.time())"; }
-O=/dev/shm/tfab/pv; mkdir -p $O; cd $O
+O=/dev/shm/tfab/pv; mkdir -p "$O"; cd "$O" || exit 1
 DB=/opt/photonvision/photonvision_config/photon.sqlite
 DROP=/etc/systemd/system/photonvision.service.d/90-tagfit-ab.conf
 sudo python3 - <<P > $O/stored.txt
@@ -38,4 +38,4 @@ done
 # PhotonVision stays up from the last (default) condition; the drop-in is already gone
 sudo systemctl daemon-reload
 for d in /dev/video0 /dev/video1 /dev/video2 /dev/video3; do c=$(v4l2-ctl -d $d --info 2>/dev/null | grep "Card type"); case "$c" in *Thrifty*) v4l2-ctl -d $d -c exposure_time_absolute=2 2>/dev/null && echo "$d thrifty 2";; *"USB Camera"*) v4l2-ctl -d $d -c exposure_time_absolute=10 2>/dev/null && echo "$d swyft 10";; esac; done
-echo done
+echo "done"

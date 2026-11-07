@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Blocks a push when scripts/ci/lint.sh (the same check CI's Lint workflow runs) has findings.
+# Enabled per clone by: git config core.hooksPath .githooks
+# Lints the commit being pushed, not the working tree, so other worktrees' edits don't count.
+set -uo pipefail
+z=0000000000000000000000000000000000000000
+while read -r _ lsha _ _; do
+  [[ $lsha == "$z" ]] && continue
+  d=$(mktemp -d)
+  git -c core.autocrlf=false worktree add -q --detach "$d" "$lsha" || exit 1
+  (cd "$d" && scripts/ci/lint.sh)
+  rc=$?
+  git worktree remove --force "$d"
+  if ((rc != 0)); then
+    echo "pre-push: lint failed on ${lsha:0:7}; fix it before pushing (scripts/ci/lint.sh)" >&2
+    exit 1
+  fi
+done
+exit 0
