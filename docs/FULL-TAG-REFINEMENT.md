@@ -124,10 +124,46 @@ Setup:
 At 2.5–3 tags per frame, tagfit with the warm start adds about 0.28 ms to the latency to pose, and 2.6–3.2
 points of one core per camera at 120 fps (about half of that at 60 fps). The cold fit adds about 0.4 ms.
 
+### Live A/B under PhotonVision (native cameras, `scripts/systemcore/tagfit-pv-ab.sh`)
+
+Setup:
+- Both cameras on the native backend, 120 fps, min tag 22 (set only for the test), 40 s per condition
+  after 25 s of warm-up.
+- The switch went through a temporary drop-in, `90-tagfit-ab.conf`.
+- Latency is `nt_probe`'s capture (mid-exposure) → received over NT. CPU is PhotonVision's whole process.
+
+| camera | tagfit | capture → received p50 / p95 / p99 ms | results in 40 s (all with tags) | decode failures |
+|---|---|---|---|---|
+| Thriftiest | unset | 9.996 / 11.033 / 11.491 | 4852 | 0 |
+| Thriftiest | 1 | 10.272 / 11.421 / 12.020 | 4851 | 0 |
+| Swyft | unset | 10.263 / 10.895 / 11.192 | 4800 | 0 |
+| Swyft | 1 | 10.509 / 11.347 / 11.834 | 4799 | 0 |
+
+- **PhotonVision CPU** (both cameras): 71.7% → 78.7% of one core.
+- **tagfit itself:**
+
+  | camera | µs per tag | fits started warm |
+  |---|---|---|
+  | Thriftiest | 136 | 98% |
+  | Swyft | 100 | 99.8% |
+
+- **Corner jitter**, from the published corners (std, px):
+
+  | camera | tagfit off | tagfit on |
+  |---|---|---|
+  | Thriftiest | 0.15–0.26 | 0.04–0.08 |
+  | Swyft | 0.59–0.80 | 0.20–0.28 |
+
+  These are from the first run of the same A/B. That run repeated the latency numbers to within 0.1 ms;
+  its CPU reading was lost to a script bug, which is fixed.
+
+- **Identity checks:** the native camera backend does not run them, so they were not exercised here.
+- **Dropped frames:** none. Results kept pace with the frame rate, and the health topic showed 0 decode
+  failures.
+- **dmesg:** no undervoltage or hung-task messages.
+
 ### Still to do
 
-- PhotonVision's native path is built (`scripts/systemcore/build-napa.sh`) and `napa_test` passes on the Pi.
-  It has not been run live under PhotonVision with `SPECTRUM_TAGFIT=1`.
 - Camera calibration is deferred. As section 0 notes, the reprojection error and ambiguity gates should
   wait for it.
 - Further CPU savings:
