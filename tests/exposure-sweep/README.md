@@ -55,3 +55,46 @@ Tags: tags 3 and 10 are at 0.8 and 1.7 m. The Swyft also sees 11 (3.7 m, 40 px),
 | PV CPU (% of a core, both cameras) | 77 -> 115 (more tags decoded and solved) | |
 
 No moving target was available on the bench, so motion blur was not measured. The LED test was not run: the cameras face the tag wall, not the ACT LED. Real exposures come from image brightness instead, and mains flicker makes those numbers noisy (+-15%).
+
+## PhotonVision CPU at the new exposures (2026-11-07, `scripts/systemcore/pv-cpu-knobs.sh 30 ...`)
+Both cameras, min tag 22, 30 s per condition after 25 s of warm-up, robot.service running. CPU is in % of one core.
+Latency is the probe's capture-to-received p50/p95, then PhotonVision's own loop p99 (median of its 10 s windows).
+
+| Condition | PV CPU | Thriftiest thread | Swyft thread | lat T p50/p95, p99 | lat S p50/p95, p99 | id12 jit / range sd | id13 rate, jit / range sd | id3 (T) jit / range sd |
+|---|---|---|---|---|---|---|---|---|
+| default (fit on, all sizes) | 105 | 35 | 69 | 9.29/9.77, 16.1 | 9.44/9.94, 19.7 | 0.147 px / 25.6 mm | 99.2%, 0.153 / 44.8 | 0.064 / 0.3 |
+| `SPECTRUM_TAGFIT_MAX_CELL=4` | 98 | 32 | 65 | 8.98/9.52, 16.6 | 9.09/9.58, 20.4 | 0.155 / 27.8 | 98.3%, 0.164 / 47.1 | 0.138 / 0.8 |
+| `SPECTRUM_TAGFIT_ITERS=1` | 105 | 35 | 69 | 9.31/9.95, 18.6 | 9.31/10.03, 21.1 | 0.159 / 27.8 | 96.6%, 0.169 / 49.6 | 0.069 / 0.3 |
+| `SPECTRUM_TAGFIT=0` (reference) | 99 | 32 | 63 | 9.03/9.57, 18.3 | 8.86/9.42, 20.7 | 0.210 / 37.1 | 98.0%, 0.203 / 63.9 | 0.135 / 0.9 |
+
+- **Where the CPU goes.** Almost all of it is the two `SpectrumCamera` threads, one per camera. Each thread runs the streaming decode, NAPA, the fit, the native pose and the packing. Java's threads (pose, NT, the JIT) add up to about 2%. The 4 cores were evenly loaded at 29/33/40/36%, and robot.service used 7%.
+  - **Thriftiest** (35%): decode about 19% (mjdec 1.6 ms/frame), fit about 2% (138 us/tag, 2 tags), NAPA plus the rest about 14%.
+  - **Swyft** (69%): decode about 20%, fit about 3-4% (83 us/tag, 5 tags), NAPA about 45%.
+  - So the rise from 77 to 115% comes from NAPA on the Swyft's brighter, 5-tag image, not from the fit. The whole fit costs about 6 points.
+- **Decision: keep the default.** `MAX_CELL=4` saves 7 points, but it doubles the near tags' corner jitter and their range sd (0.3 -> 0.8 mm). On the far tags it is equal or slightly worse. `ITERS=1` saves nothing and is worse on id13. No default changed.
+
+## Tag 3 and the Swyft, rechecked (same runs)
+- **Tag 3 margin.** On the Thriftiest the margin is 39-43 at 12/128, still the lowest in the system. The detection rate is 100% and corner jitter is 0.06 px. The cliff is below setting 10 (margin 33, 77%), so the headroom is about 0.2-0.3 ms of exposure. On the Swyft the margin is 105-116.
+- **Swyft saturation: resolved.** At 5/96, 0.005-0.02% of pixels are saturated, the mean is 134-157 and p99 is 207-240 (it was 60-71% saturated at 10/128). id12 is detected 100% and id13 97-99%.
+
+## Field light against the bench (TXMAN1 Q17, robotlog.spectrum3847.org)
+- **Match cameras.** 8515's orin-left and orin-right are Thrifty OV9281s (older firmware, no gain control: `cameraGain -1`). Their settings: exposure 50 (5 ms), brightness 38, contrast 32, gamma 150, 1280x800 MJPEG.
+- **Samples.** 20 MB from the middle of each `0002_Q17_*_000{1}.mjpeg` file: 112 frames and 68 tag sightings over 25 px.
+- **Bench reference.** The bench Thriftiest SJ-05 was set to the same controls for 10 s, with gain 32 (its default).
+
+| | image mean | p99 / saturated | tag black / white | tag contrast |
+|---|---|---|---|---|
+| Field, orin-left / orin-right | 93 / 107 | 255 / 1.6% | 55-70 / 139-153 | 91 / 67 |
+| Bench, Thriftiest at the match settings | 87 | 178 / 0% | 52 / 163 | 115 |
+| Bench, Thriftiest 12/128 (now) | 71 | 118 / 0% | 60 / 103 | 40 |
+| Bench, Swyft 5/96 (now) | 157 | 240 / 0.09% | 113 / 225 | 116 |
+
+- **Tags are not lit more brightly on the field.** At identical settings, the field tags' contrast is 0.6-0.8x the bench's. Linearized through gamma 150, their white surround is about 0.85x. The field background is brighter (lights and windows: 1.6% saturated against 0%), but the tags themselves get about bench light or a little less.
+- **Caveats.**
+  - The match cameras' fixed gain is assumed to equal SJ-05's gain 32.
+  - Field frames include motion blur and oblique tags, which both lower contrast.
+  - These numbers come from one event.
+- **Field exposures.** Expect the same or about 15-25% less tag light than the bench, so do not shorten exposures for the field.
+  - **Thriftiest: 14/128** (~1.5 ms). Margin about 63 on the bench, which keeps tag 3-type margins clear of the ~1 ms cliff.
+  - **Swyft: 6/96** (~0.6 ms). id13 was 99-100% at 6/64 and there is no saturation risk on the tags.
+  - Check both against the first practice-match recording.
