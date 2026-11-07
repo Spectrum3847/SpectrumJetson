@@ -24,6 +24,7 @@ CF=(-O3 -mcpu=cortex-a76 -fno-plt -Wall -Wextra -fPIC)
 "$SC_CC" "${CF[@]}" -std=gnu11 "$HERE/tools/mjdec_bench.c" "$OUT/mjdec.o" -o "$OUT/mjdec_bench" -ljpeg
 "$SC_CC" "${CF[@]}" -std=gnu11 -shared -Wl,-z,defs "$HERE/tools/scmn_adapter.c" "$OUT/mjdec.o" \
   -o "$OUT/libscvision-dec.so"
+"$SC_CC" "${CF[@]}" -std=gnu11 -I"$HERE/src" "$HERE/tools/uvc_pkttrace.c" "$OUT/uvc_usb.o" -o "$OUT/uvc_pkttrace"
 # native backend pieces, tested offline: the Rewind writer and the fake-camera identity check
 "$SC_CXX" "${CF[@]}" -std=gnu++23 -I"$HERE/src" "$HERE/tools/rewind_bench.cc" "$HERE/src/rewind_writer.cc" \
   -o "$OUT/rewind_bench" -lpthread

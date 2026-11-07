@@ -34,7 +34,15 @@ typedef struct {
   int nurbs;             // URBs in flight, default 32
   int verbose;
   int force;             // detach uvcvideo even when a process has the camera's /dev/video node open
+  int frame_index;       // >0: this bFrameIndex instead of the one matching width x height (tests: unlisted modes)
+  int yuyv;              // 1: the uncompressed (YUY2) format instead of MJPEG (tests only; sc-vision decodes MJPEG)
 } uvc_config;
+// What the camera committed: frame interval (100 ns), max payload, alt setting and its bytes per interval.
+typedef struct {
+  uint32_t interval, maxpay;
+  int alt, psize, speed, frame_index, format_index;
+} uvc_info;
+void uvc_get_info(const uvc_usb *u, uvc_info *out);
 
 // Pick one of several identical cameras: by USB serial (e.g. "SJ-05", sysfs serial / iSerial) and/or USB port (the
 // sysfs device name, e.g. "3-1"). NULL or "" = any. Applies to uvc_open() and uvc_v4l2_set().

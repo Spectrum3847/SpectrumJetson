@@ -125,3 +125,42 @@ about 1.6x the pixels per tag at half the rate.
 - Bandwidth: SS on its own bus. Three cameras fit: the Thriftiest and Swyft on one controller's USB 2 bus
   (as now), the ThriftyCam on the other controller's SuperSpeed bus. The CANable shares only the HS bus
   of the ThriftyCam's controller.
+
+## USB timing and host latency (2026-11-06, 23:27-23:32 CST)
+
+Tools: `native/sc-vision/tools/uvc_pkttrace` (per-frame packet timing; `--alt`, `--yuyv`, `--fps`, `--frame-index`)
+and `scv_stats.py` (sc-vision CSV summary). Both take the camera from PhotonVision with `--force`; PhotonVision
+reconnects by itself when they exit.
+
+**The ~15.2 ms spread is the sensor readout, not the encoder or USB.** At alt 17 MJPEG packets average 1.8 KB
+(max 2.5 KB of 33.8 KB allowed), one every 125 us, no idle gaps, sized by image content: the camera sends rows as
+the sensor reads them. YUYV has the same spread as MJPEG in every mode (1600x1304 15.3 ms, 1280x720 10.4-10.5 ms,
+640x480 14.0 ms), and the spread scales with the rows read from the top of the sensor (1304/1200/900 rows, 11.7 us a
+row). At 30 fps the spread doubles to 30.4 ms: the readout clock follows the frame rate. The camera's own SCR clock
+agrees with host timing within 0.05 ms; first packet - PTS 0.69 ms.
+
+| Run (1600x1304 MJPEG unless noted) | fps | spread p50 ms | KB/frame p50 | full packets |
+|---|---|---|---|---|
+| alt 17 (33792 B, default) | 60.27 | 15.25 | 219 | 0% |
+| alt 8 (2048 B) | 60.27 | 15.25 | 219 | 24% |
+| alt 4 (640 B) | 60.23 | 16.37 | 80 (encoder lowers quality) | 99% |
+| alt 2 (384 B) | 40.2 | 26.3 | 78 | 100% |
+| alt 1 (192 B) | 30.1 | 32.4 | 46 | 100% |
+| YUYV alt 17 | 60.28 | 15.31 | 4075 | 99% (at the bus limit) |
+
+Hidden modes: none. The camera accepts any frame interval in PROBE/COMMIT (120, 90 echoed back) but still
+delivers 60 fps; 30 fps works. Frame indices 4 and 5 (unlisted) stream as 1600x1304 and 1280x720.
+
+Host side, sc-vision `--min-tag 22`, 10 s each, back to back (EOF = reap of the URB with the last packet):
+
+| Option | first pkt -> tags p50/p99 ms | EOF -> tags p50/p99 ms |
+|---|---|---|
+| defaults (4 pkts, 32 URBs, no pinning) | 15.85/17.41 | 0.29/0.71 |
+| --cpu 3 --fifo 50 | 15.84/16.02 | 0.28/0.55 |
+| --cpu 0 --fifo 50 (the xhci IRQ core) | 15.84/16.04 | 0.29/0.56 |
+| --urbs 8, cpu 3 fifo 50 | 15.82/15.99 | 0.27/0.54 |
+| --pkts 8 | 16.27/16.48 | 0.52/0.76 |
+| --pkts 2 | 15.62/15.86 | 0.19/0.31 |
+| --pkts 1 | 15.53/15.69 | 0.03/0.06 |
+
+U1/U2 hardware LPM are already disabled on 2-1. xhci interrupts all land on CPU0.

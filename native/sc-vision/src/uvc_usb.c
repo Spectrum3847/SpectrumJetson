@@ -21,6 +21,8 @@ struct uvc_usb {
   int fd;
   char sys[256];
   int vc_if, vs_if, alt, ep, psize, npk, nurbs;
+  int frame_index, format_index;
+  uint32_t interval, maxpay;  // committed frame interval (100 ns) and max payload
   int speed;  // link speed in Mb/s (sysfs): 480 high speed, 5000 SuperSpeed
   int detached[2];
   struct usbdevfs_urb *urb[MAX_URBS];
@@ -241,17 +243,19 @@ uvc_usb *uvc_open(const uvc_config *cfg) {
       uvc_ver = p[3] | (p[4] << 8);
     } else if (type == 0x24 && cur_sub_if_class == 2 && len >= 4) {
       int sub = p[2];
-      if (sub == 0x06) {  // VS_FORMAT_MJPEG
-        in_mjpeg = 1;
+      int want_fmt = cfg->yuyv ? 0x04 : 0x06, want_frm = cfg->yuyv ? 0x05 : 0x07;  // UNCOMPRESSED or MJPEG
+      if (sub == want_fmt) {
+        in_mjpeg = fmt_idx < 0;  // the first such format only
         if (fmt_idx < 0) fmt_idx = p[3];
-      } else if (sub == 0x04 || sub == 0x10) {
+      } else if (sub == 0x04 || sub == 0x06 || sub == 0x10) {
         in_mjpeg = 0;
-      } else if (sub == 0x07 && in_mjpeg && len >= 26) {  // VS_FRAME_MJPEG
+      } else if (sub == want_frm && in_mjpeg && len >= 26) {  // VS_FRAME_MJPEG / VS_FRAME_UNCOMPRESSED
         int w = p[5] | (p[6] << 8), h = p[7] | (p[8] << 8);
         if (w == cfg->width && h == cfg->height && frm_idx < 0) frm_idx = p[3];
       }
     }
   }
+  if (cfg->frame_index > 0) frm_idx = cfg->frame_index;
   if (u->vc_if < 0 || u->vs_if < 0 || fmt_idx < 0 || frm_idx < 0 || nalt < 2) {
     fprintf(stderr, "uvc: no MJPEG %dx%d streaming setting (vc %d vs %d fmt %d frame %d alts %d)\n", cfg->width,
             cfg->height, u->vc_if, u->vs_if, fmt_idx, frm_idx, nalt);
@@ -300,6 +304,10 @@ uvc_usb *uvc_open(const uvc_config *cfg) {
   uint32_t maxpay, got_interval;
   memcpy(&maxpay, pr + 22, 4);
   memcpy(&got_interval, pr + 4, 4);
+  u->interval = got_interval;
+  u->maxpay = maxpay;
+  u->format_index = pr[2];
+  u->frame_index = pr[3];
   if (u->verbose && got_interval != interval)
     fprintf(stderr, "uvc: asked for frame interval %u (100 ns), the camera chose %u\n", interval, got_interval);
   if (ctrl(u->fd, 0x21, 0x01, 0x0200, (uint16_t)u->vs_if, pr, (uint16_t)plen) < 0) {
@@ -373,6 +381,16 @@ uvc_usb *uvc_open(const uvc_config *cfg) {
             path, u->speed, uvc_ver, fmt_idx, frm_idx, cfg->width, cfg->height, cfg->fps, maxpay, alt, u->psize, u->nurbs,
             u->npk, u->mmapped ? "mmap'd" : "heap");
   return u;
+}
+
+void uvc_get_info(const uvc_usb *u, uvc_info *out) {
+  out->interval = u->interval;
+  out->maxpay = u->maxpay;
+  out->alt = u->alt;
+  out->psize = u->psize;
+  out->speed = u->speed;
+  out->frame_index = u->frame_index;
+  out->format_index = u->format_index;
 }
 
 int uvc_packet_ns(const uvc_usb *u) {
