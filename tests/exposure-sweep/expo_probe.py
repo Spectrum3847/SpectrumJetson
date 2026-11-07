@@ -136,4 +136,5 @@ def main():
         out[cam] = o
     print(json.dumps(out))
 
-main()
+if __name__ == "__main__":
+    main()
