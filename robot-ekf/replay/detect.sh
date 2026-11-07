@@ -4,6 +4,7 @@
 # aarch64 Linux with g++ and libjpeg; on the Windows laptop through Docker:
 #   robot-ekf/replay/detect.sh docker DATA OUT      (DATA: <match>/<camera>/*.mjpeg, e.g. ~/build/txman1)
 #   robot-ekf/replay/detect.sh native DATA OUT      (inside the container, or on Linux)
+# ONLY=Q19 detects one match folder. replay/batch.sh runs every TXMAN1 match.
 # Calibrations are the cameras' deployed files (calibrations/SJ-TC01 orin-left, SJ-TC02 orin-right); CAL=-refit uses
 # the 2026-10-31 refits instead (TC02's deployed model has no valid ray near its edges). The fit uses
 # the live defaults (fast float path, lens LUT, warm start with 1 iteration, 2 cold iterations).
@@ -15,11 +16,15 @@ DATA=$(cd "${2:?DATA}" && pwd)
 mkdir -p "${3:?OUT}"
 OUT=$(cd "$3" && pwd)
 if [[ $MODE == docker ]]; then
+  # One image with the compiler, built once (DETECT_IMAGE to override).
+  IMAGE=${DETECT_IMAGE:-robot-ekf-detect:24.04}
+  if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    printf 'FROM ubuntu:24.04
+RUN apt-get update -qq && apt-get install -y -qq g++ libjpeg-turbo8-dev patch >/dev/null
+'       | docker build -q -t "$IMAGE" - >/dev/null
+  fi
   # MSYS_NO_PATHCONV: Git Bash would rewrite the container paths
-  MSYS_NO_PATHCONV=1 docker run --rm -v "$(cygpath -w "$REPO" 2>/dev/null || echo "$REPO"):/repo" \
-    -v "$(cygpath -w "$DATA" 2>/dev/null || echo "$DATA"):/data:ro" -v "$(cygpath -w "$OUT" 2>/dev/null || echo "$OUT"):/out" \
-    -e CAL="${CAL:-}" ubuntu:24.04 bash -c "apt-get update -qq >/dev/null && apt-get install -y -qq g++ libjpeg-turbo8-dev patch >/dev/null \
-      && bash /repo/robot-ekf/replay/detect.sh native /data /out"
+  MSYS_NO_PATHCONV=1 docker run --rm -v "$(cygpath -w "$REPO" 2>/dev/null || echo "$REPO"):/repo"     -v "$(cygpath -w "$DATA" 2>/dev/null || echo "$DATA"):/data:ro" -v "$(cygpath -w "$OUT" 2>/dev/null || echo "$OUT"):/out"     -e CAL="${CAL:-}" -e ONLY="${ONLY:-}" "$IMAGE" bash /repo/robot-ekf/replay/detect.sh native /data /out
   exit
 fi
 B=$OUT/build
@@ -35,6 +40,7 @@ g++ "${CF[@]}" -std=gnu++2b -I"$S/src" -I"$B/napa-src" "$S/tools/tagfit_bench.cc
 declare -A CALS=([orin-left]=SJ-TC01-1280x800${CAL:-}.json [orin-right]=SJ-TC02-1280x800${CAL:-}.json)
 for m in "$DATA"/*/; do
   match=$(basename "$m")
+  [[ -z ${ONLY:-} || $match == "$ONLY" ]] || continue
   for cam in orin-left orin-right; do
     for f in "$m$cam"/*.mjpeg; do
       [[ -f $f ]] || continue

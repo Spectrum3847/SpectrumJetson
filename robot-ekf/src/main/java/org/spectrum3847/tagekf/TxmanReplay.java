@@ -9,6 +9,7 @@ import frc.spectrumLib.localization.TagSighting;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -208,8 +209,10 @@ public final class TxmanReplay {
                     if (line.startsWith("#")) {
                         continue;
                     }
-                    String[] f = line.split(",");
-                    robotT.put(Integer.parseInt(f[0]), Long.parseLong(f[6]) * 1e-6);
+                    String[] f = line.split(",", -1);
+                    if (f.length > 6 && !f[6].isBlank()) { // blank: no robot time sync yet
+                        robotT.put(Integer.parseInt(f[0]), Long.parseLong(f[6].trim()) * 1e-6);
+                    }
                 }
                 Map<Integer, List<Det>> byFrame = new LinkedHashMap<>();
                 for (String line : Files.readAllLines(df)) {
@@ -219,7 +222,8 @@ public final class TxmanReplay {
                     String[] f = line.split(",");
                     double[] v = new double[f.length];
                     for (int i = 0; i < f.length; i++) {
-                        v[i] = Double.parseDouble(f[i]);
+                        // tagfit_bench prints C's "-nan"/"nan" for a pose it could not solve
+                        v[i] = f[i].trim().toLowerCase(Locale.ROOT).endsWith("nan") ? Double.NaN : Double.parseDouble(f[i]);
                     }
                     byFrame.computeIfAbsent((int) v[0], k -> new ArrayList<>())
                             .add(
@@ -259,7 +263,8 @@ public final class TxmanReplay {
      * @param timeOffset added to every frame's capture time, s
      * @param adaptive self-checking uncertainty as on the robot (setAdaptive(10, 1))
      * @param mountAtCapture MountEstimator compares corners with the pose at the frame's capture time
-     *     (smoothedAt) instead of the newest pose (the robot today)
+     *     (smoothedAt), as the robot does since 2026-FM-SystemCore aeca58c; false passes the newest pose
+     *     (getPose), the robot before it ({@code *-newest})
      */
     record Variant(
             String name,
@@ -274,7 +279,7 @@ public final class TxmanReplay {
             boolean mountAtCapture) {
         Variant(String name, boolean fit, double maxCell, double cornerPx, Noise noise, double mountTau, boolean cad,
                 double timeOffset, boolean adaptive) {
-            this(name, fit, maxCell, cornerPx, noise, mountTau, cad, timeOffset, adaptive, false);
+            this(name, fit, maxCell, cornerPx, noise, mountTau, cad, timeOffset, adaptive, true);
         }
 
         Variant with(String n, Noise nz) {
@@ -298,12 +303,16 @@ public final class TxmanReplay {
 
     static Map<String, Variant> variants() {
         Map<String, Variant> v = new LinkedHashMap<>();
-        // The robot today (tagekf-replay-tuner): NAPA corners, as-built noise, mounts corrected online.
+        // The robot today (tagekf-replay-tuner aeca58c): as-built noise, mounts corrected online from the pose at
+        // capture time; napa: NAPA's corners (PhotonVision's fit off), fit: the full-tag fit's (on).
         Variant robot = new Variant("napa", false, 0, 0, NEW, 2, false, 0, true);
         Variant fit = new Variant("fit", true, 0, 0, NEW, 2, false, 0, true);
         v.put("old-noise", new Variant("old-noise", false, 0, 0, OLD, 2, false, 0, true));
         v.put("napa", robot);
         v.put("fit", fit);
+        // Before aeca58c: MountEstimator fed the newest pose.
+        v.put("napa-newest", new Variant("napa-newest", false, 0, 0, NEW, 2, false, 0, true, false));
+        v.put("fit-newest", new Variant("fit-newest", true, 0, 0, NEW, 2, false, 0, true, false));
         // a. corner reprojection instead of bearing and range
         for (double px : new double[] {0.1, 1, 4, 8, 16}) {
             String n = "a-corners-" + px + "px";
@@ -323,6 +332,8 @@ public final class TxmanReplay {
         v.put("c-cad-fixed", new Variant("c-cad-fixed", true, 0, 0, NEW, 0, true, 0, true));
         v.put("c-cad-online", new Variant("c-cad-online", true, 0, 0, NEW, 2, true, 0, true));
         v.put("c-mount-at-capture", new Variant("c-mount-at-capture", true, 0, 0, NEW, 2, false, 0, true, true));
+        v.put("c-bearing-0.1-newest", new Variant("c-bearing-0.1-newest", true, 0, 0,
+                noise(NEW, 0.1, 0.005, 0.005, 0.000625), 2, false, 0, true, false));
         v.put("c-cad-at-capture", new Variant("c-cad-at-capture", true, 0, 0, NEW, 2, true, 0, true, true));
         for (double deg : new double[] {0.1, 0.15, 0.5, 1.0}) {
             v.put("c-bearing-" + deg, fit.with("c-bearing-" + deg, noise(NEW, deg, 0.005, 0.005, 0.000625)));
@@ -363,8 +374,10 @@ public final class TxmanReplay {
         final List<Double> heading = new ArrayList<>();
         double jump2;
         long jumps;
+        long relocalizations;
 
         void add(Score o) {
+            relocalizations += o.relocalizations;
             err.addAll(o.err);
             mt1.addAll(o.mt1);
             nisSum += o.nisSum;
@@ -405,6 +418,15 @@ public final class TxmanReplay {
         }
         double[] a = v.stream().mapToDouble(Double::doubleValue).sorted().toArray();
         return a[(int) Math.min(a.length - 1, Math.round(p * (a.length - 1)))];
+    }
+
+    static boolean finite(double[] a) {
+        for (double x : a) {
+            if (!Double.isFinite(x)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** OpenCV camera frame (x right, y down, z out) to WPILib's (x out, y left, z up). */
@@ -496,6 +518,9 @@ public final class TxmanReplay {
                         Pose3d tag = layout.get(d.id());
                         if (tag == null) {
                             continue;
+                        }
+                        if (!finite(d.tNapa()) || !finite(d.tFit())) {
+                            continue; // no pose for this sighting (counted by neither variant)
                         }
                         boolean useFit = v.fit() && d.fitOk() && (v.maxCell() <= 0 || d.cell() <= v.maxCell());
                         sc.tags++;
@@ -616,7 +641,69 @@ public final class TxmanReplay {
                 }
             }
         }
+        sc.relocalizations = ekf.getRelocalizations();
         return sc;
+    }
+
+    static final String HEADER =
+            String.format(
+                    "%-26s %7s %7s %6s | %7s %7s %6s %7s %5s | %7s %6s %6s | %9s %5s",
+                    "variant", "ho p50", "ho p90", "NIS", "MT1 p50", "MT1 p90", "lost%", "head", "reloc", "jump mm",
+                    "acc%", "tags", "fit us/fr", "fit%");
+
+    static String row(String name, Score s, long frames) {
+        return String.format(
+                "%-26s %7.3f %7.3f %6.2f | %7.3f %7.3f %6.1f %7.2f %5d | %7.1f %6.1f %6d | %9.0f %5.0f",
+                name,
+                pct(s.err, 0.5),
+                pct(s.err, 0.9),
+                s.nisSum / Math.max(1, s.nisN),
+                pct(s.mt1, 0.5),
+                pct(s.mt1, 0.9),
+                100.0 * s.lost / Math.max(1, s.mt1.size()),
+                pct(s.heading, 0.5),
+                s.relocalizations,
+                1000 * Math.sqrt(s.jump2 / Math.max(1, s.jumps)),
+                100.0 * s.accepted / Math.max(1, s.accepted + s.rejected),
+                s.tags,
+                s.fitUs / Math.max(1, frames),
+                100.0 * s.fitted / Math.max(1, s.tags));
+    }
+
+    static final String CSV_HEADER =
+            "cal,variant,match,ho_p50_m,ho_p90_m,nis,mt1_p50_m,mt1_p90_m,lost_pct,heading_deg,relocalizations,"
+                    + "held_out_tags,mt1_samples";
+
+    static String csv(String label, String variant, String match, Score s) {
+        return String.format(
+                Locale.ROOT,
+                "%s,%s,%s,%.4f,%.4f,%.3f,%.4f,%.4f,%.2f,%.2f,%d,%d,%d",
+                label,
+                variant,
+                match,
+                pct(s.err, 0.5),
+                pct(s.err, 0.9),
+                s.nisSum / Math.max(1, s.nisN),
+                pct(s.mt1, 0.5),
+                pct(s.mt1, 0.9),
+                100.0 * s.lost / Math.max(1, s.mt1.size()),
+                pct(s.heading, 0.5),
+                s.relocalizations,
+                s.err.size(),
+                s.mt1.size());
+    }
+
+    /** Match names in a dets directory: the part of {@code <match>-orin-<side>-...dets.csv} before the camera. */
+    static List<String> allMatches(Path dets) throws IOException {
+        try (Stream<Path> s = Files.list(dets)) {
+            return s.map(p -> p.getFileName().toString())
+                    .filter(f -> f.endsWith(".dets.csv") && f.contains("-orin-"))
+                    .map(f -> f.substring(0, f.indexOf("-orin-")))
+                    .distinct()
+                    .sorted(Comparator.comparing((String n) -> n.charAt(0))
+                            .thenComparingInt(n -> Integer.parseInt(n.substring(1))))
+                    .toList();
+        }
     }
 
     public static void main(String[] args) throws IOException {
@@ -626,6 +713,9 @@ public final class TxmanReplay {
         String only = "";
         String matches = "Q17,Q24";
         String cal = "";
+        boolean perMatch = false;
+        Path csvOut = null;
+        String label = "";
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "--dets" -> dets = Path.of(args[++i]);
@@ -634,11 +724,15 @@ public final class TxmanReplay {
                 case "--variants" -> only = args[++i];
                 case "--matches" -> matches = args[++i];
                 case "--cal" -> cal = args[++i];
+                case "--per-match" -> perMatch = true;
+                case "--csv" -> csvOut = Path.of(args[++i]);
+                case "--label" -> label = args[++i];
                 default -> throw new IllegalArgumentException("unknown " + args[i]);
             }
         }
         if (dets == null || logs == null) {
-            System.err.println("usage: TxmanReplay --dets DIR --logs DIR [--cal -refit] [--repo DIR] [--variants a,b] [--matches Q17,Q24]");
+            System.err.println("usage: TxmanReplay --dets DIR --logs DIR [--cal -refit] [--repo DIR] [--variants a,b]"
+                    + " [--matches Q17,Q24|all] [--per-match] [--csv FILE --label NAME]");
             System.exit(2);
         }
         Map<Integer, Pose3d> layout = Json.layout(repo.resolve("tools/fieldcal/layouts/2026-rebuilt-andymark.json"));
@@ -647,7 +741,11 @@ public final class TxmanReplay {
             Json.calibration(repo.resolve("calibrations/SJ-TC02-1280x800" + cal + ".json"))
         };
         List<Match> ms = new ArrayList<>();
-        for (String n : matches.split(",")) {
+        if (label.isEmpty()) {
+            label = cal.isEmpty() ? "deployed" : cal.substring(1);
+        }
+        List<String> names = matches.equals("all") ? allMatches(dets) : List.of(matches.split(","));
+        for (String n : names) {
             Match m = load(n, dets, logs);
             long frames = m.events().stream().filter(e -> e instanceof Frame).count();
             long odom = m.events().stream().filter(e -> e instanceof Odom).count();
@@ -655,21 +753,8 @@ public final class TxmanReplay {
                     "%s: %d frames with tags over %.1f s, %d odometry samples%n", n, frames, m.end() - m.start(), odom);
             ms.add(m);
         }
-        System.out.printf(
-                "%-24s %7s %7s %6s | %7s %7s %6s %7s | %7s %6s %6s | %9s %5s%n",
-                "variant",
-                "ho p50",
-                "ho p90",
-                "NIS",
-                "MT1 p50",
-                "MT1 p90",
-                "lost%",
-                "head",
-                "jump mm",
-                "acc%",
-                "tags",
-                "fit us/fr",
-                "fit%");
+        System.out.println(HEADER);
+        List<String> csvRows = new ArrayList<>();
         List<String> want = only.isEmpty() ? List.of() : List.of(only.split(","));
         for (Variant v : variants().values()) {
             if (!want.isEmpty() && !want.contains(v.name())) {
@@ -677,24 +762,17 @@ public final class TxmanReplay {
             }
             Score total = new Score();
             for (Match m : ms) {
-                total.add(run(m, v, layout, calib));
+                Score one = run(m, v, layout, calib);
+                total.add(one);
+                if (perMatch) {
+                    long fr = m.events().stream().filter(e -> e instanceof Frame).count();
+                    System.out.println(row("  " + m.name(), one, fr));
+                }
+                csvRows.add(csv(label, v.name(), m.name(), one));
             }
+            csvRows.add(csv(label, v.name(), "pooled", total));
             long frames = ms.stream().mapToLong(m -> m.events().stream().filter(e -> e instanceof Frame).count()).sum();
-            System.out.printf(
-                    "%-24s %7.3f %7.3f %6.2f | %7.3f %7.3f %6.1f %7.2f | %7.1f %6.1f %6d | %9.0f %5.0f%n",
-                    v.name(),
-                    pct(total.err, 0.5),
-                    pct(total.err, 0.9),
-                    total.nisSum / Math.max(1, total.nisN),
-                    pct(total.mt1, 0.5),
-                    pct(total.mt1, 0.9),
-                    100.0 * total.lost / Math.max(1, total.mt1.size()),
-                    pct(total.heading, 0.5),
-                    1000 * Math.sqrt(total.jump2 / Math.max(1, total.jumps)),
-                    100.0 * total.accepted / Math.max(1, total.accepted + total.rejected),
-                    total.tags,
-                    total.fitUs / frames,
-                    100.0 * total.fitted / Math.max(1, total.tags));
+            System.out.println(row(v.name() + (perMatch ? " (pooled)" : ""), total, frames));
             for (var d : diag.entrySet()) {
                 List<double[]> l = d.getValue();
                 List<Double> du = l.stream().map(x -> x[0]).toList();
@@ -713,6 +791,14 @@ public final class TxmanReplay {
                         "   (h) tags outside 0.2-8 m: %d of %d (%.1f%%), %.0f us of fit on them%n",
                         total.outOfRange, total.tags, 100.0 * total.outOfRange / total.tags, total.outOfRangeUs);
             }
+        }
+        if (csvOut != null) {
+            List<String> lines = new ArrayList<>();
+            if (!Files.exists(csvOut)) {
+                lines.add(CSV_HEADER);
+            }
+            lines.addAll(csvRows);
+            Files.write(csvOut, lines, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         }
     }
 }
