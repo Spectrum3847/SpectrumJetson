@@ -162,6 +162,23 @@ Setup:
   failures.
 - **dmesg:** no undervoltage or hung-task messages.
 
+### PhotonVision A/B at the stored min tag 22, merged library (sc/mjpeg-napa 9d16b16)
+
+On by default now. This is the installed library, with PhotonVision's stored `napaMinTagPx` set to 22 for both
+cameras (permanent; database backed up first). Off = a temporary `SPECTRUM_TAGFIT=0` drop-in. 40 s each, both
+cameras native at 120 fps.
+
+| camera | tagfit | capture → received p50 / p95 / p99 ms | results in 40 s (all with tags) | decode failures | corner std px |
+|---|---|---|---|---|---|
+| Thriftiest | 0 | 9.853 / 10.956 / 11.443 | 4852 | 0 | 0.12–0.24 |
+| Thriftiest | on | 10.169 / 11.294 / 11.897 | 4851 | 0 | 0.07–0.09 |
+| Swyft | 0 | 10.101 / 11.007 / 11.298 | 4798 | 0 | 0.59–0.81 |
+| Swyft | on | 10.546 / 11.178 / 11.458 | 4799 | 0 | 0.14–0.19 |
+
+- **PhotonVision CPU:** 70.8% → 77.5% of one core.
+- **tagfit:** Thriftiest 140 µs per tag, Swyft 98 µs; over 99% of fits started warm.
+- **dmesg:** clean.
+
 ### Still to do
 
 - Camera calibration is deferred. As section 0 notes, the reprojection error and ambiguity gates should
