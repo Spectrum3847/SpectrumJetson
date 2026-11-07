@@ -1,0 +1,14 @@
+[Unit]
+Description=Steer eth0's PTP hardware clock from the system clock (Spectrum, scripts/systemcore/ptp)
+After=sc-ptp4l.service
+Wants=sc-ptp4l.service
+
+[Service]
+# Master side: the system clock is the reference and the NIC clock follows it (no -w: on a master
+# ptp4l never reports "synced", and with eth0 unplugged its port stays faulty).
+ExecStart=/usr/local/sbin/phc2sys -s CLOCK_REALTIME -c eth0 -O 0 -m -u 60
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
