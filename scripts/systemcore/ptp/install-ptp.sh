@@ -6,7 +6,7 @@ set -eu
 here=$(dirname "$0")
 bin=${1:-$here}
 for b in ptp4l phc2sys pmc phc_ctl; do
-  if [ -f "$bin/$b" ] && [ "$bin/$b" -ef "/usr/local/sbin/$b" ] 2>/dev/null; then :; elif [ -f "$bin/$b" ]; then install -m755 "$bin/$b" /usr/local/sbin/; fi
+  if [ -f "$bin/$b" ] && [ "$(readlink -f "$bin/$b")" != "/usr/local/sbin/$b" ]; then install -m755 "$bin/$b" /usr/local/sbin/; fi
   command -v "/usr/local/sbin/$b" >/dev/null || { echo "missing $b"; exit 1; }
 done
 mkdir -p /etc/sc-ptp

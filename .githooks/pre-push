@@ -3,6 +3,10 @@
 # Enabled per clone by: git config core.hooksPath .githooks
 # Lints the commit being pushed, not the working tree, so other worktrees' edits don't count.
 set -uo pipefail
+# Same shellcheck version as CI (scripts/ci/lint.sh refuses any other).
+for c in "$HOME/bin/shellcheck-0.9.0.exe" "$HOME/bin/shellcheck-0.9.0" /usr/bin/shellcheck; do
+  if [[ -x $c ]] && "$c" --version 2>/dev/null | grep -q "version: 0.9.0"; then export SHELLCHECK=$c; break; fi
+done
 z=0000000000000000000000000000000000000000
 while read -r _ lsha _ _; do
   [[ $lsha == "$z" ]] && continue
