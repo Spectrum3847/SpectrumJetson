@@ -57,7 +57,7 @@ elif [[ $UVC == 1 ]]; then
   echo "no $UVC_KO (scripts/systemcore/build-uvcvideo.sh): boot-time uvcvideo not installed" >&2
   UVC=0
 fi
-ssh "$HOST" ENABLE="${ENABLE:-0}" NATIVE="${NATIVE:-1}" UVC="$UVC" KEEP_DROPIN="${KEEP_DROPIN:-0}" GOVERNOR="${GOVERNOR:-1}" AOT="${AOT:-1}" AOT_TRAIN_S="${AOT_TRAIN_S:-45}" 'bash -s' <<'REMOTE'
+ssh "$HOST" ENABLE="${ENABLE:-0}" NATIVE="${NATIVE:-1}" UVC="$UVC" KEEP_DROPIN="${KEEP_DROPIN:-0}" GOVERNOR="${GOVERNOR:-1}" TZ_NAME="${TZ_NAME:-America/Chicago}" AOT="${AOT:-1}" AOT_TRAIN_S="${AOT_TRAIN_S:-45}" 'bash -s' <<'REMOTE'
 set -euo pipefail
 S=/dev/shm/pv-install
 TRAIN_DROPIN=/etc/systemd/system/photonvision.service.d/zz-aot-train.conf
@@ -167,6 +167,15 @@ fi
 if [[ ${SDQUIET:-1} == 1 ]]; then
   sed -i 's/\r$//' "$S/sd-quiet.sh"
   sudo sh "$S/sd-quiet.sh"
+fi
+# Time zone America/Chicago (TZ_NAME=... overrides), like the robot's build stamps and the Driver Station, so logs
+# read in local time. Display only. LimelightOS has no timedated, so /etc/localtime is linked directly.
+tz=${TZ_NAME:-America/Chicago}
+if [[ -f /usr/share/zoneinfo/$tz ]]; then
+  sudo ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime
+  echo "time zone: $tz ($(date +%Z))"
+else
+  echo "time zone: /usr/share/zoneinfo/$tz missing, left as $(readlink /etc/localtime)"
 fi
 # Native cameras (docs/SYSTEMCORE-NATIVE-BACKEND.md) are on by default for verified cameras; NATIVE=0 turns them off
 # with its own drop-in (20-native-camera.conf: SPECTRUM_NATIVE_CAMERA=0). Older installs' 20-native-camera.conf

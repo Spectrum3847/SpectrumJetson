@@ -72,6 +72,9 @@
 #                               (team100/all26 config_thrifty_mjpeg.py extra_delay_ms), a starting
 #                               value until our own spin test. CAMERA_DELAY_US=N overrides it.
 #                               Applies at PhotonVision's next start (no restart here).
+#  18. Chicago time           - time zone America/Chicago (TZ=... overrides), like the robot's
+#                               build stamps and the Driver Station: logs read in local time.
+#                               Display only; the clock itself is unchanged.
 #
 # Usage: [FAN=quiet|full|off] [RT=on|off] [CAMERA_DELAY_US=N] 09-robot-tuning.sh [--undo]
 #        (no FAN/RT: keep the saved choice; no CAMERA_DELAY_US: 2500)
@@ -525,6 +528,9 @@ else
 fi
 
 echo
+echo "==> 18. Time zone ${TZ_NAME:=${TZ:-America/Chicago}}"
+sudo timedatectl set-timezone "$TZ_NAME"
+
 echo "Summary:"
 # (|| true: systemctl is-enabled exits non-zero for disabled/masked units, which is the goal.)
 echo "  apt timers: $(systemctl is-enabled apt-daily.timer apt-daily-upgrade.timer 2>&1 | paste -sd' ' || true)"
@@ -549,4 +555,5 @@ echo "  low-jitter cameras (spectrum-rt): $(cat /etc/spectrum-rt 2>/dev/null || 
 echo "  clocks while disabled (spectrum-clocks): $(cat /etc/spectrum-clocks-mode 2>/dev/null || echo auto)"
 echo "  photonvision: Restart=$(systemctl show photonvision -p Restart --value), $(systemctl show photonvision -p Environment --value | tr ' ' '\n' | grep -c OPENCV_THREAD_POOL) OpenCV pool settings"
 echo "  camera delay: $(systemctl show photonvision -p Environment --value | tr ' ' '\n' | sed -n 's/^SPECTRUM_CAMERA_DELAY_US=//p') us"
+echo "  time zone: $(timedatectl show -p Timezone --value)"
 echo "Reboot to apply the boot changes: sudo reboot"
