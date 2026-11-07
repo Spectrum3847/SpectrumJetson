@@ -20,4 +20,4 @@ for s in "$@"; do
   echo "{\"T\":[$1,$2],\"S\":[$3,$4],\"pv_cpu\":$c,\"probe\":$p,\"imgT\":$gt,\"imgS\":$gs}" | tee -a $out
 done
 if [ "${KEEP:-0}" != 1 ]; then setc $T exposure_time_absolute 12; setc $T gain 128; setc $S exposure_time_absolute 5; setc $S gain 96; fi
-echo restored: T $(get $T exposure_time_absolute)/$(get $T gain) S $(get $S exposure_time_absolute)/$(get $S gain)
+echo "restored: T $(get $T exposure_time_absolute)/$(get $T gain) S $(get $S exposure_time_absolute)/$(get $S gain)"
