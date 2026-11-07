@@ -7,6 +7,8 @@
 //   tagfit_bench replay FILE.mjpeg CALIB.json [--max N] [--min-tag 16]
 //       A recorded session (Rewind .mjpeg): per tag ID, frame-to-frame jitter (std) of corners, range and
 //       rotation, ambiguity and reprojection error, fit off vs on. Meant for static captures.
+//       --dump FILE.csv also writes every sighting (frame index in the file, id, NAPA and fitted corners, both
+//       IPPE poses) for robot-ekf/replay (the TagEkf replay on TXMAN1).
 //
 // Common: [--iters 2] [--no-bias] [--min-cell 2] [--max-cell 0] [--no-cam] (fit in raw pixels) [--pose] (6-DoF fit)
 //         [--sample-px 3] [--samples-max 3]. Build: native/sc-vision/build.sh; run on the SystemCore.
@@ -162,7 +164,7 @@ struct Opt {
   bool use_cam = true;
   int n = 2000, nseeds = 1, seed = 1, jpeg = 85, maxf = 1000000, min_tag = 16;
   double noise = 2.5, blur = 0.8, bloom = 0, gamma = 1;
-  std::string cache;
+  std::string cache, dump;
 };
 
 // Pose of one corner set: best/alt, ambiguity, reprojection error.
@@ -460,8 +462,13 @@ static int replay(const char *path, const cam_model &cam, const Opt &o) {
   napa_params np{o.min_tag, 1, 20, 22, 25};
   std::vector<uint8_t> img, cells;
   std::map<int, Acc> acc;
-  int frames = 0;
+  int frames = 0, findex = -1;
+  FILE *dump = o.dump.empty() ? nullptr : fopen(o.dump.c_str(), "w");
+  if (dump)
+    fprintf(dump, "# frame,id,cell_px,fit_ok,fit_us,warm,napa_u0,v0,u1,v1,u2,v2,u3,v3,fit_u0,v0,u1,v1,u2,v2,u3,v3,"
+                  "napa_tx,ty,tz,fit_tx,ty,tz,napa_err,fit_err,napa_amb,fit_amb  (OpenCV camera frame, m)\n");
   for (auto &[off, len] : fr) {
+    findex++;
     if (frames >= o.maxf) break;
     int w, h;
     if (!jpeg_gray(all.data() + off, len, img, w, h)) continue;
@@ -491,6 +498,15 @@ static int replay(const char *path, const cam_model &cam, const Opt &o) {
         A.okdiff += rr.ok != r.ok;
       }
       PoseOut p0 = pose_of(cam, dd[i].corners), p1 = pose_of(cam, r.corners);
+      if (dump && p0.ok) {
+        const PoseOut &q = p1.ok && r.ok ? p1 : p0;
+        const double *fc = r.ok ? r.corners : dd[i].corners;
+        fprintf(dump, "%d,%d,%.3f,%d,%.1f,%d", findex, dd[i].id, r.cell_px, r.ok, us, r.warm);
+        for (int k = 0; k < 8; k++) fprintf(dump, ",%.4f", dd[i].corners[k]);
+        for (int k = 0; k < 8; k++) fprintf(dump, ",%.4f", fc[k]);
+        fprintf(dump, ",%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.4f\n", p0.b.t[0], p0.b.t[1], p0.b.t[2], q.b.t[0],
+                q.b.t[1], q.b.t[2], p0.b.err, q.b.err, p0.amb, q.amb);
+      }
       if (!p0.ok || !p1.ok) continue;
       A.n++;
       A.ok += r.ok;
@@ -549,6 +565,7 @@ static int replay(const char *path, const cam_model &cam, const Opt &o) {
            nn, nw, median(ur), median(u), pct(ur, 0.9), pct(u, 0.9), median(d), pct(d, 0.9), pct(d, 0.99),
            d.empty() ? NAN : *std::max_element(d.begin(), d.end()), od);
   }
+  if (dump) fclose(dump);
   napa_destroy(det);
   return 0;
 }
@@ -604,6 +621,7 @@ int main(int argc, char **argv) {
     else if (a == "--seq") o.seq = atoi(nx());
     else if (a == "--warm-iters") o.fp.warm_iters = atoi(nx());
     else if (a == "--no-cmp") o.cmp = false;
+    else if (a == "--dump") o.dump = nx();
     else return fprintf(stderr, "unknown option %s\n", a.c_str()), 2;
   }
   cam_model cam;

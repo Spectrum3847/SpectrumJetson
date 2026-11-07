@@ -1,0 +1,57 @@
+// robot-ekf: the robot's TagEkf (2026-FM-SystemCore, see SOURCE) as a stand-alone WPILib Java library, plus
+//   replay   TXMAN1 frames -> NAPA (+ full-tag fit) -> TagEkf, variants side by side (./gradlew replay)
+//   bench    live on the SystemCore / Pi: PhotonVision over NT4 -> TagEkf, stationary (./gradlew benchJar)
+// Same WPILib (2027.0.0-alpha-8) and Java (25) as the robot, so the EKF sources copy back unchanged.
+plugins {
+    id 'java'
+}
+
+def WPILIB = '2027.0.0-alpha-8'
+
+java {
+    toolchain { languageVersion = JavaLanguageVersion.of(25) }
+}
+
+repositories {
+    maven { url = 'https://frcmaven.wpi.edu/artifactory/release' }
+    mavenCentral()
+}
+
+dependencies {
+    implementation "org.wpilib.wpimath:wpimath-java:${WPILIB}"
+    implementation "org.wpilib.wpiutil:wpiutil-java:${WPILIB}"
+    implementation "org.wpilib.wpiunits:wpiunits-java:${WPILIB}"
+    // WPILib's poms list no dependencies; these are the ones the robot's classpath carries.
+    implementation 'us.hebi.quickbuf:quickbuf-runtime:1.4'
+    implementation 'org.ejml:ejml-simple:0.46.0'
+    // The bench app runs against the robot's own WPILib jars and natives on the target (see bench.sh).
+    compileOnly "org.wpilib.ntcore:ntcore-java:${WPILIB}"
+    testImplementation platform('org.junit:junit-bom:5.12.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs += ['-Xlint:all,-serial,-processing']
+}
+
+test {
+    useJUnitPlatform()
+}
+
+// ./gradlew replay -Pargs="--dets DIR --logs DIR --layout FILE [--variants a,b]"
+tasks.register('replay', JavaExec) {
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'org.spectrum3847.tagekf.TxmanReplay'
+    maxHeapSize = '2g'
+    systemProperty 'trace', project.findProperty('trace') ?: ''
+    systemProperty 'diag', project.findProperty('diag') ?: 'false'
+    args = (project.findProperty('args') ?: '').toString().split(' ').findAll { it }
+}
+
+// Thin jar for the bench: no WPILib inside (the target's /home/systemcore/wpilib/classpath has it).
+tasks.register('benchJar', Jar) {
+    archiveBaseName = 'tagekf-bench'
+    from sourceSets.main.output
+}
