@@ -5,7 +5,7 @@
 # a temporary systemd drop-in (90-tagekf-ab.conf), PhotonVision restart, 25 s warm-up, BenchEkf for SECONDS (default
 # 30) after a 5 s survey, PhotonVision's CPU over the run. The PV database is backed up first and not changed.
 # Afterwards: drop-in removed, PhotonVision restarted on its defaults (tagfit on), exposures set back by camera name
-# (Thriftiest 2, Swyft 10). Output: /dev/shm/tagekf/ab-<stamp>/<condition>/.
+# (Thriftiest 12, Swyft 5; tests/exposure-sweep). Output: /dev/shm/tagekf/ab-<stamp>/<condition>/.
 set -u
 SECS=${1:-30}
 O=/dev/shm/tagekf/ab-$(date +%Y%m%d-%H%M%S); mkdir -p "$O"
@@ -36,5 +36,5 @@ for cond in off maxcell4 on; do
   echo "== $cond $(cat "$O/$cond.env")"; grep -E "pose over|accepted|PV CPU|:[0-9]+ " "$O/$cond.txt"
 done
 sudo systemctl daemon-reload
-for d in /dev/video0 /dev/video1 /dev/video2 /dev/video3; do c=$(v4l2-ctl -d $d --info 2>/dev/null | grep "Card type"); case "$c" in *Thrifty*) v4l2-ctl -d $d -c exposure_time_absolute=2 2>/dev/null && echo "$d thrifty 2";; *"USB Camera"*) v4l2-ctl -d $d -c exposure_time_absolute=10 2>/dev/null && echo "$d swyft 10";; esac; done
+for d in /dev/video0 /dev/video1 /dev/video2 /dev/video3; do c=$(v4l2-ctl -d $d --info 2>/dev/null | grep "Card type"); case "$c" in *Thrifty*) v4l2-ctl -d $d -c exposure_time_absolute=12 2>/dev/null && echo "$d thrifty 12";; *"USB Camera"*) v4l2-ctl -d $d -c exposure_time_absolute=5 2>/dev/null && echo "$d swyft 5";; esac; done
 echo "done: $O"

@@ -6,7 +6,7 @@
 # The off condition uses a temporary systemd drop-in (90-tagfit-ab.conf), removed afterwards. Each camera is measured
 # with nt_probe (capture -> received latency, results, health), PhotonVision's CPU from /proc, and the journal is kept.
 # Output in /dev/shm/tfab/pv. Afterwards PhotonVision runs again with its default (tagfit on); exposures are set back
-# by camera name (Thriftiest 2, Swyft 10).
+# by camera name (Thriftiest 12, Swyft 5; tests/exposure-sweep).
 set -u
 cpu() { python3 -c "import os,sys,time;s=open('/proc/$1/stat').read().rsplit(')',1)[1].split();print((int(s[11])+int(s[12]))/os.sysconf('SC_CLK_TCK'),time.time())"; }
 O=/dev/shm/tfab/pv; mkdir -p "$O"; cd "$O" || exit 1
@@ -37,5 +37,5 @@ for cond in off on; do
 done
 # PhotonVision stays up from the last (default) condition; the drop-in is already gone
 sudo systemctl daemon-reload
-for d in /dev/video0 /dev/video1 /dev/video2 /dev/video3; do c=$(v4l2-ctl -d $d --info 2>/dev/null | grep "Card type"); case "$c" in *Thrifty*) v4l2-ctl -d $d -c exposure_time_absolute=2 2>/dev/null && echo "$d thrifty 2";; *"USB Camera"*) v4l2-ctl -d $d -c exposure_time_absolute=10 2>/dev/null && echo "$d swyft 10";; esac; done
+for d in /dev/video0 /dev/video1 /dev/video2 /dev/video3; do c=$(v4l2-ctl -d $d --info 2>/dev/null | grep "Card type"); case "$c" in *Thrifty*) v4l2-ctl -d $d -c exposure_time_absolute=12 2>/dev/null && echo "$d thrifty 12";; *"USB Camera"*) v4l2-ctl -d $d -c exposure_time_absolute=5 2>/dev/null && echo "$d swyft 5";; esac; done
 echo "done"
