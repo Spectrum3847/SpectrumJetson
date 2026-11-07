@@ -21,7 +21,7 @@
 # cameras attached, as configured) recording the classes it loads and its method profiles, then the cache is
 # built from that for this jar and JVM and kept next to the jar (~45 MB). run.sh uses it when it matches the jar
 # and JVM and starts without it otherwise, saying which in the journal (docs/PHOTONVISION-PERF.md, "AOT cache").
-# The service is NOT enabled at boot unless ENABLE=1. It runs Java 25 (the image's /usr/bin/java) as root with
+# The service is enabled at boot (ENABLE=0 disables it). It runs Java 25 (the image's /usr/bin/java) as root with
 # -n (PhotonVision never touches the SystemCore's networking) and serves its UI on port 5880 (5800 belongs to
 # Limelight's visionserver). It Conflicts= limelight_visionserver: both want the camera, so starting one stops
 # the other. Robot code (robot.service), NetworkTables (5810) and the other Limelight services are untouched.
@@ -57,7 +57,7 @@ elif [[ $UVC == 1 ]]; then
   echo "no $UVC_KO (scripts/systemcore/build-uvcvideo.sh): boot-time uvcvideo not installed" >&2
   UVC=0
 fi
-ssh "$HOST" ENABLE="${ENABLE:-0}" NATIVE="${NATIVE:-1}" UVC="$UVC" KEEP_DROPIN="${KEEP_DROPIN:-0}" GOVERNOR="${GOVERNOR:-1}" TZ_NAME="${TZ_NAME:-America/Chicago}" AOT="${AOT:-1}" AOT_TRAIN_S="${AOT_TRAIN_S:-45}" 'bash -s' <<'REMOTE'
+ssh "$HOST" ENABLE="${ENABLE:-1}" NATIVE="${NATIVE:-1}" UVC="$UVC" KEEP_DROPIN="${KEEP_DROPIN:-0}" GOVERNOR="${GOVERNOR:-1}" TZ_NAME="${TZ_NAME:-America/Chicago}" AOT="${AOT:-1}" AOT_TRAIN_S="${AOT_TRAIN_S:-45}" 'bash -s' <<'REMOTE'
 set -euo pipefail
 S=/dev/shm/pv-install
 TRAIN_DROPIN=/etc/systemd/system/photonvision.service.d/zz-aot-train.conf
@@ -222,7 +222,7 @@ if [[ ${AOT:-1} == 1 ]]; then
     tail -5 "$S/aot-create.log" 2>/dev/null >&2 || true
   fi
 fi
-if [[ ${ENABLE:-0} == 1 ]]; then sudo systemctl enable photonvision; fi
+if [[ ${ENABLE:-1} == 1 ]]; then sudo systemctl enable photonvision; else sudo systemctl disable photonvision; fi
 echo "installed: $(ls -la /opt/photonvision/photonvision.jar /opt/photonvision/lib/*.so | awk '{print $5, $9}' | tr '\n' ' ')"
 echo "start with: sc-vision photonvision   (UI http://<systemcore>:5880)"
 REMOTE
