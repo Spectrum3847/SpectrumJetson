@@ -13,7 +13,8 @@ DB=/opt/photonvision/photonvision_config/photon.sqlite
 sudo cp "$DB" "$HOME/tagekf/photon.sqlite.bak-$(date +%Y%m%d-%H%M%S)"
 DROP=/etc/systemd/system/photonvision.service.d/90-tagekf-ab.conf
 W=/home/systemcore/wpilib
-CP=$(ls $W/classpath/*.jar | grep -v DIYsystemcore | tr '\n' :)
+CP=""
+for j in "$W"/classpath/*.jar; do [[ $j == *DIYsystemcore* ]] || CP="$CP$j:"; done
 cpu() { python3 -c "import os,time;s=open('/proc/$1/stat').read().rsplit(')',1)[1].split();print((int(s[11])+int(s[12]))/os.sysconf('SC_CLK_TCK'),time.time())"; }
 for cond in off maxcell4 on; do
   case $cond in
