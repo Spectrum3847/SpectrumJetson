@@ -21,6 +21,7 @@ struct uvc_usb {
   int fd;
   char sys[256];
   int vc_if, vs_if, alt, ep, psize, npk, nurbs;
+  int speed;  // link speed in Mb/s (sysfs): 480 high speed, 5000 SuperSpeed
   int detached[2];
   struct usbdevfs_urb *urb[MAX_URBS];
   uint8_t *buf[MAX_URBS];
@@ -193,6 +194,7 @@ uvc_usb *uvc_open(const uvc_config *cfg) {
     return NULL;
   }
   int bus = rd_dec(u->sys, "busnum"), dev = rd_dec(u->sys, "devnum");
+  u->speed = rd_dec(u->sys, "speed");
   char path[64];
   snprintf(path, sizeof path, "/dev/bus/usb/%03d/%03d", bus, dev);
   // descriptors: device descriptor (18 bytes) then the active configuration
@@ -210,7 +212,7 @@ uvc_usb *uvc_open(const uvc_config *cfg) {
   }
   // Parse: VC header (UVC version), MJPEG format/frame indices, streaming interface alt settings.
   int uvc_ver = 0x100, fmt_idx = -1, frm_idx = -1, cur_if = -1, cur_alt = -1, cur_sub_if_class = 0;
-  int alt_bytes[32] = {0}, alt_ep[32] = {0}, nalt = 0, in_mjpeg = 0;
+  int alt_bytes[32] = {0}, alt_ep[32] = {0}, nalt = 0, in_mjpeg = 0, last_ep_alt = -1;
   u->vc_if = -1;
   u->vs_if = -1;
   for (size_t i = 18; i + 2 <= dn && desc[i] >= 2; i += desc[i]) {
@@ -228,6 +230,13 @@ uvc_usb *uvc_open(const uvc_config *cfg) {
       int mps = p[4] | (p[5] << 8);
       alt_bytes[cur_alt] = (mps & 0x7ff) * (1 + ((mps >> 11) & 3));
       alt_ep[cur_alt] = p[2];
+      last_ep_alt = cur_alt;
+    } else if (type == 0x30 && len >= 6 && cur_sub_if_class == 2 && cur_if == u->vs_if && cur_alt == last_ep_alt) {
+      // SuperSpeed endpoint companion: an isochronous endpoint moves up to wBytesPerInterval per service interval
+      // (bursts of 1024 B packets; the ThriftyCam's alt 17: 33792 B), one UVC payload (one header) per interval.
+      // wMaxPacketSize alone (1024) would be 1/33 of it.
+      int bpi = p[4] | (p[5] << 8);
+      if (bpi > 0) alt_bytes[cur_alt] = bpi;
     } else if (type == 0x24 && cur_sub_if_class == 1 && len >= 5 && p[2] == 0x01) {
       uvc_ver = p[3] | (p[4] << 8);
     } else if (type == 0x24 && cur_sub_if_class == 2 && len >= 4) {
@@ -288,8 +297,11 @@ uvc_usb *uvc_open(const uvc_config *cfg) {
     uvc_close(u);
     return NULL;
   }
-  uint32_t maxpay;
+  uint32_t maxpay, got_interval;
   memcpy(&maxpay, pr + 22, 4);
+  memcpy(&got_interval, pr + 4, 4);
+  if (u->verbose && got_interval != interval)
+    fprintf(stderr, "uvc: asked for frame interval %u (100 ns), the camera chose %u\n", interval, got_interval);
   if (ctrl(u->fd, 0x21, 0x01, 0x0200, (uint16_t)u->vs_if, pr, (uint16_t)plen) < 0) {
     fprintf(stderr, "uvc: commit: %s\n", strerror(errno));
     uvc_close(u);
@@ -299,8 +311,10 @@ uvc_usb *uvc_open(const uvc_config *cfg) {
   if (alt < 0) {
     // The Thriftiest asks for 3060 B/microframe (the whole high-bandwidth isochronous budget of a USB 2 bus) but
     // sends ~1 KB/microframe; LimelightOS's uvcvideo caps compressed formats at 1600 (alt 8). Do the same, so a
-    // second camera can share the bus. -2: the camera's own request.
-    uint32_t want = (cfg->alt == -2 || maxpay < 1600) ? maxpay : 1600;
+    // second camera can share the bus. -2: the camera's own request. At SuperSpeed (the ThriftyCam on a blue port)
+    // the camera's own request too: it's alone on that bus (other cameras are on the USB 2 side), and it spreads a
+    // frame over the whole period sized to the bandwidth it asked for.
+    uint32_t want = (cfg->alt == -2 || maxpay < 1600 || u->speed >= 5000) ? maxpay : 1600;
     for (int a = 1; a < nalt; a++)
       if (alt_bytes[a] >= (int)want) {
         alt = a;
@@ -354,9 +368,9 @@ uvc_usb *uvc_open(const uvc_config *cfg) {
   }
   if (u->verbose)
     fprintf(stderr,
-            "uvc: %s, UVC %x, MJPEG format %d frame %d (%dx%d @ %d), max payload %u -> alt %d (%d B/uframe), "
+            "uvc: %s, %d Mb/s, UVC %x, MJPEG format %d frame %d (%dx%d @ %d), max payload %u -> alt %d (%d B/interval), "
             "%d URBs x %d packets, %s buffers\n",
-            path, uvc_ver, fmt_idx, frm_idx, cfg->width, cfg->height, cfg->fps, maxpay, alt, u->psize, u->nurbs,
+            path, u->speed, uvc_ver, fmt_idx, frm_idx, cfg->width, cfg->height, cfg->fps, maxpay, alt, u->psize, u->nurbs,
             u->npk, u->mmapped ? "mmap'd" : "heap");
   return u;
 }

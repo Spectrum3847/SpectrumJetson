@@ -335,3 +335,40 @@ A native camera now recovers by itself from a USB reset, a uvcvideo rebind, a de
 - Root causes and the full table are in `tests/camera-reset/README.md`.
 
 The cscore path is unchanged. `USBFrameProvider`'s StuckCameraWatchdog still reconnects it, then escalates to USB resets. The superseded `SPECTRUM_NATIVE_CAMERA=cscore-legacy` path gets the native loss detection but no Java reopen.
+
+## ThriftyCam, USB 3 (fork ad8691de = photonvision-138, 2026-11-06)
+
+The Thrifty Bot ThriftyCam (`05c8:0a00`, SunplusIT SPCA2630, OmniVision OG02B1B mono global shutter) is a verified
+native camera: MJPEG 1600x1304 at 60 fps on a blue (USB 3) port. Characterization: `tests/thriftycam/README.md`.
+
+- **Identity.** No serial, so it keeps PhotonVision's by-path uniquePath (`platform-xhci-hcd.0-usb-0:1:1.0`; the same
+  path at SuperSpeed and at high speed) and a new one is named by model and port, `ThriftyCam_xhci0-1`. One camera per
+  fixed port; moving it to another port makes it a new camera. Reconnect reopens that path (unchanged code).
+- **Mode.** The pipeline's video mode (index into the MJPEG-only list, `MJPEGOnly` quirk); 1600x1304 60 is the first.
+  1280x720 and 640x480 are crops of the top of the sensor: don't use them.
+- **Controls.** As for the other cameras: read first, written only where they differ (they persist in its flash).
+  Tags: manual exposure 8, gain 0, sharpness 50, **brightness 50%** (PhotonVision's default 100% maps to +64, a large
+  offset on this camera).
+- **Timestamps.** Camera delay (exposure end -> first packet) 0.7 ms and PTS delay 0, per model in the fork and in
+  sc-vision. Not measured: it assumes the PTS (0.7 ms before the first data packet) marks the end of exposure. An LED
+  test would settle it; `SPECTRUM_CAMERA_DELAY_US=...,ThriftyCam=NNN` overrides.
+- **No calibration yet.** solvePNP is skipped without a calibration (2D targets, no NullPointerException), until a
+  1600x1304 calibration is added.
+- **Frame timing.** The camera spreads each frame over ~15.6 ms of the 16.7 ms period, so capture -> pose is ~17 ms
+  even with streaming (the Thriftiest/Swyft at 120 fps: ~9 ms).
+
+Bench Pi 5, 2026-11-06 23:15 CST, all three native in PhotonVision at once, 30 s, min tag 22, full-tag fit on,
+performance governor (capture -> publish from the results; PhotonVision CPU from /proc):
+
+| Camera | Settings | fps | p50 ms | p99 ms | max ms | tags/frame | seq gaps |
+|---|---|---|---|---|---|---|---|
+| Thriftiest SJ-05 | 12/128, 1280x800 | 121.2 | 8.91 | 10.32 | 27.7 | 3.25 | 2 |
+| Swyft SJ-SW01 | 5/96, 1280x800 | 120.0 | 9.19 | 17.81 | 29.2 | 4.90 | 0 |
+| ThriftyCam_xhci0-1 | 8/0/sh50, 1600x1304 | 60.2 | 16.76 | 20.56 | 40.0 | 2.25 | 3 |
+
+PhotonVision 184% of a core (two cameras before: ~180%). ThriftyCam `usbreset` x3 under PhotonVision
+(`PV_NAME=ThriftyCam_xhci0-1 reset_timing.py thriftycam usbreset 3 --pv`): node back 0.30 s, first result with
+tags 0.54-0.56 s, then 60-61 fps at p50 16.6-16.8 ms, still SuperSpeed, controls unchanged; reconnected 171-377 ms
+after the loss, 1 open attempt each.
+
+sc-vision (user-space usbfs reader) on the same camera: `native/sc-vision/README.md`, "ThriftyCam".

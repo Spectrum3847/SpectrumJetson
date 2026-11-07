@@ -6,7 +6,8 @@
   pv-camera-config.py add  NAME_SUBSTRING NICKNAME [CALIB.json] [key=value ...]
   pv-camera-config.py off  NAME_SUBSTRING
 
-`only`: the camera whose matched name/path contains NAME_SUBSTRING (e.g. SJ-SW01, SJ-05) is activated with
+`only`: the camera whose matched name/path (uniquePath, path, name; or its exact nickname) contains NAME_SUBSTRING
+(e.g. SJ-SW01, SJ-05, xhci-hcd.0-usb-0:1:1.0 for a ThriftyCam on its port) is activated with
 NICKNAME, its current pipeline gets NAPA (min 32, hamming 1) plus the key=value fields, and CALIB.json (a
 PhotonVision calibration for its resolution) if given; every other camera is deactivated (one camera at a time).
 `add`: the same, but the other cameras are left as they are (any number of cameras at once: `only` the first,
@@ -52,8 +53,10 @@ def main():
     kv = dict(a.split('=', 1) for a in rest)
     for uid, contents in rows:
         d = json.loads(contents)
-        info = json.dumps(d.get('matchedCameraInfo', {}))
-        mine = sub in info
+        # the camera's own name and path only: otherPaths can hold another camera's old port (the Swyft's saved
+        # otherPaths had the ThriftyCam's platform-xhci-hcd.0-usb-0:1:1.0 from an earlier plug)
+        mi = d.get('matchedCameraInfo', {})
+        mine = any(sub in str(mi.get(k) or '') for k in ('uniquePath', 'path', 'name')) or sub == d.get('nickname')
         if mode == 'off':
             if not mine:
                 continue

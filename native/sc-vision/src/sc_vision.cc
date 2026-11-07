@@ -8,7 +8,7 @@
 // checker thread re-decodes every Nth frame with libjpeg-turbo and re-detects it with whole-frame napa_detect,
 // and counts any difference (identity, live).
 //
-//   sc-vision [--secs S] [--csv FILE] [--cpu K] [--fifo PRIO] [--exposure N(0.1ms)] [--gain G]
+//   sc-vision [--secs S] [--csv FILE] [--cpu K] [--fifo PRIO] [--exposure N(0.1ms)] [--gain G] [--size WxH] [--fps F]
 //             [--pkts 4] [--urbs 32] [--alt -1] [--min-tag 22] [--hamming 1] [--min-contrast 20]
 //             [--every N] [--check N] [--calib FILE] [--tag-size M] [--save DIR] [--no-napa] [--whole]
 //             [--nt HOST] [--name CAM] [--no-tagfit] [--selftest]
@@ -247,7 +247,7 @@ static int selftest() {
 
 // ------------------------------------------------------------------------------------------- main
 int main(int argc, char **argv) {
-  double secs = 0, tag_size = 0.1651, mid_offset_ms = -1, camera_delay_ms = 0.4, fps_max = 0;
+  double secs = 0, tag_size = 0.1651, mid_offset_ms = -1, camera_delay_ms = -1, fps_max = 0;
   const char *lock_path = nullptr, *cam_serial = nullptr, *cam_port = nullptr;
   const char *csv = nullptr, *calib = nullptr, *save = nullptr, *nt_host = nullptr, *cam_name = "thrifty";
   int cpu = -1, fifo = 0, exposure = -1, gain = -1, gamma = -1, backlight = -1, sharpness = -1, brightness = -1000, every = 1, check = 64, whole = 0, no_napa = 0;
@@ -266,6 +266,10 @@ int main(int argc, char **argv) {
     else if (a == "--fifo") fifo = atoi(nx());
     else if (a == "--exposure") exposure = atoi(nx());
     else if (a == "--gain") gain = atoi(nx());
+    else if (a == "--size") {  // MJPEG mode WxH (default 1280x800; the ThriftyCam: 1600x1304)
+      int w = 0, h = 0;
+      if (sscanf(nx(), "%dx%d", &w, &h) == 2 && w > 0 && h > 0) uc.width = w, uc.height = h;
+    } else if (a == "--fps") uc.fps = atoi(nx());  // the mode's frame rate (default 120; the ThriftyCam: 60)
     else if (a == "--pkts") uc.pkts_per_urb = atoi(nx());
     else if (a == "--urbs") uc.nurbs = atoi(nx());
     else if (a == "--alt") uc.alt = atoi(nx());
@@ -323,7 +327,7 @@ int main(int argc, char **argv) {
     uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_MANUAL);
     if (uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_EXPOSURE_ABSOLUTE, exposure)) fprintf(stderr, "exposure: not set\n");
   }
-  if (gain > 0 && uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_GAIN, gain)) fprintf(stderr, "gain: not set\n");
+  if (gain >= 0 && uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_GAIN, gain)) fprintf(stderr, "gain: not set\n");
   if (gamma > 0 && uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_GAMMA, gamma)) fprintf(stderr, "gamma: not set\n");
   if (backlight >= 0 && uvc_v4l2_set(uc.vid, uc.pid, V4L2_CID_BACKLIGHT_COMPENSATION, backlight))
     fprintf(stderr, "backlight compensation: not set\n");
@@ -367,6 +371,9 @@ int main(int argc, char **argv) {
   // first data packet -> mid-exposure: half the exposure (exposure_time_absolute is 0.1 ms steps) + the camera's
   // delay from exposure end to its first data packet (0.4 ms: LED test 0.41 +- 0.05 ms on the Thriftiest). The
   // Thriftiest (usbrecov 5.13) mis-maps settings 1-4: 1 ~0.5 ms, 2 ~1.1 ms, 3 and 4 ~0.3 ms (FINDINGS 2A).
+  // The ThriftyCam (05c8:0a00): no LED test yet. Its PTS is ~0.7 ms before the first data packet; assuming the PTS
+  // marks the end of exposure (the Thriftiest's is 0.18 ms after it), exposure end -> first packet is 0.7 ms.
+  if (camera_delay_ms < 0) camera_delay_ms = uc.vid == 0x05c8 && uc.pid == 0x0a00 ? 0.7 : 0.4;
   double exposure_ms = exposure > 0 ? exposure * 0.1 : 0;
   const bool thriftiest = uc.vid == 0x1bcf || (uc.vid == 0 && !(cam_serial && strncmp(cam_serial, "SJ-SW", 5) == 0));
   if (thriftiest && exposure >= 1 && exposure <= 4) exposure_ms = exposure == 1 ? 0.5 : exposure == 2 ? 1.1 : 0.3;
@@ -392,6 +399,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   const int W = uc.width, H = uc.height;
+  const int64_t overload_ns = (int64_t)(0.84e9 / (uc.fps > 0 ? uc.fps : 120));
   const size_t FB = 4 << 20;
   std::vector<uint8_t> fb(FB + 64), Y((size_t)W * H + 64);
   memset(Y.data(), 0, Y.size());
@@ -564,8 +572,9 @@ int main(int argc, char **argv) {
           process = 0;
         // Overload (e.g. min tag 16 on a busy frame costing more than a frame period): newest-frame semantics.
         // Skip this frame if we are working behind the USB stream (this URB was reaped > 2 ms after it completed) or
-        // the last processed frame took most of a period, instead of falling further and further behind.
-        if (process && (mono_ns() - tr > 2000000 || last_frame_cpu_ns > 7000000)) {
+        // the last processed frame took most of a period (7 ms at 120 fps, 14 ms at 60), instead of falling further
+        // and further behind.
+        if (process && (mono_ns() - tr > 2000000 || last_frame_cpu_ns > overload_ns)) {
           process = 0;
           nskip++;
           last_frame_cpu_ns = 0;  // try the next one

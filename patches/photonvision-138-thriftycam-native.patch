@@ -1,0 +1,236 @@
+From ad8691de78d36b4531e9e7b42993bd7983f2cb90 Mon Sep 17 00:00:00 2001
+From: Allen Gregory <allengregoryiv@gmail.com>
+Date: Fri, 6 Nov 2026 23:17:51 -0600
+Subject: [PATCH] ThriftyCam (05c8:0a00, USB 3) as a native camera: 1600x1304
+ MJPEG 60 fps, named and matched by USB port
+
+- NativeCameraSource: 05c8:0a00 joins the default verified IDs (Thriftiest, Swyft). It has no serial, so it keeps
+  its by-path uniquePath (e.g. platform-xhci-hcd.0-usb-0:1:1.0), the same at SuperSpeed and high speed.
+- PVUsbCameraInfo.humanReadableName: a ThriftyCam is named by model and port, "ThriftyCam_xhci0-1", so two of
+  them get different stable names (the cscore name is just "PC Camera").
+- QuirkyCamera: ThriftyCam with Gain and MJPEGOnly (its YUYV modes are slower or don't stream).
+- Camera delay per model: ThriftyCam 0.7 ms exposure end -> first packet, PTS delay 0 (assumed: its PTS is
+  ~0.7 ms before the first packet; no LED test yet). A bare SPECTRUM_CAMERA_DELAY_US number stays the other
+  cameras' default; a key=value naming the camera still overrides.
+- AprilTagPipeline: solvePNP needs a calibration; a camera without one (a new ThriftyCam) publishes 2D targets
+  instead of a NullPointerException every frame.
+
+Bench Pi 5, three cameras native at once (30 s): Thriftiest 121.2 fps capture->publish p50/p99 8.91/10.32 ms,
+Swyft 120.0 fps 9.19/17.81, ThriftyCam 60.2 fps 16.76/20.56; PhotonVision 184% of a core. ThriftyCam usbreset
+x3: back in 0.54-0.56 s at 60 fps, SuperSpeed, controls kept.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../vision/camera/PVCameraInfo.java           | 26 +++++++++++
+ .../vision/camera/QuirkyCamera.java           |  3 ++
+ .../camera/USBCameras/NativeCameraSource.java |  5 ++-
+ .../frame/provider/NativeFrameProvider.java   | 12 +++++-
+ .../frame/provider/USBFrameProvider.java      | 43 ++++++++++++++++++-
+ .../vision/pipeline/AprilTagPipeline.java     | 10 +++--
+ 6 files changed, 90 insertions(+), 9 deletions(-)
+
+diff --git a/photon-core/src/main/java/org/photonvision/vision/camera/PVCameraInfo.java b/photon-core/src/main/java/org/photonvision/vision/camera/PVCameraInfo.java
+index ae7996ba..e3ce6d6e 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/camera/PVCameraInfo.java
++++ b/photon-core/src/main/java/org/photonvision/vision/camera/PVCameraInfo.java
+@@ -111,6 +111,32 @@ public sealed interface PVCameraInfo {
+                     .orElse(path());
+         }
+ 
++        /**
++         * SpectrumJetson (photonvision-138): a camera with no serial of its own whose model has one
++         * fixed name (the ThriftyCam, 05c8:0a00, "SPCA2630 PC Camera") is named by model and USB port,
++         * e.g. "ThriftyCam_xhci0-1" for /dev/v4l/by-path/platform-xhci-hcd.0-usb-0:1:1.0: the same name
++         * for the same port, and two of them get different names.
++         */
++        @Override
++        public String humanReadableName() {
++            if (super.vendorId == 0x05c8 && super.productId == 0x0a00) {
++                String port = portTag(uniquePath());
++                return port.isEmpty() ? "ThriftyCam" : "ThriftyCam_" + port;
++            }
++            return name().replaceAll(" ", "_");
++        }
++
++        /**
++         * "xhci0-1" for ".../platform-xhci-hcd.0-usb-0:1:1.0-video-index0" (controller 0, port 1; hubs
++         * add ".N"); "" if the path isn't a by-path USB path.
++         */
++        static String portTag(String path) {
++            var m =
++                    java.util.regex.Pattern.compile("xhci-hcd\\.(\\d+)-usb[v0-9]*-\\d+:([0-9.]+):")
++                            .matcher(path == null ? "" : path);
++            return m.find() ? "xhci" + m.group(1) + "-" + m.group(2) : "";
++        }
++
+         @Override
+         public String[] otherPaths() {
+             return super.otherPaths;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/camera/QuirkyCamera.java b/photon-core/src/main/java/org/photonvision/vision/camera/QuirkyCamera.java
+index adfc080c..baba414f 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/camera/QuirkyCamera.java
++++ b/photon-core/src/main/java/org/photonvision/vision/camera/QuirkyCamera.java
+@@ -85,6 +85,9 @@ public class QuirkyCamera {
+                             CameraQuirk.ArduCamCamera,
+                             CameraQuirk.Gain,
+                             CameraQuirk.ArduOV9782Controls),
++                    // Thrifty Bot ThriftyCam (OmniVision OG02B1B mono global shutter, SunplusIT SPCA2630,
++                    // USB 3): MJPEG 1600x1304 at 60 fps (its YUYV modes are slower or don't stream)
++                    new QuirkyCamera(0x05C8, 0x0A00, CameraQuirk.Gain, CameraQuirk.MJPEGOnly),
+                     // FRC 4143: Innomaker OV9281 on the Jetson Orin's MIPI CSI ports
+                     new QuirkyCamera(
+                             -1, -1, "vi-output, ov9281 10-0060", "vi-output,_ov9821_10-0060", CameraQuirk.Gain),
+diff --git a/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSource.java b/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSource.java
+index dca095e4..0e673050 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSource.java
++++ b/photon-core/src/main/java/org/photonvision/vision/camera/USBCameras/NativeCameraSource.java
+@@ -33,7 +33,8 @@ import org.wpilib.util.PixelFormat;
+ /**
+  * Spectrum (sc/mjpeg-napa) native camera backend (SpectrumJetson
+  * docs/SYSTEMCORE-NATIVE-BACKEND.md): a USB camera with no cscore UsbCamera. Chosen per camera by
+- * {@link #createOrNull}: verified cameras (Thriftiest Cam 1bcf:28c5, Swyft 0bda:3035; more with
++ * {@link #createOrNull}: verified cameras (Thriftiest Cam 1bcf:28c5, Swyft 0bda:3035, ThriftyCam
++ * 05c8:0a00 (USB 3, 1600x1304 at 60 fps, no serial: known by its USB port); more with
+  * SPECTRUM_NATIVE_CAMERA_IDS) with MJPEG modes, when the library is there. SPECTRUM_NATIVE_CAMERA=0
+  * turns it off. Anything else, or any failure here, and the camera is a normal USBCameraSource.
+  */
+@@ -47,7 +48,7 @@ public class NativeCameraSource extends VisionSource {
+ 
+     /** "vid:pid" (hex) pairs the native backend takes. */
+     private static final String IDS =
+-            System.getenv().getOrDefault("SPECTRUM_NATIVE_CAMERA_IDS", "1bcf:28c5,0bda:3035");
++            System.getenv().getOrDefault("SPECTRUM_NATIVE_CAMERA_IDS", "1bcf:28c5,0bda:3035,05c8:0a00");
+ 
+     static boolean verified(int vid, int pid) {
+         String want = String.format(Locale.ROOT, "%04x:%04x", vid, pid);
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+index aa264f8d..efce0343 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/NativeFrameProvider.java
+@@ -270,10 +270,18 @@ public class NativeFrameProvider extends CpuImageProcessor {
+             var c = settables.getConfiguration();
+             cameraDelayUs =
+                     USBFrameProvider.cameraDelayUs(
+-                            USBFrameProvider.CAMERA_DELAY_SPEC, c.nickname, c.uniqueName, 400);
++                            USBFrameProvider.CAMERA_DELAY_SPEC,
++                            c.nickname,
++                            c.uniqueName,
++                            400,
++                            USBFrameProvider.modelCameraDelayUs(settables, false));
+             ptsDelayUs =
+                     USBFrameProvider.cameraDelayUs(
+-                            USBFrameProvider.PTS_DELAY_SPEC, c.nickname, c.uniqueName, 180);
++                            USBFrameProvider.PTS_DELAY_SPEC,
++                            c.nickname,
++                            c.uniqueName,
++                            180,
++                            USBFrameProvider.modelCameraDelayUs(settables, true));
+         }
+         long halfExposureUs =
+                 USBFrameProvider.realExposureUs(settables, settables.getExposureTimeUs()) / 2;
+diff --git a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+index 32ce5d48..8d6e7527 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
++++ b/photon-core/src/main/java/org/photonvision/vision/frame/provider/USBFrameProvider.java
+@@ -1250,6 +1250,37 @@ public class USBFrameProvider extends CpuImageProcessor {
+         return match >= 0 ? match : def;
+     }
+ 
++    /**
++     * As {@link #cameraDelayUs}, but a camera model with a delay of its own (modelUs >= 0) keeps it
++     * unless the spec names this camera: a bare number in the spec (the drop-in's 400, measured on
++     * the Thriftiest) is the default of the other cameras only.
++     */
++    static long cameraDelayUs(
++            String spec, String nickname, String uniqueName, long def, long modelUs) {
++        if (modelUs < 0) return cameraDelayUs(spec, nickname, uniqueName, def);
++        String keyed = null;
++        if (spec != null) {
++            var parts = new java.util.ArrayList<String>();
++            for (String part : spec.split(",")) if (part.contains("=")) parts.add(part);
++            keyed = String.join(",", parts);
++        }
++        long named = cameraDelayUs(keyed, nickname, uniqueName, -1);
++        return named >= 0 ? named : modelUs;
++    }
++
++    /**
++     * The ThriftyCam (05c8:0a00): exposure end -> first USB data packet, and the PTS's delay after
++     * exposure end. Not measured (no LED test yet): its PTS is ~0.7 ms before the first data packet
++     * (tests/thriftycam), taken as the end of exposure. -1 for other cameras.
++     */
++    static long modelCameraDelayUs(VisionSourceSettables settables, boolean pts) {
++        var info = settables.getConfiguration().matchedCameraInfo;
++        if (info instanceof org.photonvision.vision.camera.PVCameraInfo.PVUsbCameraInfo usb
++                && usb.vendorId == 0x05c8
++                && usb.productId == 0x0a00) return pts ? 0 : 700;
++        return -1;
++    }
++
+     private static boolean hwTimestamps() {
+         try {
+             var hw = java.nio.file.Path.of("/sys/module/uvcvideo/parameters/hwtimestamps");
+@@ -1385,8 +1416,16 @@ public class USBFrameProvider extends CpuImageProcessor {
+         if (captureTimeNs == 0) return 0;
+         if (cameraDelayUs < 0) {
+             var c = settables.getConfiguration();
+-            cameraDelayUs = cameraDelayUs(CAMERA_DELAY_SPEC, c.nickname, c.uniqueName, 400);
+-            ptsDelayUs = cameraDelayUs(PTS_DELAY_SPEC, c.nickname, c.uniqueName, 180);
++            cameraDelayUs =
++                    cameraDelayUs(
++                            CAMERA_DELAY_SPEC,
++                            c.nickname,
++                            c.uniqueName,
++                            400,
++                            modelCameraDelayUs(settables, false));
++            ptsDelayUs =
++                    cameraDelayUs(
++                            PTS_DELAY_SPEC, c.nickname, c.uniqueName, 180, modelCameraDelayUs(settables, true));
+         }
+         long halfExposureUs = realExposureUs(settables.getExposureTimeUs()) / 2;
+         // the V4L2 stamp -> mid-exposure: from the camera's PTS (hwtimestamps=1), or from the driver's
+diff --git a/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java b/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java
+index 8c368c53..9d37ea77 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java
++++ b/photon-core/src/main/java/org/photonvision/vision/pipeline/AprilTagPipeline.java
+@@ -260,6 +260,10 @@ public class AprilTagPipeline extends CVPipeline<CVPipelineResult, AprilTagPipel
+         }
+         List<AprilTagDetection> usedDetections = new ArrayList<>();
+         List<TrackedTarget> targetList = new ArrayList<>();
++        // SpectrumJetson (photonvision-138): solvePNP needs a calibration for this resolution; a
++        // camera that has none yet (a new ThriftyCam at 1600x1304) publishes 2D targets meanwhile
++        // instead of failing every frame
++        boolean solvePnp = settings.solvePNPEnabled && frameStaticProperties.cameraCalibration != null;
+ 
+         // Filter out detections based on pipeline settings
+         for (AprilTagDetection detection : detections) {
+@@ -279,7 +283,7 @@ public class AprilTagPipeline extends CVPipeline<CVPipelineResult, AprilTagPipel
+                             new TargetCalculationParameters(
+                                     false, null, null, null, null, frameStaticProperties));
+             // SpectrumJetson (photonvision-61): without solvePNP these are the published targets.
+-            if (!settings.solvePNPEnabled) {
++            if (!solvePnp) {
+                 TagQuality.fill(target, detection, null, frameStaticProperties, tagWidthMeters);
+             }
+ 
+@@ -288,7 +292,7 @@ public class AprilTagPipeline extends CVPipeline<CVPipelineResult, AprilTagPipel
+ 
+         // Do multi-tag pose estimation
+         Optional<MultiTargetPNPResult> multiTagResult = Optional.empty();
+-        if (settings.solvePNPEnabled && settings.doMultiTarget) {
++        if (solvePnp && settings.doMultiTarget) {
+             // SpectrumJetson: leave the listed bad tags out of multi-tag (photonvision-22). They're
+             // still reported, with single-tag poses.
+             var excluded = ExcludedTags.getInstance().active();
+@@ -302,7 +306,7 @@ public class AprilTagPipeline extends CVPipeline<CVPipelineResult, AprilTagPipel
+         }
+ 
+         // Do single-tag pose estimation
+-        if (settings.solvePNPEnabled) {
++        if (solvePnp) {
+             // Clear target list that was used for multitag so we can add target transforms.
+             // SpectrumJetson (photonvision-12): release them first; their contour Mats were left
+             // for the GC.
+-- 
+2.55.0.windows.2
+

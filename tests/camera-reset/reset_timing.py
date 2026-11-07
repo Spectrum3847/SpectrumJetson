@@ -10,6 +10,8 @@
             yank      authorized 0, held YANK_S (3) s like an unplugged cable, then 1; times from the 1
     --pv    PhotonVision runs natively: first frame / first tag come from its NT results (rawBytes)
             instead of a v4l2-ctl capture here.
+            PV_NAME=nickname when PhotonVision's camera name isn't CAM (the ThriftyCam is named by its USB port,
+            e.g. ThriftyCam_xhci0-1).
 
 Per repeat it prints one JSON line: node_gone (did the by-id node disappear), t_node (s from the reset to the
 node being back), t_frame (first valid MJPEG frame / first PhotonVision result after the outage), t_tag (first
@@ -130,7 +132,8 @@ def pv_watch(cam, t0):
     sys.path.insert(0, os.path.expanduser("~systemcore/bench/exposure"))
     from expo_probe import WS, mp_unpack, decode_result
     ws = WS("127.0.0.1", 5810, "/nt/reset_timing")
-    ws.send(json.dumps([{"method": "subscribe", "params": {"topics": [f"/photonvision/{cam}/rawBytes"], "subuid": 1,
+    name = os.environ.get("PV_NAME", cam)
+    ws.send(json.dumps([{"method": "subscribe", "params": {"topics": [f"/photonvision/{name}/rawBytes"], "subuid": 1,
                                                            "options": {"all": True, "periodic": 0.001}}}]))
     ws.k.settimeout(0.05)
     return ws, mp_unpack, decode_result

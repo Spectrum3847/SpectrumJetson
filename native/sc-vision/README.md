@@ -14,6 +14,24 @@ USB isochronous packets (user-space UVC, 0.25-0.5 ms URBs, mmap'd usbfs buffers)
 One thread does everything, pinned to one core (SCHED_FIFO optional). A nice-19 checker thread re-decodes every
 64th frame with libjpeg-turbo and re-runs whole-frame `napa_detect`, and counts differences.
 
+## ThriftyCam (USB 3, 05c8:0a00)
+
+`sc-vision --usb 05c8:0a00 --size 1600x1304 --fps 60 --exposure 8 --gain 0 --sharpness 50 --calib CAL.json`
+(and `--port 2-1` when there are two; it has no serial). At SuperSpeed the reader takes the bandwidth from the
+endpoint's SuperSpeed companion descriptor (wBytesPerInterval, 33792 B in alt 17, not wMaxPacketSize 1024) and the
+camera's own alt setting (it is alone on its USB 3 bus); one UVC payload per 125 us service interval, as at high
+speed, so 4-packet URBs still give the bytes every 0.5 ms. Controls are read first and written only when they
+differ (they persist in the camera). The overload skip now scales with the rate (84% of a frame period): the old
+fixed 7 ms (120 fps) dropped every other ThriftyCam frame, whose decode + NAPA takes ~10 ms of CPU.
+
+Bench Pi 5, 2026-11-06, 30 s, 7 tags in view, PhotonVision running the other two cameras (provisional pinhole
+calibration: timing only): 60.2 fps, 0 overload skips of note (4), 3 bad frames of 1807; first -> last packet
+p50 15.6 ms (the camera spreads a frame over the period); last packet -> pose p50/p99 0.77/1.40 ms; first packet ->
+pose 16.3/17.6 ms; capture (mid-exposure) -> pose 17.1/18.3 ms; 10.3 ms CPU a frame (62% of a core); 6 tags a frame,
+tagfit 74 us a tag. URB size matters at SuperSpeed only for latency (8 packets: +0.25 ms; 16: +0.5 ms, 58 fps).
+Camera delay (exposure end -> first packet) defaults to 0.7 ms for this camera: not measured, it assumes the PTS
+(0.7 ms before the first packet) marks the end of exposure. Override with `--camera-delay-ms`.
+
 ## Files
 
 | File | What |
