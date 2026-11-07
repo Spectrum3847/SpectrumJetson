@@ -36,7 +36,7 @@ for f in napa_far NapaDetectorJNI; do
 done
 # the native single-tag pose (NapaDetectorJNI.poseSquare): native/sc-vision/src/pose.c
 timeout 300 $CC $CF -std=gnu11 -c "$REPO/native/sc-vision/src/pose.c" -o "$OUT/pose.o"
-timeout 300 $CC $CF -std=gnu11 -c "$REPO/native/sc-vision/src/tagfit.c" -o "$OUT/tagfit.o"  # full-tag refinement (SPECTRUM_TAGFIT=1)
+timeout 300 $CC $CF -std=gnu11 -c "$REPO/native/sc-vision/src/tagfit.c" -o "$OUT/tagfit.o"  # full-tag refinement (on; SPECTRUM_TAGFIT=0 off)
 # the native camera backend (NapaDetectorJNI.cameraOpen): mjdec and the Rewind writer from native/sc-vision
 timeout 300 $CC $CF -std=gnu11 -c "$REPO/native/sc-vision/src/mjdec.c" -o "$OUT/mjdec_napa.o"
 timeout 300 $CXX $CF -std=c++17 -c "$REPO/native/sc-vision/src/rewind_writer.cc" -o "$OUT/rewind_writer.o"

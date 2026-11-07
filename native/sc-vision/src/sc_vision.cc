@@ -11,9 +11,9 @@
 //   sc-vision [--secs S] [--csv FILE] [--cpu K] [--fifo PRIO] [--exposure N(0.1ms)] [--gain G]
 //             [--pkts 4] [--urbs 32] [--alt -1] [--min-tag 16] [--hamming 1] [--min-contrast 20]
 //             [--every N] [--check N] [--calib FILE] [--tag-size M] [--save DIR] [--no-napa] [--whole]
-//             [--nt HOST] [--name CAM] [--tagfit] [--selftest]
-// Full-tag refinement (docs/FULL-TAG-REFINEMENT.md): off by default; --tagfit or env SPECTRUM_TAGFIT=1 (needs
-// --calib), between NAPA and the pose, full-scale frames only. SPECTRUM_TAGFIT_* settings: tagfit.h.
+//             [--nt HOST] [--name CAM] [--no-tagfit] [--selftest]
+// Full-tag refinement (docs/FULL-TAG-REFINEMENT.md): on by default with --calib; off with --no-tagfit or env
+// SPECTRUM_TAGFIT=0, between NAPA and the pose, full-scale frames only. SPECTRUM_TAGFIT_* settings: tagfit.h.
 #include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -302,7 +302,8 @@ int main(int argc, char **argv) {
     else if (a == "--sharpness") sharpness = atoi(nx());
     else if (a == "--brightness") brightness = atoi(nx());
     else if (a == "--sharpen") np.sharpening_x100 = atoi(nx());  // NAPA's cell sharpening x100 (default 25)
-    else if (a == "--tagfit") tagfit_on = 1;  // full-tag refinement (also env SPECTRUM_TAGFIT=1)
+    else if (a == "--tagfit") tagfit_on = 1;     // full-tag refinement (the default)
+    else if (a == "--no-tagfit") tagfit_on = 0;  // (also env SPECTRUM_TAGFIT=0)
     else if (a == "--selftest") return selftest();
     else {
       fprintf(stderr, "unknown option %s\n", a.c_str());
@@ -403,7 +404,7 @@ int main(int argc, char **argv) {
   napa_stream *ns = napa_stream_create(nd);
   std::vector<napa_detection> dets(64), dets_raw(64);
   tagfit_live *tf = tagfit_on && have_cam ? tagfit_live_create(&cam, W, H) : nullptr;
-  if (tagfit_on) fprintf(stderr, "sc-vision: tagfit %s\n", tf ? "on" : "off (needs --calib)");
+  fprintf(stderr, "sc-vision: tagfit %s\n", tf ? "on" : tagfit_on ? "off (needs --calib)" : "off");
   FILE *out = csv ? fopen(csv, "w") : nullptr;
   if (out)
     fprintf(out,

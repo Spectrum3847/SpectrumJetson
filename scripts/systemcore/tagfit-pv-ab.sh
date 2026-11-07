@@ -1,12 +1,12 @@
 #!/bin/bash
-# tagfit live A/B under PhotonVision on the SystemCore / Pi 5 (native cameras): SPECTRUM_TAGFIT unset vs 1, 40 s each
+# tagfit live A/B under PhotonVision on the SystemCore / Pi 5 (native cameras): SPECTRUM_TAGFIT=0 vs 1, 40 s each
 # after 25 s of warm-up, both cameras at NAPA min tag 22. Run on the target, holding the camera lock:
 #   flock -n /tmp/camera.lock scripts/systemcore/tagfit-pv-ab.sh [NEW_LIB]
 # NEW_LIB: the tagfit build of libspectrum-napa-apriltag.so (scripts/systemcore/build-napa.sh), copied over.
 # Backs up and restores the PV database and the installed library, sets min tag 22 only for the test, applies the
 # switch through a temporary systemd drop-in (removed afterwards), measures each camera with nt_probe (capture ->
 # received latency, results, health) and PV's CPU (/proc), keeps the journal. Output in /dev/shm/tfab/pv.
-# Afterwards PhotonVision runs again with the original library, tagfit off; exposures back (Thriftiest 2, Swyft 10).
+# Afterwards PhotonVision runs again with the original library and its default; exposures back (Thriftiest 2, Swyft 10).
 set -u
 cpu() { python3 -c "import os,sys,time;s=open('/proc/$1/stat').read().rsplit(')',1)[1].split();print((int(s[11])+int(s[12]))/os.sysconf('SC_CLK_TCK'),time.time())"; }
 NEW=${1:-/dev/shm/tfab/libspectrum-napa-apriltag.so.tagfit}
@@ -28,7 +28,7 @@ c.commit()
 print([ (json.loads(v)["nickname"], v.count("\"napaMinTagPx\":22")) for n,v in c.execute("select unique_name, contents from cameras")])
 P
 for cond in off on; do
-  if [ $cond = on ]; then printf "[Service]\nEnvironment=SPECTRUM_TAGFIT=1\n" | sudo tee $DROP >/dev/null; else sudo rm -f $DROP; fi
+  v=0; [ $cond = on ] && v=1; printf "[Service]\nEnvironment=SPECTRUM_TAGFIT=$v\n" | sudo tee $DROP >/dev/null
   sudo systemctl daemon-reload
   T0=$(date "+%Y-%m-%d %H:%M:%S")
   sudo systemctl start photonvision

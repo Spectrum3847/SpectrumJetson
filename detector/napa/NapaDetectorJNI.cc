@@ -65,7 +65,7 @@
 extern "C" {
 #include "../../native/sc-vision/src/pose.h"  // poseSquare (sc/mjpeg-napa)
 #include "../../native/sc-vision/src/mjdec.h"  // the native camera backend's decoder
-#include "../../native/sc-vision/src/tagfit.h"  // full-tag refinement (SPECTRUM_TAGFIT=1)
+#include "../../native/sc-vision/src/tagfit.h"  // full-tag refinement (on; SPECTRUM_TAGFIT=0 off)
 }
 #include "../../native/sc-vision/src/tagfit_napa.h"
 #include "../../native/sc-vision/src/pv_pack.h"  // native publish (sc/mjpeg-napa)
@@ -255,7 +255,7 @@ struct StreamSink {
   long plan_n = 0, proc_n = 0;  // watcher thread
   int planned = 0, cur_scale = 1, applied_scale = 1, full_w = 0;
   std::atomic<long> n_scaled{0}, n_skipped{0};
-  // Full-tag refinement (docs/FULL-TAG-REFINEMENT.md), off unless SPECTRUM_TAGFIT=1: on the watcher thread when the
+  // Full-tag refinement (docs/FULL-TAG-REFINEMENT.md), on unless SPECTRUM_TAGFIT=0: on the watcher thread when the
   // frame's tags are final, before they are published (natively or handed to Java), full-scale frames with a
   // calibration only. Not in the identity check (its frames are not published).
   const bool tagfit_on = tagfit_env_enabled() != 0;

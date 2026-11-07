@@ -1,13 +1,13 @@
 # Full-tag refinement ("tagfit"): fitting every bit edge, not just the outline
 
-Status (2026-11-06, pass 3): wired into sc-vision and PhotonVision's native NAPA path behind `SPECTRUM_TAGFIT=1`,
-off by default; branch `sc/tagfit` (off `sc/mjpeg-napa`). Code: `native/sc-vision/src/tagfit.{c,h}` and `native/sc-vision/tools/tagfit_bench.cc`. Build
+Status (2026-11-06, pass 3): **on by default** in sc-vision and PhotonVision's native NAPA path (`SPECTRUM_TAGFIT=0`
+turns it off); branch `sc/tagfit` (off `sc/mjpeg-napa`). Code: `native/sc-vision/src/tagfit.{c,h}` and `native/sc-vision/tools/tagfit_bench.cc`. Build
 both with `native/sc-vision/build.sh`. Lens helpers `pose_undistort_px` and `pose_distort_px` were added to
 `pose.{c,h}`.
 
 **Pass 3 (section 00: speedups, the switch, live A/B) and pass 2 (section 0) supersede the defaults and CPU figures in sections 3–5.**
 
-## 00. Pass 3: speedups and the live switch (off by default)
+## 00. Pass 3: speedups and the live switch (on by default since 2026-11-06)
 
 All µs figures here were **measured on the Pi 5** (Raspberry Pi 5 Model B Rev 1.1, kernel 6.12, governor
 `performance`, `max_current` 5000). Nothing was emulated. The robot program was running; PhotonVision was
@@ -19,8 +19,8 @@ frames (`--seq 10`), 696 tags. Each test run also times and compares the double-
 
 | where | switch | default |
 |---|---|---|
-| sc-vision | `SPECTRUM_TAGFIT=1` or `--tagfit` (needs `--calib`) | off |
-| PhotonVision native path (`libspectrum-napa-apriltag.so`, StreamSink) | `SPECTRUM_TAGFIT=1` in PhotonVision's environment | off |
+| sc-vision | `SPECTRUM_TAGFIT=0` or `--no-tagfit` turns it off (it needs `--calib`) | **on** |
+| PhotonVision native path (`libspectrum-napa-apriltag.so`, StreamSink) | `SPECTRUM_TAGFIT=0` in PhotonVision's environment turns it off | **on** |
 | both | `SPECTRUM_TAGFIT_WARM` (1), `SPECTRUM_TAGFIT_WARM_ITERS` (1), `SPECTRUM_TAGFIT_FAST` (1: float32 + LUT), `SPECTRUM_TAGFIT_ITERS` (2), `SPECTRUM_TAGFIT_MAX_CELL` (0: all sizes) | as shown |
 
 - **Published frames only.** The refinement runs where a frame's tags are final and about to be published:

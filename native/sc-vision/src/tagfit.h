@@ -97,11 +97,11 @@ int tagfit_refine_warm(const uint8_t *img, int w, int h, int stride, const uint8
                        tagfit_result *r);
 
 // ---- live use (sc-vision, the NAPA JNI): one per camera ----
-// Per-id warm state (frame-to-frame), the camera's LUT, and the params. Switch: env SPECTRUM_TAGFIT (0 off, the
-// default; 1 on). SPECTRUM_TAGFIT_WARM (default 1): warm start with warm_iters 1. SPECTRUM_TAGFIT_FAST (default 1):
+// Per-id warm state (frame-to-frame), the camera's LUT, and the params. Switch: env SPECTRUM_TAGFIT (on by
+// default; 0 off). SPECTRUM_TAGFIT_WARM (default 1): warm start with warm_iters 1. SPECTRUM_TAGFIT_FAST (default 1):
 // float32 + LUT. SPECTRUM_TAGFIT_ITERS (default 2), SPECTRUM_TAGFIT_MAX_CELL (px, default 0: all sizes).
 typedef struct tagfit_live tagfit_live;
-int tagfit_env_enabled(void);  // SPECTRUM_TAGFIT=1
+int tagfit_env_enabled(void);  // 1 unless SPECTRUM_TAGFIT=0
 tagfit_live *tagfit_live_create(const cam_model *cam, int w, int h);  // reads the SPECTRUM_TAGFIT_* settings
 void tagfit_live_destroy(tagfit_live *t);
 // One tag of frame `frame` (a counter that rises by 1 per processed frame). white: as tagfit_refine (W x W tag

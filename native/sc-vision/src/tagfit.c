@@ -856,7 +856,7 @@ static double env_num(const char *k, double def) {
   return v && *v ? atof(v) : def;
 }
 
-int tagfit_env_enabled(void) { return env_num("SPECTRUM_TAGFIT", 0) != 0; }
+int tagfit_env_enabled(void) { return env_num("SPECTRUM_TAGFIT", 1) != 0; }
 
 tagfit_live *tagfit_live_create(const cam_model *cam, int w, int h) {
   tagfit_live *t = (tagfit_live *)calloc(1, sizeof *t);
