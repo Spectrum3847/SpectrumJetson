@@ -164,3 +164,25 @@ Host side, sc-vision `--min-tag 22`, 10 s each, back to back (EOF = reap of the 
 | --pkts 1 | 15.53/15.69 | 0.03/0.06 |
 
 U1/U2 hardware LPM are already disabled on 2-1. xhci interrupts all land on CPU0.
+| --pkts 1, no pinning (new SuperSpeed default) | 15.57/17.93 | 0.03/0.13 |
+
+CPU (sc-vision, cpu 3 fifo 50, 8 s): 4 packets 58.8% of a core, 2 packets 60.6%, 1 packet 63.6%. More URBs (8 or 32)
+change nothing; 128 URBs aborted (usbfs memory). Pinning + SCHED_FIFO trims the p99 (17.41 -> 16.02 ms first ->
+tags). **Applied:** uvc_usb defaults to 1 packet a URB at SuperSpeed (4 at high speed), saving ~0.3 ms p50 and
+~0.5 ms p99 for ~5% of a core. The remaining ~15.5 ms is readout and can't be removed from the host side; only a
+shorter mode (1280x720: 10.5 ms, but a crop of the top of the sensor) shortens it.
+
+### Tags and JPEG quality
+
+- Frame bytes are the same at alt 8 and alt 17 (219-229 KB), and drop only when the alt forces it (alt 4: 80 KB).
+  More bandwidth doesn't give cleaner MJPEG beyond ~2.5 KB per interval; alt 17 (the default) is fine.
+- Luma DQT (first row 21 13 13 21 13 13 21 21 ...): a mid quality (~60), not near-lossless, with plenty of USB
+  headroom (1.8 KB used of 33.8 KB per interval). A quality control would be the one tag-side gain left.
+- Same light, 8 s each: tag 13 at 100%, margin p50 132, side 35.2 px, 5 tags a frame (8/0/sharpness 50).
+
+### Extension-unit candidates (read only; not written)
+
+GET_CUR/MIN/MAX/DEF only. Possible quality/rate controls, for the user to decide on (each write may persist):
+unit 3 sel 4 (2 B, 0x0400-0x0800, cur = max 0x0800; same GUID as the Thriftiest), unit 3 sel 2 (0-6, cur 1),
+unit 3 sel 3 (1-4, cur 1), unit 4 sel 7 (1-13, cur 1), unit 4 sel 8 (0-255, cur 3, default 0), unit 4 sel 16
+(0-3, cur 0). Sharpness/contrast sweeps were not repeated (they are flash writes; see the sweep table above).

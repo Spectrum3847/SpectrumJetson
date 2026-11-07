@@ -28,7 +28,7 @@ Bench Pi 5, 2026-11-06, 30 s, 7 tags in view, PhotonVision running the other two
 calibration: timing only): 60.2 fps, 0 overload skips of note (4), 3 bad frames of 1807; first -> last packet
 p50 15.6 ms (the camera spreads a frame over the period); last packet -> pose p50/p99 0.77/1.40 ms; first packet ->
 pose 16.3/17.6 ms; capture (mid-exposure) -> pose 17.1/18.3 ms; 10.3 ms CPU a frame (62% of a core); 6 tags a frame,
-tagfit 74 us a tag. URB size matters at SuperSpeed only for latency (8 packets: +0.25 ms; 16: +0.5 ms, 58 fps).
+tagfit 74 us a tag. URB size matters at SuperSpeed only for latency: the default there is 1 packet a URB (EOF -> tags p50/p99 0.03/0.05 ms, 4 packets 0.27/0.57, 8 packets 0.52/0.76, 16 dropped to 58 fps; +5% of a core vs 4).
 Camera delay (exposure end -> first packet) defaults to 0.7 ms for this camera: not measured, it assumes the PTS
 (0.7 ms before the first packet) marks the end of exposure. Override with `--camera-delay-ms`.
 

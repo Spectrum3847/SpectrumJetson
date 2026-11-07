@@ -9,7 +9,7 @@
 // and counts any difference (identity, live).
 //
 //   sc-vision [--secs S] [--csv FILE] [--cpu K] [--fifo PRIO] [--exposure N(0.1ms)] [--gain G] [--size WxH] [--fps F]
-//             [--pkts 4] [--urbs 32] [--alt -1] [--min-tag 22] [--hamming 1] [--min-contrast 20]
+//             [--pkts 0=auto] [--urbs 32] [--alt -1] [--min-tag 22] [--hamming 1] [--min-contrast 20]
 //             [--every N] [--check N] [--calib FILE] [--tag-size M] [--save DIR] [--no-napa] [--whole]
 //             [--nt HOST] [--name CAM] [--no-tagfit] [--selftest]
 // Full-tag refinement (docs/FULL-TAG-REFINEMENT.md): on by default with --calib; off with --no-tagfit or env
@@ -252,7 +252,7 @@ int main(int argc, char **argv) {
   const char *csv = nullptr, *calib = nullptr, *save = nullptr, *nt_host = nullptr, *cam_name = "thrifty";
   int cpu = -1, fifo = 0, exposure = -1, gain = -1, gamma = -1, backlight = -1, sharpness = -1, brightness = -1000, every = 1, check = 64, whole = 0, no_napa = 0;
   uvc_config uc{};
-  uc.width = 1280, uc.height = 800, uc.fps = 120, uc.alt = -1, uc.pkts_per_urb = 4, uc.nurbs = 32, uc.verbose = 1;
+  uc.width = 1280, uc.height = 800, uc.fps = 120, uc.alt = -1, uc.pkts_per_urb = 0, uc.nurbs = 32, uc.verbose = 1;
   napa_params np{22, 1, 20, 22, 25};
   // Frame policy (docs/FRAME-POLICY.md): frame skipping only, process 1 frame in `every`; the robot can override it
   // over NT (/photonvision/<name>/input/processEvery). Processed frames are full scale (fscale stays 1).

@@ -344,7 +344,9 @@ uvc_usb *uvc_open(const uvc_config *cfg) {
     uvc_close(u);
     return NULL;
   }
-  u->npk = cfg->pkts_per_urb > 0 ? cfg->pkts_per_urb : 4;
+  // Default: 1 packet a URB at SuperSpeed (ThriftyCam: EOF -> tags p50/p99 0.29/0.71 -> 0.03/0.05 ms for +5% of a
+  // core; tests/thriftycam/README.md), 4 at high speed.
+  u->npk = cfg->pkts_per_urb > 0 ? cfg->pkts_per_urb : u->speed >= 5000 ? 1 : 4;
   u->nurbs = cfg->nurbs > 0 ? (cfg->nurbs > MAX_URBS ? MAX_URBS : cfg->nurbs) : 32;
   size_t bl = (size_t)u->npk * u->psize;
   u->mmapped = 1;
