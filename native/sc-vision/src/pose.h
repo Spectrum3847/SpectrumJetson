@@ -35,6 +35,10 @@ int cam_model_load(const char *path, cam_model *cam);
 void pose_tag_quality(const cam_model *cam, const double corners[8], double size_m, const tag_pose *best,
                       const tag_pose *alt, double out[3]);
 
+// Image pixel <-> pinhole (undistorted) pixel with the same fx, fy, cx, cy, by the lens model above (tagfit).
+void pose_undistort_px(const cam_model *cam, double u, double v, double *uo, double *vo);
+void pose_distort_px(const cam_model *cam, double u, double v, double *uo, double *vo);
+
 #ifdef __cplusplus
 }
 #endif

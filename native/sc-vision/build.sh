@@ -29,6 +29,10 @@ CF=(-O3 -mcpu=cortex-a76 -fno-plt -Wall -Wextra -fPIC)
   -o "$OUT/rewind_bench" -lpthread
 "$SC_CXX" "${CF[@]}" -std=gnu++23 -I"$HERE/src" -I"$OUT/napa-src" "$HERE/tools/stream_identity.cc" "$OUT/mjdec.o" \
   "$OUT/napa_core.o" -o "$OUT/stream_identity" -ljpeg -lpthread -lm
+# full-tag refinement, offline: synthetic ground truth and recorded sessions (docs/FULL-TAG-REFINEMENT.md)
+"$SC_CC" "${CF[@]}" -std=gnu11 -c "$HERE/src/tagfit.c" -o "$OUT/tagfit.o"
+"$SC_CXX" "${CF[@]}" -std=gnu++23 -I"$HERE/src" -I"$OUT/napa-src" "$HERE/tools/tagfit_bench.cc" "$OUT/tagfit.o" \
+  "$OUT/pose.o" "$OUT/napa_core.o" -o "$OUT/tagfit_bench" -ljpeg -lm
 PUB=("$HERE/src/nt_pub_stub.cc")
 LIBS=()
 if [[ ${NT:-0} == 1 ]]; then
@@ -37,7 +41,7 @@ if [[ ${NT:-0} == 1 ]]; then
   LIBS=(-L"${NT_LIB:?NT_LIB: dir with libntcore.so etc.}" -lntcore -ldatalog -lwpinet -lwpiutil -Wl,-rpath,/opt/sc-vision/lib)
 fi
 "$SC_CXX" "${CF[@]}" -std=gnu++23 -I"$HERE/src" -I"$OUT/napa-src" "$HERE/src/sc_vision.cc" "${PUB[@]}" \
-  "$OUT/mjdec.o" "$OUT/uvc_usb.o" "$OUT/pose.o" "$OUT/napa_core.o" -o "$OUT/sc-vision" -ljpeg -lpthread -lm \
+  "$OUT/mjdec.o" "$OUT/uvc_usb.o" "$OUT/pose.o" "$OUT/tagfit.o" "$OUT/napa_core.o" -o "$OUT/sc-vision" -ljpeg -lpthread -lm \
   "${LIBS[@]}"
 if [[ ${NT:-0} == 1 ]]; then
   "$SC_CXX" "${CF[@]}" -std=gnu++23 -I"$NT_INC" "$HERE/tools/nt_probe.cc" -o "$OUT/nt_probe" "${LIBS[@]}"
