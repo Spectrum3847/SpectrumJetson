@@ -616,8 +616,29 @@ struct NativeCam {
     b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, b.memory = V4L2_MEMORY_MMAP, b.index = i;
     xioctl(VIDIOC_QBUF, &b);
   }
+  // The camera thread's name (top -H, /proc/<pid>/task/<tid>/comm): "Cam " + the camera's serial from its by-id
+  // path ("Cam SJ-05", "Cam SJ-SW01") or its USB port from a by-path one (a camera without a serial: "Cam xhci0-1"), so per-camera CPU can be told apart. Linux allows 15 characters. It used to be "SpectrumCamera" for all.
+  std::string thread_name() const {
+    std::string b = dev.substr(dev.rfind('/') + 1);
+    const size_t v = b.rfind("-video");
+    if (v != std::string::npos) b.resize(v);
+    std::string id;
+    if (const size_t u = b.find("-usb-"); dev.find("/by-path/") != std::string::npos && u != std::string::npos) {
+      // platform-xhci-hcd.0-usb-0:1:1.0 -> xhci0-1 (controller 0, port 1), as PhotonVision names it
+      const size_t d = b.rfind('.', u);
+      const std::string ctl = d != std::string::npos ? b.substr(d + 1, u - d - 1) : "";
+      std::string port = b.substr(u + 5);
+      const size_t c1 = port.find(':');
+      port = c1 == std::string::npos ? port : port.substr(c1 + 1, port.find(':', c1 + 1) - c1 - 1);
+      id = "xhci" + ctl + "-" + port;
+    } else if (const size_t s = b.rfind('_'); s != std::string::npos)
+      id = b.substr(s + 1);  // usb-DCX-260513-K_Thrifty_SJ-05 -> SJ-05
+    else
+      id = b;  // video0
+    return ("Cam " + id).substr(0, 15);
+  }
   void loop() {
-    pthread_setname_np(pthread_self(), "SpectrumCamera");
+    pthread_setname_np(pthread_self(), thread_name().c_str());
     std::unique_ptr<mjdec, void (*)(mjdec *)> mj(mjdec_create(), mjdec_destroy);
     std::vector<uint8_t> img(static_cast<size_t>(w) * h);
     int next = 0;  // the driver fills the queued buffers in queue order
