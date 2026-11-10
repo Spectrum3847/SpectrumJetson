@@ -1,0 +1,223 @@
+From 1f2307806f615bbb42271dd50fb6ce099471c64d Mon Sep 17 00:00:00 2001
+From: Allen Gregory <allengregoryiv@gmail.com>
+Date: Mon, 9 Nov 2026 21:04:55 -0600
+Subject: [PATCH] Web UI: native cameras show their real detection rate and
+ latency; the UI fps is labelled the preview
+
+Native cameras detect and publish every frame natively, but the Java pipeline that feeds the UI runs
+capped (30 fps while a stream is watched, 5 otherwise), so the dashboard read 30 fps for cameras running
+at 196/120/60. CameraHealthPublisher already computes the native rate (published-count delta per ~1 s
+window) and mean capture -> publish latency (NapaDetectorJNI.nativeLatencyMs) for NT health; it now
+keeps them for UIDataPublisher, which sends nativeFps/nativeLatency with each UI result (only while the
+camera publishes natively). The dashboard Cameras card and the Cameras page show them as the main
+numbers and label the Java rate "Preview N fps (screen only; detection runs at M fps)". Non-native
+cameras are unchanged. No JNI change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/components/cameras/CamerasView.vue    | 11 +++++++--
+ .../src/components/dashboard/CamerasCard.vue  | 23 ++++++++++++++++--
+ .../src/types/PhotonTrackingTypes.ts          |  4 ++++
+ .../dataflow/websocket/UIDataPublisher.java   | 13 ++++++++++
+ .../processes/CameraHealthPublisher.java      | 24 ++++++++++++++++++-
+ .../vision/processes/VisionModule.java        |  8 +++++--
+ 6 files changed, 76 insertions(+), 7 deletions(-)
+
+diff --git a/photon-client/src/components/cameras/CamerasView.vue b/photon-client/src/components/cameras/CamerasView.vue
+index 07bc4ddb..716ec500 100644
+--- a/photon-client/src/components/cameras/CamerasView.vue
++++ b/photon-client/src/components/cameras/CamerasView.vue
+@@ -70,8 +70,15 @@ const fpsTooLow = computed<boolean>(() => {
+             class="pr-1"
+             :style="{ color: fpsTooLow ? 'rgb(var(--v-theme-error))' : 'rgb(var(--v-theme-primary))' }"
+           >
+-            &nbsp;{{ Math.round(useStateStore().currentPipelineResults?.fps || 0) }}&nbsp;FPS &ndash;
+-            {{ Math.min(Math.round(useStateStore().currentPipelineResults?.latency || 0), 9999) }} ms latency
++            <template v-if="useStateStore().currentPipelineResults?.nativeFps !== undefined">
++              &nbsp;{{ Math.round(useStateStore().currentPipelineResults?.nativeFps || 0) }}&nbsp;FPS detection &ndash;
++              {{ (useStateStore().currentPipelineResults?.nativeLatency || 0).toFixed(1) }} ms latency (preview
++              {{ Math.round(useStateStore().currentPipelineResults?.fps || 0) }} fps, screen only)
++            </template>
++            <template v-else>
++              &nbsp;{{ Math.round(useStateStore().currentPipelineResults?.fps || 0) }}&nbsp;FPS &ndash;
++              {{ Math.min(Math.round(useStateStore().currentPipelineResults?.latency || 0), 9999) }} ms latency
++            </template>
+           </span>
+         </v-chip>
+         <v-chip v-else label color="red" variant="text" style="font-size: 1rem; padding: 0; margin: 0">
+diff --git a/photon-client/src/components/dashboard/CamerasCard.vue b/photon-client/src/components/dashboard/CamerasCard.vue
+index 13a1131f..e64c086e 100644
+--- a/photon-client/src/components/dashboard/CamerasCard.vue
++++ b/photon-client/src/components/dashboard/CamerasCard.vue
+@@ -41,6 +41,10 @@ const fpsTooLow = computed<boolean>(() => {
+   return currFPS - targetFPS < -5 && currFPS !== 0 && !driverMode && gpuAccel && isReflective;
+ });
+ 
++// Spectrum (photonvision-139): a native camera's real detection rate; the Java fps is only the preview
++const nativeFps = computed<number | undefined>(() => useStateStore().currentPipelineResults?.nativeFps);
++const nativeLatency = computed<number>(() => useStateStore().currentPipelineResults?.nativeLatency || 0);
++
+ const performanceRecommendation = computed<string>(() => {
+   if (
+     fpsTooLow.value &&
+@@ -67,8 +71,15 @@ const performanceRecommendation = computed<string>(() => {
+         style="font-size: 1.1rem; padding: 0; margin: 0"
+         variant="text"
+       >
+-        <span class="pr-1">{{ Math.round(useStateStore().currentPipelineResults?.fps || 0) }}&nbsp;FPS &ndash;</span
+-        ><span>{{ performanceRecommendation }}</span>
++        <template v-if="nativeFps !== undefined">
++          <span class="pr-1" data-testid="native-fps"
++            >{{ Math.round(nativeFps) }}&nbsp;FPS detection &ndash; {{ nativeLatency.toFixed(1) }} ms latency</span
++          >
++        </template>
++        <template v-else>
++          <span class="pr-1">{{ Math.round(useStateStore().currentPipelineResults?.fps || 0) }}&nbsp;FPS &ndash;</span
++          ><span>{{ performanceRecommendation }}</span>
++        </template>
+       </v-chip>
+       <v-chip v-else label variant="text" color="red" style="font-size: 1rem; padding: 0; margin: 0">
+         <span class="pr-1"> Camera not connected </span>
+@@ -95,6 +106,14 @@ const performanceRecommendation = computed<string>(() => {
+         <v-btn size="small" variant="text" @click="setRobotState({ idleWhileDisabled: false })">Full speed</v-btn>
+       </template>
+     </v-alert>
++    <div
++      v-if="nativeFps !== undefined && useCameraSettingsStore().currentCameraSettings.isConnected"
++      data-testid="preview-label"
++      class="ml-3 mr-3 mb-1 text-caption text-medium-emphasis"
++    >
++      Preview {{ Math.round(useStateStore().currentPipelineResults?.fps || 0) }} fps (screen only; detection runs at
++      {{ Math.round(nativeFps) }} fps)
++    </div>
+     <v-divider class="ml-3 mr-3" />
+     <v-row class="stream-viewer-container pa-3 align-center">
+       <v-col v-if="value?.includes(0)" class="stream-view">
+diff --git a/photon-client/src/types/PhotonTrackingTypes.ts b/photon-client/src/types/PhotonTrackingTypes.ts
+index 19212407..4de05475 100644
+--- a/photon-client/src/types/PhotonTrackingTypes.ts
++++ b/photon-client/src/types/PhotonTrackingTypes.ts
+@@ -74,6 +74,10 @@ export interface PipelineResult {
+   sequenceID: number;
+   fps: number;
+   latency: number;
++  // Spectrum (photonvision-139): native cameras detect every frame natively; fps/latency above are the
++  // capped Java preview's. Present only while the camera publishes natively.
++  nativeFps?: number;
++  nativeLatency?: number;
+   // Focus pipeline
+   focus?: number;
+   targets: PhotonTarget[];
+diff --git a/photon-core/src/main/java/org/photonvision/common/dataflow/websocket/UIDataPublisher.java b/photon-core/src/main/java/org/photonvision/common/dataflow/websocket/UIDataPublisher.java
+index f7ed5060..b423f7f5 100644
+--- a/photon-core/src/main/java/org/photonvision/common/dataflow/websocket/UIDataPublisher.java
++++ b/photon-core/src/main/java/org/photonvision/common/dataflow/websocket/UIDataPublisher.java
+@@ -37,10 +37,18 @@ public class UIDataPublisher implements CVPipelineResultConsumer {
+     private final String uniqueName;
+     private long lastUIResultUpdateTime = 0;
+ 
++    // SpectrumJetson (photonvision-139): {native fps, native latency ms}, each -1 when not native
++    private volatile java.util.function.Supplier<double[]> nativeStats = () -> null;
++
+     public UIDataPublisher(String uniqueName) {
+         this.uniqueName = uniqueName;
+     }
+ 
++    /** The camera's native detection stats, shown as the real rate (the UI fps is the preview's). */
++    public void setNativeStats(java.util.function.Supplier<double[]> nativeStats) {
++        this.nativeStats = nativeStats;
++    }
++
+     @Override
+     public void accept(CVPipelineResult result) {
+         long now = System.nanoTime() / 1_000_000; // SpectrumJetson (photonvision-65): monotonic
+@@ -54,6 +62,11 @@ public class UIDataPublisher implements CVPipelineResultConsumer {
+         dataMap.put("sequenceID", result.sequenceID);
+         dataMap.put("fps", result.fps);
+         dataMap.put("latency", result.getLatencyMillis());
++        double[] nat = nativeStats.get();
++        if (nat != null && nat[0] >= 0) {
++            dataMap.put("nativeFps", nat[0]);
++            dataMap.put("nativeLatency", nat[1]);
++        }
+         List<Map<String, Object>> uiTargets = new ArrayList<>(result.targets.size());
+ 
+         // We don't actually need to send targets during calibration and it can take up a lot (up to
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java b/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
+index 65cb0b9f..2c51600c 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/CameraHealthPublisher.java
+@@ -161,14 +161,21 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+         var nativePub = org.photonvision.vision.pipe.impl.NativePublish.current();
+         if (nativePub != null && nativePub.active() && nativePub.published() >= 0) {
+             long pub = nativePub.published();
+-            if (nativeAtWindowStart >= 0) fps.set((pub - nativeAtWindowStart) / window);
++            if (nativeAtWindowStart >= 0) {
++                double f = (pub - nativeAtWindowStart) / window;
++                fps.set(f);
++                nativeFps = f;
++            }
+             nativeAtWindowStart = pub;
+             latencyMs.set(nativePub.latencyMs());
++            nativeLatencyMs = nativePub.latencyMs();
+             frames.set(pub);
+             int[] pol = nativePub.activePolicy();
+             policyProcessEvery.set(pol[2]);
+         } else {
+             nativeAtWindowStart = -1;
++            nativeFps = -1;
++            nativeLatencyMs = -1;
+             fps.set(count / window);
+             latencyMs.set(count > 0 ? sumLatencyMs / count : 0);
+             frames.set(total);
+@@ -182,6 +189,21 @@ public class CameraHealthPublisher implements CVPipelineResultConsumer {
+         sumMs = maxMs = sumLatencyMs = 0;
+     }
+ 
++    // SpectrumJetson (photonvision-139): the native detection rate and capture -> publish latency
++    // (mean over the last ~1 s window) for the web UI, whose own fps is the capped Java preview's;
++    // -1 while this camera isn't publishing natively.
++    private volatile double nativeFps = -1, nativeLatencyMs = -1;
++
++    /** Frames detected and published natively per second over the last window, or -1. */
++    public double nativeFps() {
++        return nativeFps;
++    }
++
++    /** Mean native capture -> publish latency over the last window, ms, or -1. */
++    public double nativeLatencyMs() {
++        return nativeLatencyMs;
++    }
++
+     /** (Re)creates the topics when the camera is first seen or renamed. */
+     private synchronized void ensurePublishers() {
+         String name = nickname.get();
+diff --git a/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java b/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
+index 0589b0e7..99ea766e 100644
+--- a/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
++++ b/photon-core/src/main/java/org/photonvision/vision/processes/VisionModule.java
+@@ -202,7 +202,7 @@ public class VisionModule implements AutoCloseable {
+         resultConsumers.addAll(extraConsumers);
+         // SpectrumJetson: this camera's health on NetworkTables (from photonvision-16's camera half):
+         // recoveries (photonvision-29), problem (-31), state and lastFrameAgeMs (-81).
+-        resultConsumers.add(
++        var health =
+                 new CameraHealthPublisher(
+                         () -> visionSource.getSettables().getConfiguration().nickname,
+                         () ->
+@@ -246,7 +246,11 @@ public class VisionModule implements AutoCloseable {
+                                                         instanceof
+                                                         org.photonvision.vision.frame.provider.NativeFrameProvider nat
+                                                 ? nat.getLastFrameAgeMs()
+-                                                : -1));
++                                                : -1);
++        resultConsumers.add(health);
++        // SpectrumJetson (photonvision-139): the web UI shows the native rate as the real one
++        uiDataConsumer.setNativeStats(
++                () -> new double[] {health.nativeFps(), health.nativeLatencyMs()});
+         // SpectrumJetson: the camera's mount (height, pitch, roll) from the tags it sees
+         // (photonvision-17).
+         resultConsumers.add(
+-- 
+2.55.0.windows.2
+
