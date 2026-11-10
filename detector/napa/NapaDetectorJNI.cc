@@ -437,6 +437,11 @@ struct NativeCam {
   std::string dev;
   int fd = -1, w = 0, h = 0, nbuf = 0;
   uint8_t *buf[8] = {};
+  // The queued buffers in QBUF order: the driver fills them in this order, so the front is the one whose bytes land
+  // next. Index order (next = i + 1) went wrong once a buffer was requeued out of turn: the thread then decoded the
+  // newest frame while DQBUF handed back one 1-2 frames older, whose stamp it published (Thriftiest 1280x400 at
+  // 196 fps: capture -> publish 10.4 / 15.4 ms instead of 5.4, the tags' timestamps 5-10 ms too old).
+  std::deque<int> order;
   size_t blen[8] = {};
   std::thread th;
   std::atomic<bool> stop{false};
@@ -543,6 +548,7 @@ struct NativeCam {
     rb.count = 4, rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, rb.memory = V4L2_MEMORY_MMAP;
     if (xioctl(VIDIOC_REQBUFS, &rb) || rb.count < 2) return false;
     nbuf = std::min<int>(rb.count, 8);
+    order.clear();
     for (int i = 0; i < nbuf; i++) {
       v4l2_buffer b{};
       b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, b.memory = V4L2_MEMORY_MMAP, b.index = i;
@@ -552,6 +558,7 @@ struct NativeCam {
       buf[i] = static_cast<uint8_t *>(m), blen[i] = b.length;
       wipe(i);
       if (xioctl(VIDIOC_QBUF, &b)) return false;
+      order.push_back(i);
     }
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     step = "STREAMON";
@@ -598,6 +605,7 @@ struct NativeCam {
       b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, b.memory = V4L2_MEMORY_MMAP;
       if (xioctl(VIDIOC_DQBUF, &b) == 0) {
         last_buf_ns = mono();
+        order.erase(std::remove(order.begin(), order.end(), static_cast<int>(b.index)), order.end());
         return static_cast<int>(b.index);
       }
       if (errno != EAGAIN) {
@@ -614,7 +622,7 @@ struct NativeCam {
     wipe(i);
     v4l2_buffer b{};
     b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, b.memory = V4L2_MEMORY_MMAP, b.index = i;
-    xioctl(VIDIOC_QBUF, &b);
+    if (xioctl(VIDIOC_QBUF, &b) == 0) order.push_back(i);
   }
   // The camera thread's name (top -H, /proc/<pid>/task/<tid>/comm): "Cam " + the camera's serial from its by-id
   // path ("Cam SJ-05", "Cam SJ-SW01") or its USB port from a by-path one (a camera without a serial: "Cam xhci0-1"), so per-camera CPU can be told apart. Linux allows 15 characters. It used to be "SpectrumCamera" for all.
@@ -641,8 +649,8 @@ struct NativeCam {
     pthread_setname_np(pthread_self(), thread_name().c_str());
     std::unique_ptr<mjdec, void (*)(mjdec *)> mj(mjdec_create(), mjdec_destroy);
     std::vector<uint8_t> img(static_cast<size_t>(w) * h);
-    int next = 0;  // the driver fills the queued buffers in queue order
     while (!stop && alive()) {
+      const int next = order.empty() ? 0 : order.front();  // the driver fills the queued buffers in queue order
       uint8_t *p = buf[next];
       // the frame's first bytes
       const int64_t wait0 = mono();
@@ -650,7 +658,7 @@ struct NativeCam {
         v4l2_buffer b;
         if (mono() - wait0 > 300000000LL) {  // nothing for 300 ms: resynchronise on whatever completes
           const int i = dqbuf(b, 0);
-          if (i >= 0) requeue(i), next = (i + 1) % nbuf;
+          if (i >= 0) requeue(i);
           if (mono() - wait0 > 2000000000LL) break;
         }
         wait_bytes();
@@ -707,7 +715,11 @@ struct NativeCam {
         continue;
       }
       const int64_t stamp = static_cast<int64_t>(b.timestamp.tv_sec) * 1000000000LL + b.timestamp.tv_usec * 1000LL;
-      if (fed) {
+      if (fed && i != next) {  // not the frame decoded (out of turn): its stamp isn't this result's
+        sink->no_publish = true;
+        sink->c.free_result(sink->c.finish(sink));
+        sink->no_publish = false;
+      } else if (fed) {
         sink->t_cam_direct = (b.flags & V4L2_BUF_FLAG_ERROR) ? 0 : stamp;
         sink->c.free_result(sink->c.finish(sink));  // publishes (pose, result, quality, health counters)
         sink->t_cam_direct = 0;
@@ -734,7 +746,6 @@ struct NativeCam {
           rec_kept += rewind_push(rw, buf[i], b.bytesused, w, h, stamp / 1000, 0);
       }
       requeue(i);
-      next = (i + 1) % nbuf;
     }
     if (dead) {
       release_dev();
