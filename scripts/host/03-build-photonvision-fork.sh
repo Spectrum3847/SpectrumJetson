@@ -19,12 +19,12 @@ OUT=$REPO_ROOT/out
 
 mkdir -p "$T" "$OUT"
 
-# Pinned, with their published SHA-256s, so a rebuild months later gets the same tools: the
-# versions that built the 2026-10-01 jars. (Moving one: change the version and the hash together.)
+# Pinned, with their published SHA-256s, so a rebuild months later gets the same tools.
+# (Moving one: change the version and the hash together.)
 NODE_VERSION=v22.23.3
 NODE_SHA256=df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de
-JDK_VERSION=17.0.20.1+1
-JDK_SHA256=3808d1d15e3ec6bd5b84057fb5d84c33d8a1536a258146bcea2e603fc726e08e
+JDK_VERSION=17.0.21.1+2
+JDK_SHA256=0b0ac5eab6db6abaec68c9913bcddb31321e5da411c45073d520d9c125e6f7b4
 PNPM_VERSION=10.34.5
 if [[ ! -x $T/node/bin/node ]]; then
   echo "==> Installing Node $NODE_VERSION to $T"
@@ -33,12 +33,12 @@ if [[ ! -x $T/node/bin/node ]]; then
     && echo "$NODE_SHA256  $tarball" | sha256sum -c - \
     && tar xf "$tarball" && ln -sfn "${tarball%.tar.xz}" node)
 fi
-if [[ ! -x $T/jdk17/bin/java ]]; then
+if ! grep -qsx "JAVA_RUNTIME_VERSION=\"$JDK_VERSION\"" "$T/jdk17/release"; then
   echo "==> Installing Temurin JDK $JDK_VERSION to $T"
   curl -fsSL -o "$T/jdk17.tar.gz" \
     "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-${JDK_VERSION/+/%2B}/OpenJDK17U-jdk_x64_linux_hotspot_${JDK_VERSION/+/_}.tar.gz"
   echo "$JDK_SHA256  $T/jdk17.tar.gz" | sha256sum -c -
-  mkdir -p "$T/jdk17" && tar xf "$T/jdk17.tar.gz" -C "$T/jdk17" --strip-components=1
+  rm -rf "$T/jdk17" && mkdir -p "$T/jdk17" && tar xf "$T/jdk17.tar.gz" -C "$T/jdk17" --strip-components=1
 fi
 
 export PATH=$T/node/bin:$T/jdk17/bin:$PATH
